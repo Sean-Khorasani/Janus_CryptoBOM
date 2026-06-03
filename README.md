@@ -2,6 +2,8 @@
 
 Janus CryptoBOM is an enterprise-grade, post-quantum cryptographic posture management (PQC-PM), discovery, and automated migration suite. This document serves as the foundational technical blueprint for building the multi-tier platform.
 
+![Janus CryptoBOM Dashboard Preview](docs/images/dashboard_preview.png)
+
 ---
 
 ## Ecosystem & Similar Solutions
@@ -116,6 +118,9 @@ Janus CryptoBOM is a crypto posture management and PQC migration foundation. It 
 - **[agent/](file:///D:/src/Janus_CryptoBOM/agent)**: Rust endpoint agent with passive discovery, binary/source/config/dependency scanners, offline SQLite cache, and signed active-mode mutation support.
 - **[ui/](file:///D:/src/Janus_CryptoBOM/ui)**: React/Tailwind dashboard for posture, CBOM exploration, and migration operations.
 - **[infra/](file:///D:/src/Janus_CryptoBOM/infra)**: Local deployment and infrastructure assets.
+- **[docs/](file:///D:/src/Janus_CryptoBOM/docs)**: Documentation and artifact samples, including:
+  - **[sample-agent-report.html](file:///D:/src/Janus_CryptoBOM/docs/sample-agent-report.html)**: An example HTML report generated on-host by the agent.
+  - **[sample-agent.sarif](file:///D:/src/Janus_CryptoBOM/docs/sample-agent.sarif)**: An example SARIF output displaying identified legacy crypto algorithms and locations.
 
 The implementation deliberately treats runtime and memory discovery as secret-safe telemetry. It records crypto metadata and HMAC fingerprints only; raw key/session/plaintext capture is not implemented as a routine operating mode.
 
