@@ -1,0 +1,187 @@
+syntax = "proto3";
+
+package janus.v1;
+
+option go_package = "github.com/janus-cbom/janus/server/internal/pb;pb";
+
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  EXECUTION_MODE_PASSIVE = 1;
+  EXECUTION_MODE_ACTIVE = 2;
+}
+
+enum CryptoRole {
+  CRYPTO_ROLE_UNSPECIFIED = 0;
+  CRYPTO_ROLE_KEM = 1;
+  CRYPTO_ROLE_KEY_EXCHANGE = 2;
+  CRYPTO_ROLE_SIGNATURE = 3;
+  CRYPTO_ROLE_CERT_PUBLIC_KEY = 4;
+  CRYPTO_ROLE_CERT_SIGNATURE = 5;
+  CRYPTO_ROLE_SYMMETRIC = 6;
+  CRYPTO_ROLE_HASH = 7;
+  CRYPTO_ROLE_MAC = 8;
+  CRYPTO_ROLE_KDF = 9;
+  CRYPTO_ROLE_RANDOM = 10;
+  CRYPTO_ROLE_KEY_STORAGE = 11;
+}
+
+enum RiskSeverity {
+  RISK_SEVERITY_UNSPECIFIED = 0;
+  RISK_SEVERITY_INFO = 1;
+  RISK_SEVERITY_LOW = 2;
+  RISK_SEVERITY_MEDIUM = 3;
+  RISK_SEVERITY_HIGH = 4;
+  RISK_SEVERITY_CRITICAL = 5;
+}
+
+enum MigrationState {
+  MIGRATION_STATE_UNSPECIFIED = 0;
+  MIGRATION_STATE_PENDING = 1;
+  MIGRATION_STATE_LOCKED = 2;
+  MIGRATION_STATE_APPLYING = 3;
+  MIGRATION_STATE_VALIDATING = 4;
+  MIGRATION_STATE_ROLLING_BACK = 5;
+  MIGRATION_STATE_SUCCEEDED = 6;
+  MIGRATION_STATE_FAILED = 7;
+}
+
+message AgentRegistration {
+  string host_uuid = 1;
+  string hostname = 2;
+  repeated string hardware_signatures = 3;
+  string os_name = 4;
+  string os_version = 5;
+  string arch = 6;
+  ExecutionMode execution_mode = 7;
+  string agent_version = 8;
+  repeated string capabilities = 9;
+  int64 registered_at_unix = 10;
+}
+
+message AgentRegistrationAck {
+  string host_uuid = 1;
+  bool accepted = 2;
+  string controller_id = 3;
+  string policy_version = 4;
+  repeated string enabled_capabilities = 5;
+  string message = 6;
+}
+
+message CbomTelemetryPayload {
+  string telemetry_id = 1;
+  string host_uuid = 2;
+  int64 scan_started_unix = 3;
+  int64 scan_finished_unix = 4;
+  repeated CbomComponent components = 5;
+  repeated CryptoFinding findings = 6;
+  repeated NetworkObservation network_observations = 7;
+  repeated Evidence evidence = 8;
+  string cyclone_dx_json = 9;
+}
+
+message CbomComponent {
+  string bom_ref = 1;
+  string name = 2;
+  string version = 3;
+  string component_type = 4;
+  string purl = 5;
+  string file_path = 6;
+  string language = 7;
+  repeated CryptoAlgorithm algorithms = 8;
+  repeated string dependencies = 9;
+  bool reachable = 10;
+}
+
+message CryptoAlgorithm {
+  string name = 1;
+  string family = 2;
+  CryptoRole role = 3;
+  string status = 4;
+  uint32 key_bits = 5;
+  string curve = 6;
+  string implementation_library = 7;
+  string source_file = 8;
+  uint32 source_line = 9;
+  uint32 source_column = 10;
+  string symbol = 11;
+  double confidence = 12;
+  bool quantum_vulnerable = 13;
+}
+
+message CryptoFinding {
+  string finding_id = 1;
+  RiskSeverity severity = 2;
+  string title = 3;
+  string description = 4;
+  string asset_ref = 5;
+  string algorithm = 6;
+  string policy_rule_id = 7;
+  repeated string evidence_ids = 8;
+  string migration_profile = 9;
+}
+
+message NetworkObservation {
+  string endpoint = 1;
+  string protocol = 2;
+  string tls_version = 3;
+  string cipher_suite = 4;
+  string named_group = 5;
+  string signature_algorithm = 6;
+  string certificate_subject = 7;
+  string certificate_issuer = 8;
+  int64 certificate_not_after_unix = 9;
+  bool pqc_hybrid = 10;
+  bool cleartext = 11;
+}
+
+message Evidence {
+  string evidence_id = 1;
+  string source_type = 2;
+  string source_tool = 3;
+  string target = 4;
+  int64 collection_time_unix = 5;
+  string raw_artifact_sha256 = 6;
+  double confidence = 7;
+  string sensitivity_class = 8;
+}
+
+message MigrationCommand {
+  string command_id = 1;
+  string host_uuid = 2;
+  string target_service = 3;
+  string migration_profile = 4;
+  string target_kem = 5;
+  string target_signature = 6;
+  string config_path = 7;
+  repeated string validation_checklist = 8;
+  uint32 rollback_window_seconds = 9;
+  string patch_unified_diff = 10;
+  bytes signed_directive = 11;
+  int64 issued_at_unix = 12;
+  bool dry_run = 13;
+}
+
+message MigrationStatusReport {
+  string command_id = 1;
+  string host_uuid = 2;
+  MigrationState state = 3;
+  bool success = 4;
+  string error_vector = 5;
+  string output = 6;
+  repeated string validation_signatures = 7;
+  NetworkObservation observed_tls = 8;
+  int64 reported_at_unix = 9;
+}
+
+message MigrationStatusAck {
+  string command_id = 1;
+  bool accepted = 2;
+  string message = 3;
+}
+
+service JanusTelemetry {
+  rpc RegisterAgent(AgentRegistration) returns (AgentRegistrationAck);
+  rpc StreamTelemetry(stream CbomTelemetryPayload) returns (stream MigrationCommand);
+  rpc ReportMigrationStatus(stream MigrationStatusReport) returns (MigrationStatusAck);
+}
+

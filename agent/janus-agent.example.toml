@@ -1,0 +1,26 @@
+controller_endpoint = "http://127.0.0.1:9443"
+execution_mode = "passive"
+cache_path = "janus-agent.sqlite3"
+host_uuid_path = "janus-host-id"
+report_path = "janus-agent-report.html"
+sarif_path = "janus-agent.sarif"
+scan_interval_seconds = 900
+max_file_bytes = 2097152
+max_binary_bytes = 16777216
+command_signing_key = "local-development-command-signing-key"
+
+scan_roots = ["."]
+exclude_dirs = [".git", "target", "node_modules", "dist", ".venv", "__pycache__"]
+network_targets = ["127.0.0.1:443"]
+plugin_dirs = ["plugins"]
+
+[[plugin_commands]]
+name = "windows-cng-capabilities"
+command = "certutil"
+args = ["-csplist"]
+timeout_seconds = 20
+
+[active]
+allowed_services = ["nginx", "apache", "ssh", "windows-trust-store", "windows-schannel-policy"]
+allowed_config_roots = ["."]
+backup_dir = ".janus-backups"

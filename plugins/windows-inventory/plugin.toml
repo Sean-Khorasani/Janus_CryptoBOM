@@ -1,0 +1,4 @@
+name = "windows-crypto-inventory"
+command = "powershell"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "janus-windows-crypto-inventory.ps1", "-Format", "Json"]
+timeout_seconds = 45
