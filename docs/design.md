@@ -41,7 +41,7 @@
 +--+----------------------------------------------------------------------------------------------------+--+
 
 ```
-## 1.1 Discovery & Passive Mapping (Phase 1)
+## 1.1 Discovery & Passive Mapping
 
 * Cryptographic Bill of Materials (CBOM) Generation: Multi-language source code scanning (C/C++, Go, Rust, Java, Python, .NET) to construct a valid CycloneDX v1.6 CBOM with cryptographic extensions.
 * Static Binary Analysis: Automated parsing of compiled assets (ELF, PE, Mach-O) to flag statically or dynamically linked cryptographic modules (OpenSSL, BoringSSL, LibreSSL, WolfSSL).
@@ -49,7 +49,7 @@
 * Network & Infrastructure Sweeper: Deep packet inspection and active port scanning to inventory cipher configurations across corporate infrastructure, SSH daemons, web servers, database endpoints, and appliances.
 * OS/Hardware Cryptographic Asset Inventory: Mapping of underlying hardware components, including Hardware Security Modules (HSMs), Trusted Platform Modules (TPMs), and OS-native crypto abstractions (Windows CNG, macOS CryptoTokenKit, Linux /proc/sys/crypto).
 
-## 1.2 Active Migration Orchestration (Phase 2)
+## 1.2 Active Migration Orchestration
 
 * Local CA Integration / Automation Protocol Link: Direct programmatic control over internal Certificate Authorities via automated protocols (ACME, EST, CMP), specifically requesting hybrid and post-quantum certificate profiles.
 * Targeted Configuration Mutators: Scriptable execution modules capable of editing web server structures (Nginx, Apache), directory services, and network node configurations to enforce post-quantum rules.
@@ -124,7 +124,7 @@ The Central Server runs a high-performance Go backend coupled to a decoupled sin
 * Migration Pipeline State Table: Coordinates real-time scheduling, software patching sequences, rollbacks, and verification logs.
 
 ## 3.2 Agent Framework Architecture
-The agent is written in Rust to guarantee low overhead and memory safety. It uses a decoupled modular design that runs completely in user space during Phase 1 (Passive) operations.
+The agent is written in Rust to guarantee low overhead and memory safety. It uses a decoupled modular design that runs completely in user space during Passive operations.
 ```
 
                                      JANUS AGENT ARCHITECTURE
@@ -163,7 +163,7 @@ The agent is written in Rust to guarantee low overhead and memory safety. It use
 +---------------------------------------------------------------------------------------------------------+
 
 ```
-## 3.3 System Control Workflows## Phase 1 Network & Asset Processing Sequence
+## 3.3 System Control Workflows## Network & Asset Processing Sequence
 
    1. The Central Server distributes a scheduler policy payload to the agent.
    2. The Local Core Engine verifies the file's digital signature and updates its active scan scope.
@@ -171,7 +171,7 @@ The agent is written in Rust to guarantee low overhead and memory safety. It use
    4. The agent matches structural findings against NIST post-quantum compliance criteria.
    5. Results are packaged into a standard CycloneDX CBOM format and synced to the central server via gRPC.
 
-## Phase 2 Active Migration Sequence
+## Active Migration Sequence
 
    1. The system administrator selects a cluster of vulnerable hosts from the central interface and requests an upgrade to modern PQC standards (e.g., migrating an RSA configuration to ML-KEM).
    2. The Central Server issues an encrypted orchestration directive to the target agents.
