@@ -91,15 +91,15 @@ CREATE TABLE IF NOT EXISTS sync_audit (
 fn protect(data: &[u8]) -> Result<String> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
-    use windows_sys::Win32::System::Memory::LocalFree;
+    use windows_sys::Win32::Foundation::LocalFree;
 
-    let mut input = DATA_BLOB {
+    let mut input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr() as *mut u8,
     };
-    let mut output = DATA_BLOB {
+    let mut output = CRYPT_INTEGER_BLOB {
         cbData: 0,
         pbData: null_mut(),
     };
@@ -129,19 +129,19 @@ fn protect(data: &[u8]) -> Result<String> {
 fn unprotect(raw: &str) -> Result<Vec<u8>> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
-    use windows_sys::Win32::System::Memory::LocalFree;
+    use windows_sys::Win32::Foundation::LocalFree;
 
     let Some(encoded) = raw.strip_prefix("dpapi:") else {
         return Ok(raw.as_bytes().to_vec());
     };
     let mut protected = STANDARD.decode(encoded)?;
-    let mut input = DATA_BLOB {
+    let mut input = CRYPT_INTEGER_BLOB {
         cbData: protected.len() as u32,
         pbData: protected.as_mut_ptr(),
     };
-    let mut output = DATA_BLOB {
+    let mut output = CRYPT_INTEGER_BLOB {
         cbData: 0,
         pbData: null_mut(),
     };

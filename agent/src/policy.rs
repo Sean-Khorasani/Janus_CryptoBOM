@@ -17,6 +17,27 @@ pub fn assess(payload: &mut CbomTelemetryPayload) {
     }
 }
 
+fn find_evidence_ids(payload: &CbomTelemetryPayload, asset_ref: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut clean_ref = asset_ref.to_string();
+    if let Some(idx) = asset_ref.find(':') {
+        clean_ref = asset_ref[idx + 1..].to_string();
+    }
+    let clean_ref_normalized = clean_ref.replace('/', "\\");
+
+    for ev in &payload.evidence {
+        let ev_target_normalized = ev.target.replace('/', "\\");
+        if ev.target == asset_ref 
+            || ev_target_normalized == clean_ref_normalized 
+            || (clean_ref_normalized.len() > 4 && ev_target_normalized.contains(&clean_ref_normalized))
+            || (ev_target_normalized.len() > 4 && clean_ref_normalized.contains(&ev_target_normalized))
+        {
+            ids.push(ev.evidence_id.clone());
+        }
+    }
+    ids
+}
+
 fn assess_algorithm(
     payload: &mut CbomTelemetryPayload,
     component: &CbomComponent,
@@ -35,15 +56,36 @@ fn assess_algorithm(
             component.bom_ref, alg.name, alg.role
         );
         let mut rule = "JANUS-PQC-001";
-        if name.contains("RSA") && alg.key_bits > 0 && alg.key_bits < 3072 {
-            severity = RiskSeverity::Critical;
-            title = "RSA key size below 2026 transition threshold".to_string();
+        let mut profile = "hybrid-tls13-mlkem-mldsa";
+        let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
+
+        if alg.role == CryptoRole::CertSignature as i32 || alg.role == CryptoRole::Signature as i32 || alg.role == CryptoRole::CertPublicKey as i32 {
+            title = "Classical public-key signature cryptography is quantum-vulnerable".to_string();
             desc = format!(
-                "{} uses RSA-{}; minimum transitional threshold is RSA-3072 and target state is PQC/hybrid.",
-                component.bom_ref, alg.key_bits
+                "{} uses {} for {}. Migrate to PQC signature standard ML-DSA-65 or SLH-DSA.",
+                component.bom_ref, alg.name, role_name(alg.role)
             );
-            rule = "JANUS-PQC-002";
+            rule = "JANUS-PQC-001";
+            profile = "certificate-signature-modernization";
+            if name.contains("RSA") && alg.key_bits > 0 && alg.key_bits < 3072 {
+                severity = RiskSeverity::Critical;
+                title = "RSA key size below 2026 transition threshold".to_string();
+                desc = format!(
+                    "{} uses RSA-{}; minimum transitional threshold is RSA-3072. Migrate to signature standard ML-DSA-65.",
+                    component.bom_ref, alg.key_bits
+                );
+                rule = "JANUS-PQC-002";
+            }
+        } else {
+            title = "Classical key exchange / KEM cryptography is quantum-vulnerable".to_string();
+            desc = format!(
+                "{} uses {} for {}. Migrate to hybrid/PQC key establishment standard X25519MLKEM768 (ML-KEM).",
+                component.bom_ref, alg.name, role_name(alg.role)
+            );
+            rule = "JANUS-PQC-007";
+            profile = "hybrid-tls13-key-exchange";
         }
+
         push_finding(
             payload,
             severity,
@@ -52,12 +94,14 @@ fn assess_algorithm(
             &component.bom_ref,
             &alg.name,
             rule,
-            "hybrid-tls13-mlkem-mldsa",
+            profile,
+            evidence_ids,
         );
         return;
     }
 
     if name.contains("MD5") || name.contains("SHA1") || name.contains("SHA-1") {
+        let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
         push_finding(
             payload,
             RiskSeverity::High,
@@ -70,10 +114,12 @@ fn assess_algorithm(
             &alg.name,
             "JANUS-CLASSICAL-003",
             "hash-modernization",
+            evidence_ids,
         );
     }
 
     if name.contains("AES-128") && alg.role == CryptoRole::Symmetric as i32 {
+        let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
         push_finding(
             payload,
             RiskSeverity::Medium,
@@ -86,11 +132,13 @@ fn assess_algorithm(
             &alg.name,
             "JANUS-PQC-004",
             "symmetric-margin-upgrade",
+            evidence_ids,
         );
     }
 }
 
 fn assess_network(payload: &mut CbomTelemetryPayload, obs: &NetworkObservation) {
+    let evidence_ids = find_evidence_ids(payload, &obs.endpoint);
     if obs.cleartext {
         push_finding(
             payload,
@@ -101,6 +149,7 @@ fn assess_network(payload: &mut CbomTelemetryPayload, obs: &NetworkObservation) 
             "cleartext",
             "JANUS-NET-001",
             "enable-tls13-hybrid",
+            evidence_ids,
         );
         return;
     }
@@ -114,15 +163,16 @@ fn assess_network(payload: &mut CbomTelemetryPayload, obs: &NetworkObservation) 
         push_finding(
             payload,
             RiskSeverity::High,
-            "TLS endpoint is not validated as TLS 1.3",
+            "TLS 1.3 is not enabled (blocks hybrid PQC key exchange)",
             &format!(
-                "{} negotiated or reported {:?}. Target is TLS 1.3 with hybrid ECDHE-MLKEM support.",
+                "{} negotiated or reported {:?}. Hybrid post-quantum key agreement (ML-KEM) requires TLS 1.3. Enable TLS 1.3 first.",
                 obs.endpoint, obs.tls_version
             ),
             &obs.endpoint,
             &obs.cipher_suite,
             "JANUS-NET-002",
-            "tls13-hybrid-key-exchange",
+            "enable-tls13-first",
+            evidence_ids.clone(),
         );
     }
 
@@ -140,6 +190,7 @@ fn assess_network(payload: &mut CbomTelemetryPayload, obs: &NetworkObservation) 
             &obs.named_group,
             "JANUS-PQC-005",
             "X25519MLKEM768",
+            evidence_ids.clone(),
         );
     }
 
@@ -157,6 +208,7 @@ fn assess_network(payload: &mut CbomTelemetryPayload, obs: &NetworkObservation) 
             &obs.signature_algorithm,
             "JANUS-PQC-006",
             "certificate-signature-modernization",
+            evidence_ids,
         );
     }
 }
@@ -170,6 +222,7 @@ fn push_finding(
     algorithm: &str,
     rule: &str,
     profile: &str,
+    evidence_ids: Vec<String>,
 ) {
     if payload.findings.iter().any(|f| {
         f.policy_rule_id == rule && f.asset_ref == asset_ref && f.algorithm == algorithm
@@ -184,9 +237,25 @@ fn push_finding(
         asset_ref: asset_ref.to_string(),
         algorithm: algorithm.to_string(),
         policy_rule_id: rule.to_string(),
-        evidence_ids: Vec::new(),
+        evidence_ids,
         migration_profile: profile.to_string(),
     });
+}
+
+fn role_name(role: i32) -> String {
+    if role == CryptoRole::Kem as i32 {
+        "KEM".to_string()
+    } else if role == CryptoRole::KeyExchange as i32 {
+        "key exchange".to_string()
+    } else if role == CryptoRole::Signature as i32 {
+        "signature".to_string()
+    } else if role == CryptoRole::CertPublicKey as i32 {
+        "certificate public key".to_string()
+    } else if role == CryptoRole::CertSignature as i32 {
+        "certificate signature".to_string()
+    } else {
+        "cryptographic operation".to_string()
+    }
 }
 
 fn public_key_role(role: i32) -> bool {

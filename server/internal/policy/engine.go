@@ -53,6 +53,23 @@ func (e *Engine) Assess(payload *pb.CbomTelemetryPayload) {
 	}
 }
 
+func findEvidenceIDs(payload *pb.CbomTelemetryPayload, assetRef string) []string {
+	var ids []string
+	cleanRef := assetRef
+	if idx := strings.Index(assetRef, ":"); idx != -1 {
+		cleanRef = assetRef[idx+1:]
+	}
+	cleanRef = strings.ReplaceAll(cleanRef, "/", "\\")
+
+	for _, ev := range payload.Evidence {
+		evTarget := strings.ReplaceAll(ev.Target, "/", "\\")
+		if ev.Target == assetRef || evTarget == cleanRef || (len(cleanRef) > 4 && strings.Contains(evTarget, cleanRef)) || (len(evTarget) > 4 && strings.Contains(cleanRef, evTarget)) {
+			ids = append(ids, ev.EvidenceId)
+		}
+	}
+	return ids
+}
+
 func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb.CbomComponent, alg *pb.CryptoAlgorithm) {
 	name := strings.ToUpper(alg.Name)
 	family := strings.ToUpper(alg.Family)
@@ -63,20 +80,32 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 		alg.QuantumVulnerable = true
 		alg.Status = "quantum-vulnerable"
 		severity := pb.RiskSeverityHigh
-		title := "Classical public-key cryptography is quantum-vulnerable"
-		desc := fmt.Sprintf("%s uses %s for %s. Migrate to hybrid/PQC profile %s + %s where supported.", component.BomRef, alg.Name, roleName(alg.Role), e.profile.PreferredKEM, e.profile.PreferredSignature)
-		rule := "JANUS-PQC-001"
-		if strings.Contains(name, "RSA") && alg.KeyBits > 0 && alg.KeyBits < e.profile.MinimumRSAKeyBits {
-			severity = pb.RiskSeverityCritical
-			title = "RSA key size below 2026 transition threshold"
-			desc = fmt.Sprintf("%s uses RSA-%d; minimum transitional threshold is RSA-%d and target state is PQC/hybrid.", component.BomRef, alg.KeyBits, e.profile.MinimumRSAKeyBits)
-			rule = "JANUS-PQC-002"
+		var title, desc, rule, profile string
+		evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+
+		if alg.Role == pb.CryptoRoleCertSignature || alg.Role == pb.CryptoRoleSignature || alg.Role == pb.CryptoRoleCertPublicKey {
+			title = "Classical public-key signature cryptography is quantum-vulnerable"
+			desc = fmt.Sprintf("%s uses %s for %s. Migrate to PQC signature standard %s (ML-DSA) or SLH-DSA.", component.BomRef, alg.Name, roleName(alg.Role), e.profile.PreferredSignature)
+			rule = "JANUS-PQC-001"
+			profile = "certificate-signature-modernization"
+			if strings.Contains(name, "RSA") && alg.KeyBits > 0 && alg.KeyBits < e.profile.MinimumRSAKeyBits {
+				severity = pb.RiskSeverityCritical
+				title = "RSA key size below 2026 transition threshold"
+				desc = fmt.Sprintf("%s uses RSA-%d; minimum transitional threshold is RSA-%d. Migrate to signature standard %s (ML-DSA).", component.BomRef, alg.KeyBits, e.profile.MinimumRSAKeyBits, e.profile.PreferredSignature)
+				rule = "JANUS-PQC-002"
+			}
+		} else {
+			title = "Classical key exchange / KEM cryptography is quantum-vulnerable"
+			desc = fmt.Sprintf("%s uses %s for %s. Migrate to hybrid/PQC key establishment standard %s (ML-KEM).", component.BomRef, alg.Name, roleName(alg.Role), e.profile.PreferredKEM)
+			rule = "JANUS-PQC-007"
+			profile = "hybrid-tls13-key-exchange"
 		}
-		appendFinding(payload, severity, title, desc, component.BomRef, alg.Name, rule, "hybrid-tls13-mlkem-mldsa")
+		appendFinding(payload, severity, title, desc, component.BomRef, alg.Name, rule, profile, evidenceIDs)
 		return
 	}
 
 	if strings.Contains(name, "MD5") || strings.Contains(name, "SHA1") || strings.Contains(name, "SHA-1") {
+		evidenceIDs := findEvidenceIDs(payload, component.BomRef)
 		appendFinding(payload,
 			pb.RiskSeverityHigh,
 			"Deprecated hash detected",
@@ -85,10 +114,12 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 			alg.Name,
 			"JANUS-CLASSICAL-003",
 			"hash-modernization",
+			evidenceIDs,
 		)
 	}
 
 	if strings.Contains(name, "AES-128") && alg.Role == pb.CryptoRoleSymmetric {
+		evidenceIDs := findEvidenceIDs(payload, component.BomRef)
 		appendFinding(payload,
 			pb.RiskSeverityMedium,
 			"AES-128 used where long-term confidentiality may require AES-256",
@@ -97,11 +128,13 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 			alg.Name,
 			"JANUS-PQC-004",
 			"symmetric-margin-upgrade",
+			evidenceIDs,
 		)
 	}
 }
 
 func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.NetworkObservation) {
+	evidenceIDs := findEvidenceIDs(payload, obs.Endpoint)
 	if obs.Cleartext {
 		appendFinding(payload,
 			pb.RiskSeverityCritical,
@@ -111,6 +144,7 @@ func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.Network
 			"cleartext",
 			"JANUS-NET-001",
 			"enable-tls13-hybrid",
+			evidenceIDs,
 		)
 		return
 	}
@@ -119,12 +153,13 @@ func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.Network
 	if strings.HasPrefix(version, "TLS1.0") || strings.HasPrefix(version, "TLS1.1") || strings.HasPrefix(version, "TLS1.2") || version == "" {
 		appendFinding(payload,
 			pb.RiskSeverityHigh,
-			"TLS endpoint is not validated as TLS 1.3",
-			fmt.Sprintf("%s negotiated or reported %q. Target is TLS 1.3 with hybrid ECDHE-MLKEM support.", obs.Endpoint, obs.TlsVersion),
+			"TLS 1.3 is not enabled (blocks hybrid PQC key exchange)",
+			fmt.Sprintf("%s negotiated or reported %q. Hybrid post-quantum key agreement (ML-KEM) requires TLS 1.3. Enable TLS 1.3 first.", obs.Endpoint, obs.TlsVersion),
 			obs.Endpoint,
 			obs.CipherSuite,
 			"JANUS-NET-002",
-			"tls13-hybrid-key-exchange",
+			"enable-tls13-first",
+			evidenceIDs,
 		)
 	}
 
@@ -138,6 +173,7 @@ func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.Network
 			obs.NamedGroup,
 			"JANUS-PQC-005",
 			"X25519MLKEM768",
+			evidenceIDs,
 		)
 	}
 
@@ -151,15 +187,18 @@ func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.Network
 			obs.SignatureAlgorithm,
 			"JANUS-PQC-006",
 			"certificate-signature-modernization",
+			evidenceIDs,
 		)
 	}
 }
 
-func appendFinding(payload *pb.CbomTelemetryPayload, severity int32, title, description, assetRef, algorithm, rule, profile string) {
+func appendFinding(payload *pb.CbomTelemetryPayload, severity int32, title, description, assetRef, algorithm, rule, profile string, evidenceIDs []string) {
 	if hasFinding(payload, assetRef, algorithm, rule) {
 		return
 	}
-	payload.Findings = append(payload.Findings, finding(severity, title, description, assetRef, algorithm, rule, profile))
+	f := finding(severity, title, description, assetRef, algorithm, rule, profile)
+	f.EvidenceIds = evidenceIDs
+	payload.Findings = append(payload.Findings, f)
 }
 
 func finding(severity int32, title, description, assetRef, algorithm, rule, profile string) *pb.CryptoFinding {

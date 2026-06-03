@@ -10,6 +10,7 @@ clap = { version = "4.5", features = ["derive"] }
 diffy = "0.4"
 hex = "0.4"
 hmac = "0.12"
+subtle = "2.6"
 hostname = "0.4"
 prost = "0.13"
 regex = "1.11"

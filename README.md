@@ -188,23 +188,94 @@ cargo build --release
 
 ---
 
-## Local Run Configuration
+## Local Run & Environment Configuration
 
+### 1. Database Setup (PostgreSQL)
+
+Janus Server stores CBOM assets, telemetry evidence, findings, and migration records in PostgreSQL. 
+
+#### A. Direct Host Installation (Windows)
+If installing PostgreSQL directly on Windows (e.g., PostgreSQL 17):
+1. Log in to the database as the superuser (`postgres`):
+   ```cmd
+   "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres
+   ```
+2. Run the following SQL queries to initialize the database schema owner and database:
+   ```sql
+   CREATE ROLE janus WITH LOGIN PASSWORD 'janus';
+   CREATE DATABASE janus OWNER janus;
+   GRANT ALL PRIVILEGES ON DATABASE janus TO janus;
+   ```
+
+> [!TIP]
+> **Authentication Configuration (`pg_hba.conf`)**
+> If you experience `password authentication failed` issues, locate your `pg_hba.conf` configuration file (typically in `C:\Program Files\PostgreSQL\17\data\pg_hba.conf`) and ensure there is an entry allowing password authentication for local connections, or temporarily configure it to `trust` for local loopback connections during development:
+> ```text
+> # TYPE  DATABASE        USER            ADDRESS                 METHOD
+> host    all             all             127.0.0.1/32            scram-sha-256
+> host    all             all             ::1/128                 scram-sha-256
+> ```
+
+#### B. Docker Container Setup
+Alternatively, if Docker is available:
 ```powershell
-# Start Postgres if Docker is available
 docker compose -f infra/docker-compose.yml up -d postgres
+```
 
-# Start server
-$env:JANUS_DATABASE_URL="postgres://janus:janus@localhost:5432/janus?sslmode=disable"
+---
+
+### 2. Starting the Server
+
+The server behaves as the central controller orchestrating gRPC telemetry from agents, processing cryptographic compliance checks, and presenting REST APIs to the UI.
+
+To launch the built server binary on Windows:
+```powershell
+# 1. Set environment variables
+$env:JANUS_DATABASE_URL="postgres://janus:janus@127.0.0.1:5432/janus?sslmode=disable"
 $env:JANUS_GRPC_ADDR="127.0.0.1:9443"
 $env:JANUS_HTTP_ADDR="127.0.0.1:8080"
-$env:JANUS_COMMAND_SIGNING_KEY="replace-with-32-byte-secret"
-server\janus-server.exe
+$env:JANUS_COMMAND_SIGNING_KEY="local-development-command-signing-key"
 
-# Start agent
-agent\target\release\janus-agent.exe --config agent\janus-agent.example.toml
+# 2. Run the server executable
+.\bin\janus-server.exe
 ```
-The example agent configuration is located at: **[agent/janus-agent.example.toml](file:///D:/src/Janus_CryptoBOM/agent/janus-agent.example.toml)**.
+
+---
+
+### 3. Running the Agent
+
+The agent is written in Rust and scans endpoints for cryptographic algorithms, active TLS settings, and certificates.
+
+To run the agent on Windows:
+1. Ensure the default configuration file `janus-agent.toml` exists at the root of the repository. You can copy the example file:
+   ```powershell
+   Copy-Item .\agent\janus-agent.example.toml -Destination .\janus-agent.toml -ErrorAction SilentlyContinue
+   ```
+2. Run a one-off telemetry scan and sync:
+   ```powershell
+   .\bin\janus-agent.exe --once
+   ```
+3. Alternatively, run the agent in daemon mode to perform periodic background scans:
+   ```powershell
+   .\bin\janus-agent.exe
+   ```
+
+*The example configuration is located at [agent/janus-agent.example.toml](file:///D:/src/Janus_CryptoBOM/agent/janus-agent.example.toml) and the main configuration file is [janus-agent.toml](file:///D:/src/Janus_CryptoBOM/janus-agent.toml).*
+
+---
+
+### 4. Running the Dashboard (React/TypeScript UI)
+
+The frontend is a single-page React app served locally with a proxy connection to the backend REST API on port `8080`.
+
+To start the Vite UI server:
+```powershell
+cd ui
+npm install
+npm run dev
+```
+Open your web browser and navigate to `http://127.0.0.1:5173` to explore findings, components, and active migration transactions.
+
 
 ---
 

@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use diffy::{apply, Patch};
-use hmac::digest::subtle::ConstantTimeEq;
+use subtle::ConstantTimeEq;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
