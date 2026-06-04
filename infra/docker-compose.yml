@@ -1,6 +1,9 @@
+version: '3.8'
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: janus-postgres
     environment:
       POSTGRES_USER: janus
       POSTGRES_PASSWORD: janus
@@ -10,7 +13,40 @@ services:
     volumes:
       - janus-postgres:/var/lib/postgresql/data
       - ./postgres/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U janus -d janus"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  janus-server:
+    build:
+      context: ../
+      dockerfile: server/Dockerfile
+    container_name: janus-server
+    ports:
+      - "8080:8080"
+      - "9443:50051"
+    environment:
+      JANUS_DATABASE_URL: "postgres://janus:janus@postgres:5432/janus?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+
+  janus-agent:
+    build:
+      context: ../agent
+      dockerfile: Dockerfile
+    container_name: janus-agent
+    volumes:
+      - ./janus-agent.compose.toml:/data/janus-agent.toml:ro
+      - janus-agent-data:/data
+      - ../:/scan:ro
+    depends_on:
+      - janus-server
+    restart: always
 
 volumes:
   janus-postgres:
-
+  janus-agent-data:

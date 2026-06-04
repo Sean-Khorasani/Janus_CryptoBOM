@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS crypto_findings (
   policy_rule_id TEXT NOT NULL,
   migration_profile TEXT NOT NULL,
   evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'open',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  confidence DOUBLE PRECISION NOT NULL DEFAULT 0.82,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS migration_transactions (
   config_path TEXT NOT NULL,
   state INTEGER NOT NULL,
   dry_run BOOLEAN NOT NULL,
+  observed_tls JSONB,
   issued_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_error TEXT NOT NULL DEFAULT '',
@@ -56,4 +61,3 @@ CREATE TABLE IF NOT EXISTS migration_transactions (
 CREATE INDEX IF NOT EXISTS idx_crypto_findings_host_uuid ON crypto_findings(host_uuid);
 CREATE INDEX IF NOT EXISTS idx_crypto_findings_severity ON crypto_findings(severity);
 CREATE INDEX IF NOT EXISTS idx_migration_transactions_host_uuid ON migration_transactions(host_uuid);
-
