@@ -25,7 +25,11 @@ func New(signingKey []byte) *Orchestrator {
 	}
 }
 
-func (o *Orchestrator) BuildCommand(hostUUID, service, profile, configPath, patch string, dryRun bool) *pb.MigrationCommand {
+func (o *Orchestrator) BuildCommand(hostUUID, service, profile, configPath, patch, checksum string, dryRun bool) *pb.MigrationCommand {
+	checklist := []string{"config-syntax", "daemon-reload", "tls13-handshake", "hybrid-mlkem-observed"}
+	if checksum != "" {
+		checklist = append(checklist, "checksum="+checksum)
+	}
 	cmd := &pb.MigrationCommand{
 		CommandId:             uuid.NewString(),
 		HostUuid:              hostUUID,
@@ -34,7 +38,7 @@ func (o *Orchestrator) BuildCommand(hostUUID, service, profile, configPath, patc
 		TargetKem:             "X25519MLKEM768",
 		TargetSignature:       "ML-DSA-65",
 		ConfigPath:            configPath,
-		ValidationChecklist:   []string{"config-syntax", "daemon-reload", "tls13-handshake", "hybrid-mlkem-observed"},
+		ValidationChecklist:   checklist,
 		RollbackWindowSeconds: 300,
 		PatchUnifiedDiff:      patch,
 		IssuedAtUnix:          time.Now().Unix(),

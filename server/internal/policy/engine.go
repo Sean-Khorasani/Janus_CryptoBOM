@@ -2,54 +2,124 @@ package policy
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/janus-cbom/janus/server/internal/pb"
+	"gopkg.in/yaml.v3"
 )
 
 type Profile struct {
-	Version               string
-	MinimumRSAKeyBits     uint32
-	MinimumDHSafePrimeBits uint32
-	RequireTLS13          bool
-	RequireHybridPQTLS13  bool
-	PreferredKEM          string
-	PreferredSignature    string
+	Version                string `yaml:"version" json:"version"`
+	MinimumRSAKeyBits      uint32 `yaml:"minimum_rsa_key_bits" json:"minimum_rsa_key_bits"`
+	MinimumDHSafePrimeBits uint32 `yaml:"minimum_dh_safe_prime_bits" json:"minimum_dh_safe_prime_bits"`
+	RequireTLS13           bool   `yaml:"require_tls_13" json:"require_tls_13"`
+	RequireHybridPQTLS13   bool   `yaml:"require_hybrid_pq_tls_13" json:"require_hybrid_pq_tls_13"`
+	PreferredKEM           string `yaml:"preferred_kem" json:"preferred_kem"`
+	PreferredSignature     string `yaml:"preferred_signature" json:"preferred_signature"`
 }
 
 type Engine struct {
-	profile Profile
+	mu       sync.RWMutex
+	active   string
+	profiles map[string]Profile
 }
 
 func NIST2026Profile() Profile {
 	return Profile{
-		Version:               "nist-pqc-2026.1",
-		MinimumRSAKeyBits:     3072,
+		Version:                "nist-pqc-2026.1",
+		MinimumRSAKeyBits:      3072,
 		MinimumDHSafePrimeBits: 3072,
-		RequireTLS13:          true,
-		RequireHybridPQTLS13:  true,
-		PreferredKEM:          "X25519MLKEM768",
-		PreferredSignature:    "ML-DSA-65",
+		RequireTLS13:           true,
+		RequireHybridPQTLS13:   true,
+		PreferredKEM:           "X25519MLKEM768",
+		PreferredSignature:     "ML-DSA-65",
 	}
 }
 
 func NewEngine(profile Profile) *Engine {
-	return &Engine{profile: profile}
+	e := &Engine{
+		profiles: make(map[string]Profile),
+		active:   profile.Version,
+	}
+	e.profiles[profile.Version] = profile
+	return e
+}
+
+func LoadEngine(policiesDir string) (*Engine, error) {
+	e := &Engine{
+		profiles: make(map[string]Profile),
+		active:   "nist-pqc-2026.1",
+	}
+
+	// Always seed NIST profile by default
+	nist := NIST2026Profile()
+	e.profiles[nist.Version] = nist
+
+	files, err := filepath.Glob(filepath.Join(policiesDir, "*.yaml"))
+	if err == nil {
+		for _, file := range files {
+			data, err := os.ReadFile(file)
+			if err != nil {
+				continue
+			}
+			var p Profile
+			if err := yaml.Unmarshal(data, &p); err == nil && p.Version != "" {
+				e.profiles[p.Version] = p
+				if strings.Contains(file, "nist-pqc-2026") {
+					e.active = p.Version
+				}
+			}
+		}
+	}
+
+	return e, nil
 }
 
 func (e *Engine) ProfileVersion() string {
-	return e.profile.Version
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.active
+}
+
+func (e *Engine) GetActiveProfile() Profile {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.profiles[e.active]
+}
+
+func (e *Engine) SetActiveProfile(version string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.profiles[version]; !ok {
+		return fmt.Errorf("profile %s not found", version)
+	}
+	e.active = version
+	return nil
+}
+
+func (e *Engine) AvailableProfiles() []Profile {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	list := make([]Profile, 0, len(e.profiles))
+	for _, p := range e.profiles {
+		list = append(list, p)
+	}
+	return list
 }
 
 func (e *Engine) Assess(payload *pb.CbomTelemetryPayload) {
+	profile := e.GetActiveProfile()
 	for _, component := range payload.Components {
 		for _, alg := range component.Algorithms {
-			e.assessAlgorithm(payload, component, alg)
+			e.assessAlgorithm(payload, component, alg, profile)
 		}
 	}
 	for _, obs := range payload.NetworkObservations {
-		e.assessNetwork(payload, obs)
+		e.assessNetwork(payload, obs, profile)
 	}
 }
 
@@ -70,7 +140,7 @@ func findEvidenceIDs(payload *pb.CbomTelemetryPayload, assetRef string) []string
 	return ids
 }
 
-func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb.CbomComponent, alg *pb.CryptoAlgorithm) {
+func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb.CbomComponent, alg *pb.CryptoAlgorithm, profile Profile) {
 	name := strings.ToUpper(alg.Name)
 	family := strings.ToUpper(alg.Family)
 	classicalPublicKey := containsAny(name, "RSA", "ECDSA", "ECDH", "ECDHE", "DH", "DSA") ||
@@ -80,27 +150,27 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 		alg.QuantumVulnerable = true
 		alg.Status = "quantum-vulnerable"
 		severity := pb.RiskSeverityHigh
-		var title, desc, rule, profile string
+		var title, desc, rule, profileName string
 		evidenceIDs := findEvidenceIDs(payload, component.BomRef)
 
 		if alg.Role == pb.CryptoRoleCertSignature || alg.Role == pb.CryptoRoleSignature || alg.Role == pb.CryptoRoleCertPublicKey {
 			title = "Classical public-key signature cryptography is quantum-vulnerable"
-			desc = fmt.Sprintf("%s uses %s for %s. Migrate to PQC signature standard %s (ML-DSA) or SLH-DSA.", component.BomRef, alg.Name, roleName(alg.Role), e.profile.PreferredSignature)
+			desc = fmt.Sprintf("%s uses %s for %s. Migrate to PQC signature standard %s (ML-DSA) or SLH-DSA.", component.BomRef, alg.Name, roleName(alg.Role), profile.PreferredSignature)
 			rule = "JANUS-PQC-001"
-			profile = "certificate-signature-modernization"
-			if strings.Contains(name, "RSA") && alg.KeyBits > 0 && alg.KeyBits < e.profile.MinimumRSAKeyBits {
+			profileName = "certificate-signature-modernization"
+			if strings.Contains(name, "RSA") && alg.KeyBits > 0 && alg.KeyBits < profile.MinimumRSAKeyBits {
 				severity = pb.RiskSeverityCritical
 				title = "RSA key size below 2026 transition threshold"
-				desc = fmt.Sprintf("%s uses RSA-%d; minimum transitional threshold is RSA-%d. Migrate to signature standard %s (ML-DSA).", component.BomRef, alg.KeyBits, e.profile.MinimumRSAKeyBits, e.profile.PreferredSignature)
+				desc = fmt.Sprintf("%s uses RSA-%d; minimum transitional threshold is RSA-%d. Migrate to signature standard %s (ML-DSA).", component.BomRef, alg.KeyBits, profile.MinimumRSAKeyBits, profile.PreferredSignature)
 				rule = "JANUS-PQC-002"
 			}
 		} else {
 			title = "Classical key exchange / KEM cryptography is quantum-vulnerable"
-			desc = fmt.Sprintf("%s uses %s for %s. Migrate to hybrid/PQC key establishment standard %s (ML-KEM).", component.BomRef, alg.Name, roleName(alg.Role), e.profile.PreferredKEM)
+			desc = fmt.Sprintf("%s uses %s for %s. Migrate to hybrid/PQC key establishment standard %s (ML-KEM).", component.BomRef, alg.Name, roleName(alg.Role), profile.PreferredKEM)
 			rule = "JANUS-PQC-007"
-			profile = "hybrid-tls13-key-exchange"
+			profileName = "hybrid-tls13-key-exchange"
 		}
-		appendFinding(payload, severity, title, desc, component.BomRef, alg.Name, rule, profile, evidenceIDs)
+		appendFinding(payload, severity, title, desc, component.BomRef, alg.Name, rule, profileName, evidenceIDs)
 		return
 	}
 
@@ -133,7 +203,7 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 	}
 }
 
-func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.NetworkObservation) {
+func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.NetworkObservation, profile Profile) {
 	evidenceIDs := findEvidenceIDs(payload, obs.Endpoint)
 	if obs.Cleartext {
 		appendFinding(payload,
@@ -164,7 +234,7 @@ func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.Network
 	}
 
 	group := strings.ToUpper(obs.NamedGroup)
-	if e.profile.RequireHybridPQTLS13 && !obs.PqcHybrid && !strings.Contains(group, "MLKEM") && !strings.Contains(group, "ML-KEM") {
+	if profile.RequireHybridPQTLS13 && !obs.PqcHybrid && !strings.Contains(group, "MLKEM") && !strings.Contains(group, "ML-KEM") {
 		appendFinding(payload,
 			pb.RiskSeverityCritical,
 			"TLS key exchange is classical-only",

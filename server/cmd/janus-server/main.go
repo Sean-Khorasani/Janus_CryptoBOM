@@ -39,7 +39,10 @@ func main() {
 		log.Fatalf("ensure schema: %v", err)
 	}
 
-	engine := policy.NewEngine(policy.NIST2026Profile())
+	engine, err := policy.LoadEngine("policies")
+	if err != nil {
+		log.Fatalf("load policy engine: %v", err)
+	}
 	orch := orchestrator.New(cfg.CommandSigningKey)
 	grpcSvc := grpcserver.New(pg, engine, orch)
 
@@ -68,7 +71,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(pg, orch),
+		Handler:           httpapi.New(pg, orch, engine),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

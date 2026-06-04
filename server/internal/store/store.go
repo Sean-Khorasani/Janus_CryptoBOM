@@ -12,6 +12,7 @@ import (
 
 type Store interface {
 	EnsureSchema(context.Context) error
+	Ping(context.Context) error
 	UpsertAgent(context.Context, *pb.AgentRegistration) error
 	InsertTelemetry(context.Context, *pb.CbomTelemetryPayload) error
 	InsertMigrationCommand(context.Context, *pb.MigrationCommand) error
@@ -20,7 +21,11 @@ type Store interface {
 	Assets(context.Context) ([]Asset, error)
 	Components(context.Context, int) ([]Component, error)
 	Findings(context.Context, int) ([]Finding, error)
+	FindingsPaginated(ctx context.Context, params QueryParams) ([]Finding, int64, error)
+	ComponentsPaginated(ctx context.Context, params QueryParams) ([]Component, int64, error)
+	UpdateFindingStatus(ctx context.Context, findingID, status, updatedBy string) error
 	Migrations(context.Context) ([]Migration, error)
+	GetLatestConfigHash(ctx context.Context, hostUUID, configPath string) (string, error)
 }
 
 type Postgres struct {
@@ -57,7 +62,20 @@ type Finding struct {
 	Algorithm        string    `json:"algorithm"`
 	PolicyRuleID     string    `json:"policy_rule_id"`
 	MigrationProfile string    `json:"migration_profile"`
+	Status           string    `json:"status"` // open | accepted_risk | false_positive | remediated
+	UpdatedBy        string    `json:"updated_by"`
+	UpdatedAt        time.Time `json:"updated_at"`
 	CreatedAt        time.Time `json:"created_at"`
+	Confidence       float64   `json:"confidence"`
+}
+
+// QueryParams is used for paginated, filtered, sorted queries.
+type QueryParams struct {
+	Limit  int
+	Offset int
+	Sort   string // column name
+	Order  string // asc | desc
+	Search string // keyword filter
 }
 
 type Component struct {
@@ -87,8 +105,9 @@ type Migration struct {
 	DryRun           bool      `json:"dry_run"`
 	IssuedAt         time.Time `json:"issued_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
-	LastError        string    `json:"last_error"`
-	Output           string    `json:"output"`
+	LastError        string                `json:"last_error"`
+	Output           string                `json:"output"`
+	ObservedTLS      *pb.NetworkObservation `json:"observed_tls,omitempty"`
 }
 
 func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
@@ -110,9 +129,22 @@ func (p *Postgres) Close() {
 	p.pool.Close()
 }
 
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 func (p *Postgres) EnsureSchema(ctx context.Context) error {
 	_, err := p.pool.Exec(ctx, schemaSQL)
-	return err
+	if err != nil {
+		return err
+	}
+	// Idempotent column additions for upgrades from older schema versions
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open'`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS updated_by TEXT NOT NULL DEFAULT ''`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0.82`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE migration_transactions ADD COLUMN IF NOT EXISTS observed_tls JSONB`)
+	return nil
 }
 
 func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration) error {
@@ -176,12 +208,32 @@ ON CONFLICT (telemetry_id) DO NOTHING`,
 		if err != nil {
 			return err
 		}
+		// Find matching algorithm's confidence
+		confidence := 0.82
+		for _, comp := range payload.Components {
+			if comp.BomRef == f.AssetRef {
+				for _, alg := range comp.Algorithms {
+					if alg.Name == f.Algorithm {
+						confidence = alg.Confidence
+						break
+					}
+				}
+			}
+		}
+		// Deduplicate: match on (asset_ref, algorithm, policy_rule_id), update severity/description if changed
 		_, err = tx.Exec(ctx, `
 INSERT INTO crypto_findings (
   finding_id, telemetry_id, host_uuid, severity, title, description, asset_ref,
-  algorithm, policy_rule_id, migration_profile, evidence_ids, created_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, now())
-ON CONFLICT (finding_id) DO NOTHING`,
+  algorithm, policy_rule_id, migration_profile, evidence_ids, status, updated_by, updated_at, created_at, confidence
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, 'open', '', now(), now(), $12)
+ON CONFLICT (asset_ref, algorithm, policy_rule_id) DO UPDATE SET
+  severity = EXCLUDED.severity,
+  title = EXCLUDED.title,
+  description = EXCLUDED.description,
+  telemetry_id = EXCLUDED.telemetry_id,
+  confidence = EXCLUDED.confidence,
+  updated_at = now()
+WHERE crypto_findings.status = 'open'`,
 			f.FindingId,
 			payload.TelemetryId,
 			payload.HostUuid,
@@ -193,6 +245,7 @@ ON CONFLICT (finding_id) DO NOTHING`,
 			f.PolicyRuleId,
 			f.MigrationProfile,
 			string(evidenceIDs),
+			confidence,
 		)
 		if err != nil {
 			return err
@@ -224,17 +277,45 @@ ON CONFLICT (command_id) DO NOTHING`,
 }
 
 func (p *Postgres) UpdateMigrationStatus(ctx context.Context, report *pb.MigrationStatusReport) error {
+	var obsJSON []byte
+	if report.ObservedTls != nil {
+		obsJSON, _ = json.Marshal(report.ObservedTls)
+	}
 	_, err := p.pool.Exec(ctx, `
 UPDATE migration_transactions
-SET state = $2, updated_at = to_timestamp($3), last_error = $4, output = $5
+SET state = $2, updated_at = to_timestamp($3), last_error = $4, output = $5, observed_tls = $6
 WHERE command_id = $1`,
 		report.CommandId,
 		report.State,
 		report.ReportedAtUnix,
 		report.ErrorVector,
 		report.Output,
+		obsJSON,
 	)
 	return err
+}
+
+func (p *Postgres) GetLatestConfigHash(ctx context.Context, hostUUID, configPath string) (string, error) {
+	var raw []byte
+	err := p.pool.QueryRow(ctx, `
+SELECT payload FROM telemetry_payloads
+WHERE host_uuid = $1
+ORDER BY received_at DESC
+LIMIT 1`, hostUUID).Scan(&raw)
+	if err != nil {
+		// If no telemetry or no row, return empty without failing
+		return "", nil
+	}
+	var payload pb.CbomTelemetryPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", err
+	}
+	for _, ev := range payload.Evidence {
+		if ev.Target == configPath && ev.RawArtifactSha256 != "" {
+			return ev.RawArtifactSha256, nil
+		}
+	}
+	return "", nil
 }
 
 func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
@@ -346,7 +427,8 @@ func (p *Postgres) Findings(ctx context.Context, limit int) ([]Finding, error) {
 		limit = 200
 	}
 	rows, err := p.pool.Query(ctx, `
-SELECT finding_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id, migration_profile, created_at
+SELECT finding_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id, migration_profile,
+       COALESCE(status,'open'), COALESCE(updated_by,''), COALESCE(updated_at, created_at), created_at, confidence
 FROM crypto_findings
 ORDER BY severity DESC, created_at DESC
 LIMIT $1`, limit)
@@ -357,7 +439,10 @@ LIMIT $1`, limit)
 	var findings []Finding
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.FindingID, &f.HostUUID, &f.Severity, &f.Title, &f.Description, &f.AssetRef, &f.Algorithm, &f.PolicyRuleID, &f.MigrationProfile, &f.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&f.FindingID, &f.HostUUID, &f.Severity, &f.Title, &f.Description, &f.AssetRef, &f.Algorithm, &f.PolicyRuleID, &f.MigrationProfile,
+			&f.Status, &f.UpdatedBy, &f.UpdatedAt, &f.CreatedAt, &f.Confidence,
+		); err != nil {
 			return nil, err
 		}
 		findings = append(findings, f)
@@ -365,10 +450,97 @@ LIMIT $1`, limit)
 	return findings, rows.Err()
 }
 
+func (p *Postgres) FindingsPaginated(ctx context.Context, params QueryParams) ([]Finding, int64, error) {
+	if params.Limit <= 0 || params.Limit > 500 {
+		params.Limit = 50
+	}
+	if params.Offset < 0 {
+		params.Offset = 0
+	}
+	allowedSort := map[string]string{
+		"severity": "severity", "algorithm": "algorithm", "asset_ref": "asset_ref",
+		"policy_rule_id": "policy_rule_id", "created_at": "created_at", "status": "status",
+	}
+	sortCol, ok := allowedSort[params.Sort]
+	if !ok {
+		sortCol = "severity"
+	}
+	order := "DESC"
+	if params.Order == "asc" {
+		order = "ASC"
+	}
+	searchFilter := ""
+	args := []any{params.Limit, params.Offset}
+	if params.Search != "" {
+		searchFilter = ` AND (title ILIKE $3 OR description ILIKE $3 OR asset_ref ILIKE $3 OR algorithm ILIKE $3 OR policy_rule_id ILIKE $3)`
+		args = append(args, "%"+params.Search+"%")
+	}
+	query := `SELECT finding_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id, migration_profile,
+				 COALESCE(status,'open'), COALESCE(updated_by,''), COALESCE(updated_at, created_at), created_at, confidence
+			  FROM crypto_findings WHERE 1=1` + searchFilter +
+		` ORDER BY ` + sortCol + ` ` + order + ` LIMIT $1 OFFSET $2`
+	rows, err := p.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var findings []Finding
+	for rows.Next() {
+		var f Finding
+		if err := rows.Scan(
+			&f.FindingID, &f.HostUUID, &f.Severity, &f.Title, &f.Description, &f.AssetRef, &f.Algorithm, &f.PolicyRuleID, &f.MigrationProfile,
+			&f.Status, &f.UpdatedBy, &f.UpdatedAt, &f.CreatedAt, &f.Confidence,
+		); err != nil {
+			return nil, 0, err
+		}
+		findings = append(findings, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	countQuery := `SELECT count(*) FROM crypto_findings WHERE 1=1` + searchFilter
+	var total int64
+	if err := p.pool.QueryRow(ctx, countQuery, args[2:]...).Scan(&total); err != nil {
+		total = int64(len(findings))
+	}
+	return findings, total, nil
+}
+
+func (p *Postgres) ComponentsPaginated(ctx context.Context, params QueryParams) ([]Component, int64, error) {
+	// Components are stored in telemetry_payloads JSON — delegate to existing Components() with limit
+	limit := params.Limit
+	if limit <= 0 || limit > 2000 {
+		limit = 100
+	}
+	comps, err := p.Components(ctx, limit+params.Offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	if params.Offset >= len(comps) {
+		return nil, int64(len(comps)), nil
+	}
+	page := comps[params.Offset:]
+	if len(page) > limit {
+		page = page[:limit]
+	}
+	return page, int64(len(comps)), nil
+}
+
+func (p *Postgres) UpdateFindingStatus(ctx context.Context, findingID, status, updatedBy string) error {
+	allowed := map[string]bool{"open": true, "accepted_risk": true, "false_positive": true, "remediated": true}
+	if !allowed[status] {
+		return errors.New("invalid status value")
+	}
+	_, err := p.pool.Exec(ctx, `
+UPDATE crypto_findings SET status=$2, updated_by=$3, updated_at=now() WHERE finding_id=$1`,
+		findingID, status, updatedBy)
+	return err
+}
+
 func (p *Postgres) Migrations(ctx context.Context) ([]Migration, error) {
 	rows, err := p.pool.Query(ctx, `
 SELECT command_id, host_uuid, target_service, migration_profile, target_kem, target_signature, config_path,
-       state, dry_run, issued_at, updated_at, last_error, output
+       state, dry_run, issued_at, updated_at, last_error, output, observed_tls
 FROM migration_transactions
 ORDER BY updated_at DESC
 LIMIT 200`)
@@ -379,8 +551,18 @@ LIMIT 200`)
 	var migrations []Migration
 	for rows.Next() {
 		var m Migration
-		if err := rows.Scan(&m.CommandID, &m.HostUUID, &m.TargetService, &m.MigrationProfile, &m.TargetKEM, &m.TargetSignature, &m.ConfigPath, &m.State, &m.DryRun, &m.IssuedAt, &m.UpdatedAt, &m.LastError, &m.Output); err != nil {
+		var obsJSON []byte
+		if err := rows.Scan(
+			&m.CommandID, &m.HostUUID, &m.TargetService, &m.MigrationProfile, &m.TargetKEM, &m.TargetSignature, &m.ConfigPath,
+			&m.State, &m.DryRun, &m.IssuedAt, &m.UpdatedAt, &m.LastError, &m.Output, &obsJSON,
+		); err != nil {
 			return nil, err
+		}
+		if len(obsJSON) > 0 {
+			var obs pb.NetworkObservation
+			if err := json.Unmarshal(obsJSON, &obs); err == nil {
+				m.ObservedTLS = &obs
+			}
 		}
 		migrations = append(migrations, m)
 	}
@@ -424,7 +606,11 @@ CREATE TABLE IF NOT EXISTS crypto_findings (
   policy_rule_id TEXT NOT NULL,
   migration_profile TEXT NOT NULL,
   evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  status TEXT NOT NULL DEFAULT 'open',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (asset_ref, algorithm, policy_rule_id)
 );
 
 CREATE TABLE IF NOT EXISTS migration_transactions (
