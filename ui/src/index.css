@@ -3,9 +3,44 @@
 @tailwind utilities;
 
 :root {
-  color: #17211c;
-  background: #f7f8f5;
+  --color-bg: #f7f8f5;
+  --color-surface: #ffffff;
+  --color-border: #dfe5dc;
+  --color-text: #17211c;
+  --color-muted: #697469;
+  --color-subtle: #edf1ea;
+  color: var(--color-text);
+  background: var(--color-bg);
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-theme='dark'] {
+  --color-bg: #111714;
+  --color-surface: #1c2620;
+  --color-border: #2e3d34;
+  --color-text: #e8ede9;
+  --color-muted: #8fa991;
+  --color-subtle: #243029;
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+[data-theme='dark'] .bg-white { background-color: var(--color-surface) !important; }
+[data-theme='dark'] .bg-\[\#f7f8f5\] { background-color: var(--color-bg) !important; }
+[data-theme='dark'] .border-\[\#dfe5dc\] { border-color: var(--color-border) !important; }
+[data-theme='dark'] .border-\[\#edf1ea\] { border-color: var(--color-subtle) !important; }
+[data-theme='dark'] .text-\[\#17211c\] { color: var(--color-text) !important; }
+[data-theme='dark'] .text-\[\#697469\] { color: var(--color-muted) !important; }
+[data-theme='dark'] .text-\[\#4d594f\] { color: var(--color-muted) !important; }
+[data-theme='dark'] .hover\:bg-\[\#edf1ea\]\/40:hover { background-color: var(--color-subtle) !important; }
+[data-theme='dark'] .hover\:bg-\[\#eef2ec\]:hover { background-color: var(--color-subtle) !important; }
+[data-theme='dark'] .bg-\[\#edf1ea\] { background-color: var(--color-subtle) !important; }
+[data-theme='dark'] input,
+[data-theme='dark'] textarea,
+[data-theme='dark'] select {
+  background-color: var(--color-surface) !important;
+  color: var(--color-text) !important;
+  border-color: var(--color-border) !important;
 }
 
 body {
@@ -18,3 +53,20 @@ button, input, textarea, select {
   font: inherit;
 }
 
+@keyframes slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-toast {
+  animation: toast-in 0.2s ease-out forwards;
+}
