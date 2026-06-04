@@ -10,19 +10,51 @@ use std::{collections::BTreeMap, fs, path::Path};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const CRYPTO_PACKAGES: &[(&str, &str)] = &[
-    ("openssl", "OpenSSL"),
-    ("ring", "ring"),
-    ("rustls", "rustls"),
-    ("boring", "BoringSSL"),
-    ("crypto", "generic crypto"),
-    ("cryptography", "Python cryptography"),
-    ("pyopenssl", "pyOpenSSL"),
-    ("bouncycastle", "Bouncy Castle"),
-    ("javax.crypto", "Java Cryptography Architecture"),
-    ("node-forge", "node-forge"),
-    ("crypto-js", "crypto-js"),
-    ("libsodium", "libsodium"),
+const CRYPTO_PACKAGES: &[(&str, &str, f64)] = &[
+    // Rust
+    ("openssl", "OpenSSL", 0.90),
+    ("ring", "ring", 0.95),
+    ("rustls", "rustls", 0.95),
+    ("boring", "BoringSSL", 0.90),
+    ("aws-lc-rs", "AWS-LC", 0.90),
+    ("p256", "RustCrypto p256", 0.85),
+    ("rsa", "RustCrypto rsa", 0.85),
+    ("aes", "RustCrypto aes", 0.85),
+    ("ed25519", "RustCrypto ed25519", 0.85),
+    // Python
+    ("cryptography", "Python cryptography", 0.90),
+    ("pyopenssl", "pyOpenSSL", 0.90),
+    ("pycryptodome", "PyCryptodome", 0.90),
+    ("pycrypto", "PyCrypto", 0.85),
+    ("paramiko", "Paramiko (SSH)", 0.75),
+    // Java
+    ("bouncycastle", "Bouncy Castle", 0.90),
+    ("javax.crypto", "Java Cryptography Architecture", 0.90),
+    ("tink", "Google Tink", 0.90),
+    // JavaScript/Node
+    ("node-forge", "node-forge", 0.85),
+    ("crypto-js", "crypto-js", 0.85),
+    ("jose", "jose (JWT/JWE)", 0.85),
+    ("jsonwebtoken", "jsonwebtoken", 0.85),
+    ("jwks-rsa", "jwks-rsa", 0.80),
+    ("bcrypt", "bcrypt", 0.85),
+    ("argon2", "argon2", 0.85),
+    // C/C++
+    ("openssl", "OpenSSL", 0.90),
+    ("libsodium", "libsodium", 0.90),
+    ("wolfssl", "wolfSSL", 0.90),
+    ("mbedtls", "Mbed TLS", 0.90),
+    ("botan", "Botan", 0.90),
+    ("libressl", "LibreSSL", 0.90),
+    // Go
+    ("crypto", "Go crypto stdlib", 0.70),
+    ("golang.org/x/crypto", "Go x/crypto", 0.90),
+    ("github.com/square/go-jose", "go-jose", 0.85),
+    ("github.com/golang-jwt", "golang-jwt", 0.85),
+    // General
+    ("age", "age encryption", 0.80),
+    ("gpgme", "GPGME", 0.85),
+    ("gnupg", "GnuPG", 0.85),
 ];
 
 pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
@@ -48,7 +80,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
             let mut algorithms = Vec::new();
             for dep in deps.keys() {
                 let dep_l = dep.to_ascii_lowercase();
-                for (needle, lib) in CRYPTO_PACKAGES {
+                for (needle, lib, confidence) in CRYPTO_PACKAGES {
                     if dep_l.contains(needle) {
                         algorithms.push(CryptoAlgorithm {
                             name: "library-crypto-capability".to_string(),
@@ -62,9 +94,10 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             source_line: 0,
                             source_column: 0,
                             symbol: dep.clone(),
-                            confidence: 0.68,
+                            confidence: if is_lockfile(entry.path()) { *confidence } else { confidence * 0.75 },
                             quantum_vulnerable: false,
                         });
+                        break; // only first matching package descriptor
                     }
                 }
             }
@@ -107,18 +140,27 @@ fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
     !cfg.exclude_dirs.iter().any(|d| s.contains(d))
 }
 
+fn is_lockfile(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
+        "Cargo.lock" | "package-lock.json" | "go.sum" | "poetry.lock" | "Pipfile.lock"
+    )
+}
+
 fn is_manifest(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
-        "go.mod" | "package.json" | "package-lock.json" | "requirements.txt" | "pyproject.toml" | "pom.xml" | "Cargo.toml" | "Cargo.lock"
+        "go.mod" | "go.sum" | "package.json" | "package-lock.json"
+        | "requirements.txt" | "pyproject.toml" | "pom.xml"
+        | "Cargo.toml" | "Cargo.lock" | "poetry.lock" | "Pipfile.lock"
     )
 }
 
 fn manifest_type(path: &Path) -> &'static str {
     match path.file_name().and_then(|s| s.to_str()).unwrap_or_default() {
-        "go.mod" => "go",
+        "go.mod" | "go.sum" => "go",
         "package.json" | "package-lock.json" => "npm",
-        "requirements.txt" | "pyproject.toml" => "python",
+        "requirements.txt" | "pyproject.toml" | "poetry.lock" | "Pipfile.lock" => "python",
         "pom.xml" => "maven",
         "Cargo.toml" | "Cargo.lock" => "cargo",
         _ => "unknown",
@@ -129,7 +171,10 @@ fn parse_dependencies(path: &Path, text: &str) -> BTreeMap<String, String> {
     match path.file_name().and_then(|s| s.to_str()).unwrap_or_default() {
         "package.json" | "package-lock.json" => parse_npm(text),
         "go.mod" => parse_go_mod(text),
+        "go.sum" => parse_go_sum(text),
         "requirements.txt" => parse_requirements(text),
+        "poetry.lock" => parse_poetry_lock(text),
+        "Pipfile.lock" => parse_pipfile_lock(text),
         "Cargo.toml" | "Cargo.lock" => parse_cargo(text),
         "pom.xml" => parse_maven(text),
         _ => BTreeMap::new(),
@@ -230,6 +275,64 @@ fn parse_maven(text: &str) -> BTreeMap<String, String> {
     }
     out
 }
+
+/// Parse go.sum — each line: `module version h1:hash`
+fn parse_go_sum(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        if parts.len() >= 2 {
+            // Only keep non-go.mod entries (actual package downloads)
+            if !parts[1].ends_with("/go.mod") {
+                out.entry(parts[0].to_string()).or_insert_with(|| parts[1].to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Parse poetry.lock — TOML-like: `[[package]]` blocks with `name` and `version` keys
+fn parse_poetry_lock(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut current_name: Option<String> = None;
+    let mut current_version: Option<String> = None;
+    for line in text.lines().map(str::trim) {
+        if line == "[[package]]" {
+            if let (Some(name), Some(version)) = (current_name.take(), current_version.take()) {
+                out.insert(name, version);
+            }
+        } else if let Some(rest) = line.strip_prefix("name = ") {
+            current_name = Some(rest.trim_matches('"').to_string());
+        } else if let Some(rest) = line.strip_prefix("version = ") {
+            current_version = Some(rest.trim_matches('"').to_string());
+        }
+    }
+    if let (Some(name), Some(version)) = (current_name, current_version) {
+        out.insert(name, version);
+    }
+    out
+}
+
+/// Parse Pipfile.lock — JSON with `{"default": {"package": {"version": "==x.y.z"}}, "develop": {...}}`
+fn parse_pipfile_lock(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+        for section in &["default", "develop"] {
+            if let Some(obj) = v.get(section).and_then(|x| x.as_object()) {
+                for (pkg, meta) in obj {
+                    let version = meta.get("version")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim_start_matches("==")
+                        .to_string();
+                    out.insert(pkg.clone(), version);
+                }
+            }
+        }
+    }
+    out
+}
+
 
 fn tag_value(line: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");

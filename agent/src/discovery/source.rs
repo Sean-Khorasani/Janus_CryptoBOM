@@ -3,7 +3,7 @@ use crate::{
     config::AgentConfig,
     proto::{CbomComponent, CryptoAlgorithm, CryptoRole, Evidence},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
@@ -15,6 +15,171 @@ struct Pattern {
     name: &'static str,
     family: &'static str,
     role: CryptoRole,
+}
+
+fn strip_comments_and_strings(text: &str, ext: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_string = false;
+    let mut string_char = '\0';
+    let mut is_escaped = false;
+    
+    let mut in_triple_string = false;
+    let mut triple_char = '\0';
+    
+    let mut in_xml_comment = false;
+
+    let is_c_like = matches!(ext, "rs" | "go" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "cs" | "c" | "h" | "cpp" | "hpp" | "swift" | "m" | "mm" | "scala" | "php");
+    let is_script = matches!(ext, "py" | "rb" | "sh" | "yaml" | "yml" | "toml" | "conf" | "cnf");
+    let is_xml = matches!(ext, "xml");
+
+    while i < chars.len() {
+        let c = chars[i];
+        
+        if c == '\n' || c == '\r' {
+            in_line_comment = false;
+            if in_string && string_char != '`' {
+                in_string = false;
+                string_char = '\0';
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if in_line_comment {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if is_c_like && i + 1 < chars.len() && chars[i] == '*' && chars[i+1] == '/' {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+                in_block_comment = false;
+            } else {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_xml_comment {
+            if i + 2 < chars.len() && chars[i] == '-' && chars[i+1] == '-' && chars[i+2] == '>' {
+                out.push(' ');
+                out.push(' ');
+                out.push(' ');
+                i += 3;
+                in_xml_comment = false;
+            } else {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_triple_string {
+            let tc = triple_char;
+            if i + 2 < chars.len() && chars[i] == tc && chars[i+1] == tc && chars[i+2] == tc {
+                out.push(' ');
+                out.push(' ');
+                out.push(' ');
+                i += 3;
+                in_triple_string = false;
+                triple_char = '\0';
+            } else {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            if is_escaped {
+                out.push(' ');
+                i += 1;
+                is_escaped = false;
+            } else if c == '\\' {
+                out.push(' ');
+                i += 1;
+                is_escaped = true;
+            } else if c == string_char {
+                out.push(' ');
+                i += 1;
+                in_string = false;
+                string_char = '\0';
+            } else {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+
+        if is_c_like && i + 1 < chars.len() && chars[i] == '/' && chars[i+1] == '*' {
+            in_block_comment = true;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+            continue;
+        }
+
+        if is_xml && i + 3 < chars.len() && chars[i] == '<' && chars[i+1] == '!' && chars[i+2] == '-' && chars[i+3] == '-' {
+            in_xml_comment = true;
+            out.push(' ');
+            out.push(' ');
+            out.push(' ');
+            out.push(' ');
+            i += 4;
+            continue;
+        }
+
+        if is_c_like && i + 1 < chars.len() && chars[i] == '/' && chars[i+1] == '/' {
+            in_line_comment = true;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+            continue;
+        }
+
+        if is_script && c == '#' {
+            in_line_comment = true;
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+
+        if ext == "py" && i + 2 < chars.len() {
+            let tc = chars[i];
+            if (tc == '"' || tc == '\'') && chars[i+1] == tc && chars[i+2] == tc {
+                in_triple_string = true;
+                triple_char = tc;
+                out.push(' ');
+                out.push(' ');
+                out.push(' ');
+                i += 3;
+                continue;
+            }
+        }
+
+        if c == '"' || c == '\'' || (is_c_like && c == '`') {
+            in_string = true;
+            string_char = c;
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+
+        out.push(c);
+        i += 1;
+    }
+    
+    out
 }
 
 pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
@@ -41,10 +206,14 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 Err(_) => continue,
             };
             let text = String::from_utf8_lossy(&raw);
+            let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+            let stripped = strip_comments_and_strings(&text, &ext);
             let mut algorithms = Vec::new();
-            for (line_idx, line) in text.lines().enumerate() {
+            
+            // Zip lines to perform line-by-line comparison
+            for (line_idx, (line, stripped_line)) in text.lines().zip(stripped.lines()).enumerate() {
                 for pat in &patterns {
-                    if let Some(m) = pat.regex.find(line) {
+                    if let Some(m) = pat.regex.find(stripped_line) {
                         algorithms.push(CryptoAlgorithm {
                             name: pat.name.to_string(),
                             family: pat.family.to_string(),
@@ -57,7 +226,23 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             source_line: (line_idx + 1) as u32,
                             source_column: (m.start() + 1) as u32,
                             symbol: m.as_str().to_string(),
-                            confidence: 0.82,
+                            confidence: 0.90,
+                            quantum_vulnerable: false,
+                        });
+                    } else if let Some(m) = pat.regex.find(line) {
+                        algorithms.push(CryptoAlgorithm {
+                            name: pat.name.to_string(),
+                            family: pat.family.to_string(),
+                            role: pat.role as i32,
+                            status: "observed".to_string(),
+                            key_bits: infer_key_bits(pat.name, line),
+                            curve: infer_curve(line),
+                            implementation_library: infer_library(line),
+                            source_file: entry.path().display().to_string(),
+                            source_line: (line_idx + 1) as u32,
+                            source_column: (m.start() + 1) as u32,
+                            symbol: m.as_str().to_string(),
+                            confidence: 0.30,
                             quantum_vulnerable: false,
                         });
                     }
@@ -76,7 +261,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 target: path.clone(),
                 collection_time_unix: now(),
                 raw_artifact_sha256: file_hash,
-                confidence: 0.82,
+                confidence: 0.90,
                 sensitivity_class: "metadata-only".to_string(),
             });
             out.components.push(CbomComponent {

@@ -1,7 +1,7 @@
 mod binary;
 mod cbom;
 mod dependency;
-mod network;
+pub(crate) mod network;
 mod plugin;
 mod runtime;
 mod source;

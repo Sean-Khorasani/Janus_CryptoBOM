@@ -9,6 +9,8 @@ use std::{fs, path::Path};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use object::Object;
+
 const SYMBOLS: &[(&str, &str, CryptoRole)] = &[
     ("EVP_EncryptInit", "OpenSSL EVP symmetric encryption", CryptoRole::Symmetric),
     ("EVP_DecryptInit", "OpenSSL EVP symmetric decryption", CryptoRole::Symmetric),
@@ -52,25 +54,93 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 continue;
             }
             let mut algorithms = Vec::new();
-            for (symbol, description, role) in SYMBOLS {
-                if contains_ascii(&raw, symbol.as_bytes()) {
-                    algorithms.push(CryptoAlgorithm {
-                        name: algorithm_name(symbol),
-                        family: family_name(symbol),
-                        role: *role as i32,
-                        status: "binary-symbol-observed".to_string(),
-                        key_bits: 0,
-                        curve: String::new(),
-                        implementation_library: description.to_string(),
-                        source_file: entry.path().display().to_string(),
-                        source_line: 0,
-                        source_column: 0,
-                        symbol: symbol.to_string(),
-                        confidence: 0.74,
-                        quantum_vulnerable: false,
-                    });
+            let mut parsed_ok = false;
+
+            if let Ok(binary_file) = object::File::parse(&*raw) {
+                parsed_ok = true;
+                
+                // Enumerate imports
+                if let Ok(imports) = binary_file.imports() {
+                    for import in imports {
+                        let symbol_name = String::from_utf8_lossy(import.name());
+                        let library_name = String::from_utf8_lossy(import.library());
+                        for (sym, description, role) in SYMBOLS {
+                            if symbol_name == *sym {
+                                let mut desc = description.to_string();
+                                if !library_name.is_empty() {
+                                    desc = format!("{} (imported from {})", desc, library_name);
+                                }
+                                algorithms.push(CryptoAlgorithm {
+                                    name: algorithm_name(sym),
+                                    family: family_name(sym),
+                                    role: *role as i32,
+                                    status: "binary-import-observed".to_string(),
+                                    key_bits: 0,
+                                    curve: String::new(),
+                                    implementation_library: desc,
+                                    source_file: entry.path().display().to_string(),
+                                    source_line: 0,
+                                    source_column: 0,
+                                    symbol: sym.to_string(),
+                                    confidence: 0.90, // Structural import is high confidence
+                                    quantum_vulnerable: false,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Enumerate exports
+                if let Ok(exports) = binary_file.exports() {
+                    for export in exports {
+                        if let Ok(name) = std::str::from_utf8(export.name()) {
+                            for (sym, description, role) in SYMBOLS {
+                                if name == *sym {
+                                    algorithms.push(CryptoAlgorithm {
+                                        name: algorithm_name(sym),
+                                        family: family_name(sym),
+                                        role: *role as i32,
+                                        status: "binary-export-observed".to_string(),
+                                        key_bits: 0,
+                                        curve: String::new(),
+                                        implementation_library: format!("{} (exported)", description),
+                                        source_file: entry.path().display().to_string(),
+                                        source_line: 0,
+                                        source_column: 0,
+                                        symbol: sym.to_string(),
+                                        confidence: 0.90, // Structural export is high confidence
+                                        quantum_vulnerable: false,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
+
+            // Fallback to raw string search if not parseable
+            if !parsed_ok {
+                for (symbol, description, role) in SYMBOLS {
+                    if contains_ascii(&raw, symbol.as_bytes()) {
+                        algorithms.push(CryptoAlgorithm {
+                            name: algorithm_name(symbol),
+                            family: family_name(symbol),
+                            role: *role as i32,
+                            status: "binary-symbol-observed".to_string(),
+                            key_bits: 0,
+                            curve: String::new(),
+                            implementation_library: description.to_string(),
+                            source_file: entry.path().display().to_string(),
+                            source_line: 0,
+                            source_column: 0,
+                            symbol: symbol.to_string(),
+                            confidence: 0.30, // Regex fallback is low confidence
+                            quantum_vulnerable: false,
+                        });
+                    }
+                }
+            }
+
             if algorithms.is_empty() {
                 continue;
             }

@@ -7,12 +7,14 @@ use diffy::{apply, Patch};
 use subtle::ConstantTimeEq;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::time::Duration;
+use crate::discovery::network::{extract_named_group, parse_x509_der};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    str::FromStr,
 };
 use tokio::process::Command;
 
@@ -31,7 +33,13 @@ impl MutationEngine {
     pub async fn execute(&self, cmd: MigrationCommand) -> MigrationStatusReport {
         let result = self.execute_inner(&cmd).await;
         match result {
-            Ok(output) => report(&cmd, MigrationState::Succeeded, true, "", &output),
+            Ok(output) => {
+                let mut rep = report(&cmd, MigrationState::Succeeded, true, "", &output);
+                if !cmd.dry_run {
+                    rep.observed_tls = verify_post_migration(&cmd.target_service, &self.cfg).await;
+                }
+                rep
+            }
             Err(err) => report(&cmd, MigrationState::Failed, false, &format!("{err:#}"), ""),
         }
     }
@@ -61,6 +69,24 @@ impl MutationEngine {
         let config_path = self.checked_config_path(&cmd.config_path)?;
         let original = fs::read_to_string(&config_path)
             .with_context(|| format!("read {}", config_path.display()))?;
+
+        // Config file checksum verification (drift detection)
+        if let Some(expected_checksum_entry) = cmd.validation_checklist.iter().find(|val| val.starts_with("checksum=")) {
+            let expected_sha = expected_checksum_entry.trim_start_matches("checksum=");
+            if !expected_sha.is_empty() {
+                let mut h = Sha256::new();
+                h.update(original.as_bytes());
+                let actual_sha = hex::encode(h.finalize());
+                if actual_sha != expected_sha {
+                    anyhow::bail!(
+                        "config file checksum mismatch (detected drift): expected {}, found {}",
+                        expected_sha,
+                        actual_sha
+                    );
+                }
+            }
+        }
+
         let patch = Patch::from_str(&cmd.patch_unified_diff).context("parse unified diff")?;
         let patched = apply(&original, &patch).context("apply unified diff")?;
 
@@ -492,4 +518,185 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+async fn verify_post_migration(_service: &str, cfg: &AgentConfig) -> Option<crate::proto::NetworkObservation> {
+    if cfg.network_targets.is_empty() {
+        return None;
+    }
+    
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    
+    #[derive(Debug)]
+    struct NoCertificateVerification;
+    impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _e: &rustls::pki_types::CertificateDer<'_>,
+            _i: &[rustls::pki_types::CertificateDer<'_>],
+            _s: &rustls::pki_types::ServerName<'_>,
+            _o: &[u8],
+            _n: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            vec![
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ED25519,
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::RSA_PSS_SHA384,
+                rustls::SignatureScheme::RSA_PSS_SHA512,
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                rustls::SignatureScheme::RSA_PKCS1_SHA384,
+                rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            ]
+        }
+    }
+
+    let mut config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let config_arc = Arc::new(config);
+
+    for target in &cfg.network_targets {
+        if target.ends_with(":80") {
+            continue;
+        }
+        
+        let host = target.split(':').next().unwrap_or(target);
+        let stream_res = tokio::time::timeout(
+            Duration::from_millis(1500),
+            tokio::net::TcpStream::connect(target)
+        ).await;
+        
+        let mut stream = match stream_res {
+            Ok(Ok(s)) => s,
+            _ => continue,
+        };
+        
+        let server_name = match rustls::pki_types::ServerName::try_from(host.to_string()) {
+            Ok(sn) => sn,
+            _ => continue,
+        };
+        
+        let mut conn = match rustls::ClientConnection::new(config_arc.clone(), server_name) {
+            Ok(c) => c,
+            _ => continue,
+        };
+        
+        let mut raw_bytes = Vec::new();
+        let mut buf = [0u8; 4096];
+        let mut handshake_failed = false;
+        
+        while conn.is_handshaking() {
+            if conn.wants_write() {
+                let mut wr = Vec::new();
+                if conn.write_tls(&mut wr).is_err() {
+                    handshake_failed = true;
+                    break;
+                }
+                use tokio::io::AsyncWriteExt;
+                if stream.write_all(&wr).await.is_err() {
+                    handshake_failed = true;
+                    break;
+                }
+            }
+            if conn.wants_read() {
+                use tokio::io::AsyncReadExt;
+                match stream.read(&mut buf).await {
+                    Ok(n) if n > 0 => {
+                        raw_bytes.extend_from_slice(&buf[..n]);
+                        if conn.read_tls(&mut std::io::Cursor::new(&buf[..n])).is_err() {
+                            handshake_failed = true;
+                            break;
+                        }
+                        if conn.process_new_packets().is_err() {
+                            handshake_failed = true;
+                            break;
+                        }
+                    }
+                    _ => {
+                        handshake_failed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if handshake_failed {
+            continue;
+        }
+
+        let protocol = conn.protocol_version()
+            .map(|v| format!("{:?}", v))
+            .unwrap_or_else(|| "unknown".to_string());
+            
+        let cipher_suite = conn.negotiated_cipher_suite()
+            .map(|cs| format!("{:?}", cs.suite()))
+            .unwrap_or_default();
+
+        let mut cert_subject = String::new();
+        let mut cert_issuer = String::new();
+        let mut cert_not_after = 0;
+
+        if let Some(certs) = conn.peer_certificates() {
+            if let Some(first_cert) = certs.first() {
+                let (subj, iss, not_after, _) = parse_x509_der(first_cert.as_ref());
+                cert_subject = subj;
+                cert_issuer = iss;
+                cert_not_after = not_after;
+            }
+        }
+
+        let mut pqc_hybrid = false;
+        let mut named_group = String::new();
+        if let Some(group_id) = extract_named_group(&raw_bytes) {
+            let (name, hybrid) = match group_id {
+                4588 => ("X25519MLKEM768".to_string(), true),
+                4605 => ("SecP256r1MLKEM768".to_string(), true),
+                4590 => ("X448MLKEM1024".to_string(), true),
+                29 => ("X25519".to_string(), false),
+                23 => ("secp256r1".to_string(), false),
+                24 => ("secp384r1".to_string(), false),
+                g => (format!("Unknown group (0x{:04x})", g), false),
+            };
+            named_group = name;
+            pqc_hybrid = hybrid;
+        }
+
+        return Some(crate::proto::NetworkObservation {
+            endpoint: target.to_string(),
+            protocol: "tls".to_string(),
+            tls_version: protocol,
+            cipher_suite,
+            named_group,
+            signature_algorithm: String::new(),
+            certificate_subject: cert_subject,
+            certificate_issuer: cert_issuer,
+            certificate_not_after_unix: cert_not_after,
+            pqc_hybrid,
+            cleartext: false,
+        });
+    }
+    None
 }
