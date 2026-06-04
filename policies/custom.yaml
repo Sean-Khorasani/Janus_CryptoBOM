@@ -1,0 +1,7 @@
+version: custom-enterprise
+minimum_rsa_key_bits: 2048
+minimum_dh_safe_prime_bits: 2048
+require_tls_13: false
+require_hybrid_pq_tls_13: false
+preferred_kem: X25519
+preferred_signature: ECDSA-P256

@@ -1,0 +1,7 @@
+version: cnsa-2.0
+minimum_rsa_key_bits: 3072
+minimum_dh_safe_prime_bits: 3072
+require_tls_13: true
+require_hybrid_pq_tls_13: true
+preferred_kem: ML-KEM-1024
+preferred_signature: ML-DSA-87
