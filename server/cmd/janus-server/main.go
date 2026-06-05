@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"log"
 	"net"
@@ -52,10 +53,30 @@ func main() {
 		if err != nil {
 			log.Fatalf("load tls certificate: %v", err)
 		}
+		
+		var clientCAs *x509.CertPool
+		if cfg.ClientCAFile != "" {
+			caBytes, err := os.ReadFile(cfg.ClientCAFile)
+			if err != nil {
+				log.Fatalf("load client ca certificate: %v", err)
+			}
+			clientCAs = x509.NewCertPool()
+			if ok := clientCAs.AppendCertsFromPEM(caBytes); !ok {
+				log.Fatalf("failed to parse client ca certificate")
+			}
+		}
+
 		tlsCfg := &tls.Config{
 			MinVersion:   tls.VersionTLS13,
 			Certificates: []tls.Certificate{cert},
 		}
+		
+		if clientCAs != nil {
+			tlsCfg.ClientCAs = clientCAs
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+			log.Printf("gRPC configured for Mutual TLS (mTLS) client verification")
+		}
+
 		grpcOptions = append(grpcOptions, grpc.Creds(credentials.NewTLS(tlsCfg)))
 	} else {
 		log.Printf("JANUS_TLS_CERT_FILE/JANUS_TLS_KEY_FILE not set; gRPC listening without TLS for local development")
@@ -71,7 +92,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(pg, orch, engine),
+		Handler:           httpapi.New(pg, orch, engine, cfg.CommandSigningKey, cfg.DisableAuth),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

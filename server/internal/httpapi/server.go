@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -19,10 +20,11 @@ type API struct {
 	engine *policy.Engine
 }
 
-func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine) http.Handler {
+func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine, jwtSecret []byte, disableAuth bool) http.Handler {
 	api := &API{store: store, orch: orch, engine: engine}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", api.health)
+	mux.HandleFunc("/api/auth/login", LoginHandler(jwtSecret))
 	mux.HandleFunc("/api/overview", api.overview)
 	mux.HandleFunc("/api/assets", api.assets)
 	mux.HandleFunc("/api/components", api.components)
@@ -31,14 +33,27 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/migrations", api.migrations)
 	mux.HandleFunc("/api/report.html", api.reportHTML)
 	mux.HandleFunc("/api/certificates/csr", api.createCSR)
-	mux.HandleFunc("/api/migrations/enqueue", api.enqueueMigration)
+	
+	// Require operator or admin role to enqueue migrations
+	mux.Handle("/api/migrations/enqueue", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.enqueueMigration)))
+	
 	mux.HandleFunc("/api/export/cyclonedx", api.exportCycloneDX)
 	mux.HandleFunc("/api/export/csv", api.exportCSV)
 	mux.HandleFunc("/api/export/sarif", api.exportSARIF)
 	mux.HandleFunc("/api/policies", api.policies)
 	mux.HandleFunc("/api/policies/active", api.activePolicy)
+	mux.HandleFunc("/api/policies/create", api.createPolicy)
+	mux.HandleFunc("/api/agent/heartbeat", api.agentHeartbeat)
+	mux.HandleFunc("/api/fleet/config", api.fleetConfig)
+	mux.HandleFunc("/api/audit-logs", api.auditLogs)
+	mux.HandleFunc("/api/agent/diagnostics", api.agentDiagnostics)
+	mux.HandleFunc("/api/webhooks", api.webhooks)
+	mux.HandleFunc("/api/retention", api.retention)
+	mux.HandleFunc("/api/export/siem", api.exportSIEM)
 	mux.HandleFunc("/metrics", api.metrics)
-	return cors(mux)
+	
+	authWrapper := AuthMiddleware(jwtSecret, disableAuth)
+	return cors(authWrapper(mux))
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
@@ -287,6 +302,17 @@ func (a *API) enqueueMigration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+
+	username, _ := r.Context().Value(UserContextKey).(string)
+	if username == "" {
+		username = "admin"
+	}
+	_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
+		Username: username,
+		Action:   "ENQUEUE_MIGRATION",
+		Details:  fmt.Sprintf("Service: %s, Profile: %s, Config: %s, DryRun: %t, CommandId: %s", req.TargetService, req.MigrationProfile, req.ConfigPath, req.DryRun, cmd.CommandId),
+	})
+
 	writeJSON(w, http.StatusAccepted, cmd)
 }
 
@@ -510,4 +536,330 @@ func (a *API) metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP janus_open_migrations_total Total pending or active migrations\n")
 	fmt.Fprintf(w, "# TYPE janus_open_migrations_total gauge\n")
 	fmt.Fprintf(w, "janus_open_migrations_total %d\n\n", overview.OpenMigrations)
+}
+
+func (a *API) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body store.AgentHeartbeat
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if body.HostUUID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host_uuid is required"})
+		return
+	}
+	if err := a.store.UpdateAgentHeartbeat(r.Context(), &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "host_uuid": body.HostUUID})
+}
+
+func (a *API) fleetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		fc, err := a.store.GetFleetConfig(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, fc)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var fc store.FleetConfig
+		if err := json.NewDecoder(r.Body).Decode(&fc); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if err := a.store.UpdateFleetConfig(r.Context(), &fc); err != nil {
+			writeError(w, err)
+			return
+		}
+		
+		username, _ := r.Context().Value(UserContextKey).(string)
+		if username == "" {
+			username = "admin"
+		}
+		_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
+			Username: username,
+			Action:   "UPDATE_FLEET_CONFIG",
+			Details:  fmt.Sprintf("Excluded dirs: %s, Min key size: %d, Schedule: %s", fc.ExcludeDirs, fc.MinKeySize, fc.ScanSchedule),
+		})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func (a *API) auditLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	logs, err := a.store.GetAuditLogs(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, logs)
+}
+
+func (a *API) agentDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		hostUUID := r.URL.Query().Get("host_uuid")
+		if hostUUID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host_uuid is required"})
+			return
+		}
+		logs, err := a.store.GetAgentDiagnostics(r.Context(), hostUUID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"host_uuid": hostUUID, "logs": logs})
+		return
+	}
+	if r.Method == http.MethodPost {
+		var body struct {
+			HostUUID string `json:"host_uuid"`
+			Logs     string `json:"logs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if body.HostUUID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host_uuid is required"})
+			return
+		}
+		if err := a.store.UpdateAgentDiagnostics(r.Context(), body.HostUUID, body.Logs); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func (a *API) createPolicy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Version                string `json:"version"`
+		MinimumRSAKeyBits      uint32 `json:"minimum_rsa_key_bits"`
+		MinimumDHSafePrimeBits uint32 `json:"minimum_dh_safe_prime_bits"`
+		RequireTLS13           bool   `json:"require_tls_13"`
+		RequireHybridPQTLS13   bool   `json:"require_hybrid_pq_tls_13"`
+		PreferredKEM           string `json:"preferred_kem"`
+		PreferredSignature     string `json:"preferred_signature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.Version == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version is required"})
+		return
+	}
+
+	p := policy.Profile{
+		Version:                req.Version,
+		MinimumRSAKeyBits:      req.MinimumRSAKeyBits,
+		MinimumDHSafePrimeBits: req.MinimumDHSafePrimeBits,
+		RequireTLS13:           req.RequireTLS13,
+		RequireHybridPQTLS13:   req.RequireHybridPQTLS13,
+		PreferredKEM:           req.PreferredKEM,
+		PreferredSignature:     req.PreferredSignature,
+	}
+
+	a.engine.AddProfile(p)
+
+	filename := fmt.Sprintf("policies/%s.yaml", strings.ToLower(req.Version))
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("version: \"%s\"\n", p.Version))
+	sb.WriteString(fmt.Sprintf("minimum_rsa_key_bits: %d\n", p.MinimumRSAKeyBits))
+	sb.WriteString(fmt.Sprintf("minimum_dh_safe_prime_bits: %d\n", p.MinimumDHSafePrimeBits))
+	sb.WriteString(fmt.Sprintf("require_tls_13: %t\n", p.RequireTLS13))
+	sb.WriteString(fmt.Sprintf("require_hybrid_pq_tls_13: %t\n", p.RequireHybridPQTLS13))
+	sb.WriteString(fmt.Sprintf("preferred_kem: \"%s\"\n", p.PreferredKEM))
+	sb.WriteString(fmt.Sprintf("preferred_signature: \"%s\"\n", p.PreferredSignature))
+
+	_ = os.MkdirAll("policies", 0755)
+	if err := os.WriteFile(filename, []byte(sb.String()), 0644); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	username, _ := r.Context().Value(UserContextKey).(string)
+	if username == "" {
+		username = "admin"
+	}
+	_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
+		Username: username,
+		Action:   "CREATE_POLICY_PROFILE",
+		Details:  fmt.Sprintf("Created policy version %s", p.Version),
+	})
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "profile": p})
+}
+
+func (a *API) webhooks(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		list, err := a.store.GetWebhooks(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var wh store.Webhook
+		if err := json.NewDecoder(r.Body).Decode(&wh); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if wh.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		wh.Active = true
+		if err := a.store.InsertWebhook(r.Context(), &wh); err != nil {
+			writeError(w, err)
+			return
+		}
+
+		username, _ := r.Context().Value(UserContextKey).(string)
+		if username == "" {
+			username = "admin"
+		}
+		_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
+			Username: username,
+			Action:   "ADD_WEBHOOK",
+			Details:  fmt.Sprintf("Added webhook URL: %s", wh.URL),
+		})
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+		return
+	}
+	if r.Method == http.MethodDelete {
+		webhookID := r.URL.Query().Get("id")
+		if webhookID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id parameter required"})
+			return
+		}
+		if err := a.store.DeleteWebhook(r.Context(), webhookID); err != nil {
+			writeError(w, err)
+			return
+		}
+
+		username, _ := r.Context().Value(UserContextKey).(string)
+		if username == "" {
+			username = "admin"
+		}
+		_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
+			Username: username,
+			Action:   "DELETE_WEBHOOK",
+			Details:  fmt.Sprintf("Deleted webhook ID: %s", webhookID),
+		})
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func (a *API) retention(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		rp, err := a.store.GetRetentionPolicy(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, rp)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req struct {
+			RetentionDays int  `json:"retention_days"`
+			AutoPurge     bool `json:"auto_purge"`
+			TriggerPurge  bool `json:"trigger_purge"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+
+		rp := store.RetentionPolicy{
+			RetentionDays: req.RetentionDays,
+			AutoPurge:     req.AutoPurge,
+		}
+		if err := a.store.UpdateRetentionPolicy(r.Context(), &rp); err != nil {
+			writeError(w, err)
+			return
+		}
+
+		var purged int64
+		if req.TriggerPurge && req.RetentionDays > 0 {
+			var err error
+			purged, err = a.store.PurgeOldTelemetry(r.Context(), req.RetentionDays)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+		}
+
+		username, _ := r.Context().Value(UserContextKey).(string)
+		if username == "" {
+			username = "admin"
+		}
+		_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
+			Username: username,
+			Action:   "UPDATE_RETENTION_POLICY",
+			Details:  fmt.Sprintf("Updated retention to %d days. Triggered purge: %t (purged=%d)", req.RetentionDays, req.TriggerPurge, purged),
+		})
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "purged_records": purged})
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func (a *API) exportSIEM(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	findings, err := a.store.Findings(r.Context(), 1000)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-json-stream")
+	encoder := json.NewEncoder(w)
+	for _, f := range findings {
+		payload := map[string]interface{}{
+			"timestamp": time.Now().Format(time.RFC3339),
+			"source":    "janus-siem-exporter",
+			"event":     "crypto-compliance-finding",
+			"severity":  f.Severity,
+			"finding": map[string]interface{}{
+				"finding_id":  f.FindingID,
+				"asset_ref":   f.AssetRef,
+				"rule_id":     f.PolicyRuleID,
+				"algorithm":   f.Algorithm,
+				"status":      f.Status,
+				"description": f.Description,
+			},
+		}
+		_ = encoder.Encode(payload)
+	}
 }

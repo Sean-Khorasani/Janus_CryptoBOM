@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/janus-cbom/janus/server/internal/pb"
 )
@@ -26,6 +27,19 @@ type Store interface {
 	UpdateFindingStatus(ctx context.Context, findingID, status, updatedBy string) error
 	Migrations(context.Context) ([]Migration, error)
 	GetLatestConfigHash(ctx context.Context, hostUUID, configPath string) (string, error)
+	UpdateAgentHeartbeat(ctx context.Context, hb *AgentHeartbeat) error
+	GetFleetConfig(ctx context.Context) (*FleetConfig, error)
+	UpdateFleetConfig(ctx context.Context, fc *FleetConfig) error
+	GetAuditLogs(ctx context.Context) ([]AuditLog, error)
+	InsertAuditLog(ctx context.Context, al *AuditLog) error
+	GetAgentDiagnostics(ctx context.Context, hostUUID string) (string, error)
+	UpdateAgentDiagnostics(ctx context.Context, hostUUID, logs string) error
+	GetWebhooks(ctx context.Context) ([]Webhook, error)
+	InsertWebhook(ctx context.Context, wh *Webhook) error
+	DeleteWebhook(ctx context.Context, webhookID string) error
+	GetRetentionPolicy(ctx context.Context) (*RetentionPolicy, error)
+	UpdateRetentionPolicy(ctx context.Context, rp *RetentionPolicy) error
+	PurgeOldTelemetry(ctx context.Context, days int) (int64, error)
 }
 
 type Postgres struct {
@@ -43,13 +57,29 @@ type Overview struct {
 }
 
 type Asset struct {
-	HostUUID      string    `json:"host_uuid"`
-	Hostname      string    `json:"hostname"`
-	OSName        string    `json:"os_name"`
-	OSVersion     string    `json:"os_version"`
-	Arch          string    `json:"arch"`
-	ExecutionMode int32     `json:"execution_mode"`
-	LastSeen      time.Time `json:"last_seen"`
+	HostUUID          string    `json:"host_uuid"`
+	Hostname          string    `json:"hostname"`
+	OSName            string    `json:"os_name"`
+	OSVersion         string    `json:"os_version"`
+	Arch              string    `json:"arch"`
+	ExecutionMode     int32     `json:"execution_mode"`
+	LastSeen          time.Time `json:"last_seen"`
+	ScanProgress      int       `json:"scan_progress"`
+	CurrentScanPath   string    `json:"current_scan_path"`
+	CPUUsage          float64   `json:"cpu_usage"`
+	MemUsage          float64   `json:"mem_usage"`
+	Status            string    `json:"status"`
+	TotalFilesScanned int       `json:"total_files_scanned"`
+}
+
+type AgentHeartbeat struct {
+	HostUUID          string  `json:"host_uuid"`
+	ScanProgress      int     `json:"scan_progress"`
+	CurrentScanPath   string  `json:"current_scan_path"`
+	CPUUsage          float64 `json:"cpu_usage"`
+	MemUsage          float64 `json:"mem_usage"`
+	Status            string  `json:"status"`
+	TotalFilesScanned int     `json:"total_files_scanned"`
 }
 
 type Finding struct {
@@ -110,6 +140,22 @@ type Migration struct {
 	ObservedTLS      *pb.NetworkObservation `json:"observed_tls,omitempty"`
 }
 
+type Webhook struct {
+	WebhookID   string    `json:"webhook_id"`
+	URL         string    `json:"url"`
+	SecretToken string    `json:"secret_token"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type RetentionPolicy struct {
+	PolicyKey     string    `json:"policy_key"`
+	RetentionDays int       `json:"retention_days"`
+	AutoPurge     bool      `json:"auto_purge"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+
 func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
 	if databaseURL == "" {
 		return nil, errors.New("database URL is required")
@@ -144,6 +190,51 @@ func (p *Postgres) EnsureSchema(ctx context.Context) error {
 	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`)
 	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0.82`)
 	_, _ = p.pool.Exec(ctx, `ALTER TABLE migration_transactions ADD COLUMN IF NOT EXISTS observed_tls JSONB`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS scan_progress INTEGER NOT NULL DEFAULT 0`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS current_scan_path TEXT NOT NULL DEFAULT ''`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS mem_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'offline'`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS total_files_scanned INTEGER NOT NULL DEFAULT 0`)
+
+	// New advanced features tables
+	_, _ = p.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS fleet_configs (
+  config_id TEXT PRIMARY KEY,
+  exclude_dirs TEXT NOT NULL DEFAULT '',
+  min_key_size INTEGER NOT NULL DEFAULT 2048,
+  scan_schedule TEXT NOT NULL DEFAULT 'daily',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
+	_, _ = p.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS audit_logs (
+  log_id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  action TEXT NOT NULL,
+  details TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
+	_, _ = p.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS agent_diagnostics (
+  host_uuid TEXT PRIMARY KEY REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  logs TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
+	_, _ = p.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS fleet_webhooks (
+  webhook_id TEXT PRIMARY KEY,
+  url TEXT NOT NULL,
+  secret_token TEXT NOT NULL DEFAULT '',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
+	_, _ = p.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS fleet_retention_policies (
+  policy_key TEXT PRIMARY KEY,
+  retention_days INTEGER NOT NULL DEFAULT 90,
+  auto_purge INTEGER NOT NULL DEFAULT 1,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
 	return nil
 }
 
@@ -353,7 +444,7 @@ func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
 }
 
 func (p *Postgres) Assets(ctx context.Context) ([]Asset, error) {
-	rows, err := p.pool.Query(ctx, `SELECT host_uuid, hostname, os_name, os_version, arch, execution_mode, last_seen FROM assets ORDER BY last_seen DESC`)
+	rows, err := p.pool.Query(ctx, `SELECT host_uuid, hostname, os_name, os_version, arch, execution_mode, last_seen, scan_progress, current_scan_path, cpu_usage, mem_usage, status, total_files_scanned FROM assets ORDER BY last_seen DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +452,7 @@ func (p *Postgres) Assets(ctx context.Context) ([]Asset, error) {
 	var assets []Asset
 	for rows.Next() {
 		var a Asset
-		if err := rows.Scan(&a.HostUUID, &a.Hostname, &a.OSName, &a.OSVersion, &a.Arch, &a.ExecutionMode, &a.LastSeen); err != nil {
+		if err := rows.Scan(&a.HostUUID, &a.Hostname, &a.OSName, &a.OSVersion, &a.Arch, &a.ExecutionMode, &a.LastSeen, &a.ScanProgress, &a.CurrentScanPath, &a.CPUUsage, &a.MemUsage, &a.Status, &a.TotalFilesScanned); err != nil {
 			return nil, err
 		}
 		assets = append(assets, a)
@@ -569,6 +660,21 @@ LIMIT 200`)
 	return migrations, rows.Err()
 }
 
+func (p *Postgres) UpdateAgentHeartbeat(ctx context.Context, hb *AgentHeartbeat) error {
+	_, err := p.pool.Exec(ctx, `
+UPDATE assets
+SET scan_progress = $2,
+    current_scan_path = $3,
+    cpu_usage = $4,
+    mem_usage = $5,
+    status = $6,
+    total_files_scanned = $7,
+    last_seen = now()
+WHERE host_uuid = $1`,
+		hb.HostUUID, hb.ScanProgress, hb.CurrentScanPath, hb.CPUUsage, hb.MemUsage, hb.Status, hb.TotalFilesScanned)
+	return err
+}
+
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS assets (
   host_uuid TEXT PRIMARY KEY,
@@ -633,3 +739,167 @@ CREATE INDEX IF NOT EXISTS idx_crypto_findings_host_uuid ON crypto_findings(host
 CREATE INDEX IF NOT EXISTS idx_crypto_findings_severity ON crypto_findings(severity);
 CREATE INDEX IF NOT EXISTS idx_migration_transactions_host_uuid ON migration_transactions(host_uuid);
 `
+
+type FleetConfig struct {
+	ConfigID     string    `json:"config_id"`
+	ExcludeDirs  string    `json:"exclude_dirs"`
+	MinKeySize   int       `json:"min_key_size"`
+	ScanSchedule string    `json:"scan_schedule"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type AuditLog struct {
+	LogID     string    `json:"log_id"`
+	Username  string    `json:"username"`
+	Action    string    `json:"action"`
+	Details   string    `json:"details"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (p *Postgres) GetFleetConfig(ctx context.Context) (*FleetConfig, error) {
+	row := p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, updated_at FROM fleet_configs LIMIT 1`)
+	var fc FleetConfig
+	err := row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.UpdatedAt)
+	if err != nil {
+		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule) VALUES ('default', '.git, target, node_modules, dist, .venv, temp', 2048, 'daily') ON CONFLICT DO NOTHING`)
+		row = p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, updated_at FROM fleet_configs LIMIT 1`)
+		err = row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &fc, nil
+}
+
+func (p *Postgres) UpdateFleetConfig(ctx context.Context, fc *FleetConfig) error {
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, updated_at)
+VALUES ('default', $1, $2, $3, now())
+ON CONFLICT (config_id) DO UPDATE SET
+  exclude_dirs = EXCLUDED.exclude_dirs,
+  min_key_size = EXCLUDED.min_key_size,
+  scan_schedule = EXCLUDED.scan_schedule,
+  updated_at = now()`, fc.ExcludeDirs, fc.MinKeySize, fc.ScanSchedule)
+	return err
+}
+
+func (p *Postgres) GetAuditLogs(ctx context.Context) ([]AuditLog, error) {
+	rows, err := p.pool.Query(ctx, `SELECT log_id, username, action, details, created_at FROM audit_logs ORDER BY created_at DESC LIMIT 100`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var logs []AuditLog
+	for rows.Next() {
+		var al AuditLog
+		if err := rows.Scan(&al.LogID, &al.Username, &al.Action, &al.Details, &al.CreatedAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, al)
+	}
+	return logs, nil
+}
+
+func (p *Postgres) InsertAuditLog(ctx context.Context, al *AuditLog) error {
+	if al.LogID == "" {
+		al.LogID = uuid.NewString()
+	}
+	_, err := p.pool.Exec(ctx, `INSERT INTO audit_logs (log_id, username, action, details) VALUES ($1, $2, $3, $4)`, al.LogID, al.Username, al.Action, al.Details)
+	return err
+}
+
+func (p *Postgres) GetAgentDiagnostics(ctx context.Context, hostUUID string) (string, error) {
+	var logs string
+	err := p.pool.QueryRow(ctx, `SELECT logs FROM agent_diagnostics WHERE host_uuid = $1`, hostUUID).Scan(&logs)
+	if err != nil {
+		return "", nil
+	}
+	return logs, nil
+}
+
+func (p *Postgres) UpdateAgentDiagnostics(ctx context.Context, hostUUID, logs string) error {
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO agent_diagnostics (host_uuid, logs, updated_at)
+VALUES ($1, $2, now())
+ON CONFLICT (host_uuid) DO UPDATE SET
+  logs = EXCLUDED.logs,
+  updated_at = now()`, hostUUID, logs)
+	return err
+}
+
+func (p *Postgres) GetWebhooks(ctx context.Context) ([]Webhook, error) {
+	rows, err := p.pool.Query(ctx, `SELECT webhook_id, url, secret_token, active, created_at FROM fleet_webhooks ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []Webhook
+	for rows.Next() {
+		var w Webhook
+		var activeInt int
+		if err := rows.Scan(&w.WebhookID, &w.URL, &w.SecretToken, &activeInt, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		w.Active = activeInt == 1
+		list = append(list, w)
+	}
+	return list, nil
+}
+
+func (p *Postgres) InsertWebhook(ctx context.Context, wh *Webhook) error {
+	if wh.WebhookID == "" {
+		wh.WebhookID = uuid.NewString()
+	}
+	activeInt := 0
+	if wh.Active {
+		activeInt = 1
+	}
+	_, err := p.pool.Exec(ctx, `INSERT INTO fleet_webhooks (webhook_id, url, secret_token, active) VALUES ($1, $2, $3, $4)`, wh.WebhookID, wh.URL, wh.SecretToken, activeInt)
+	return err
+}
+
+func (p *Postgres) DeleteWebhook(ctx context.Context, webhookID string) error {
+	_, err := p.pool.Exec(ctx, `DELETE FROM fleet_webhooks WHERE webhook_id = $1`, webhookID)
+	return err
+}
+
+func (p *Postgres) GetRetentionPolicy(ctx context.Context) (*RetentionPolicy, error) {
+	var rp RetentionPolicy
+	var autoPurgeInt int
+	err := p.pool.QueryRow(ctx, `SELECT policy_key, retention_days, auto_purge, updated_at FROM fleet_retention_policies LIMIT 1`).Scan(&rp.PolicyKey, &rp.RetentionDays, &autoPurgeInt, &rp.UpdatedAt)
+	if err != nil {
+		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_retention_policies (policy_key, retention_days, auto_purge) VALUES ('default', 90, 1) ON CONFLICT DO NOTHING`)
+		err = p.pool.QueryRow(ctx, `SELECT policy_key, retention_days, auto_purge, updated_at FROM fleet_retention_policies LIMIT 1`).Scan(&rp.PolicyKey, &rp.RetentionDays, &autoPurgeInt, &rp.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+	}
+	rp.AutoPurge = autoPurgeInt == 1
+	return &rp, nil
+}
+
+func (p *Postgres) UpdateRetentionPolicy(ctx context.Context, rp *RetentionPolicy) error {
+	autoPurgeInt := 0
+	if rp.AutoPurge {
+		autoPurgeInt = 1
+	}
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO fleet_retention_policies (policy_key, retention_days, auto_purge, updated_at)
+VALUES ('default', $1, $2, now())
+ON CONFLICT (policy_key) DO UPDATE SET
+  retention_days = EXCLUDED.retention_days,
+  auto_purge = EXCLUDED.auto_purge,
+  updated_at = now()`, rp.RetentionDays, autoPurgeInt)
+	return err
+}
+
+func (p *Postgres) PurgeOldTelemetry(ctx context.Context, days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	tag, err := p.pool.Exec(ctx, `DELETE FROM telemetry_payloads WHERE received_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	_, _ = p.pool.Exec(ctx, `DELETE FROM crypto_findings WHERE updated_at < $1`, cutoff)
+	_, _ = p.pool.Exec(ctx, `DELETE FROM audit_logs WHERE created_at < $1`, cutoff)
+	return tag.RowsAffected(), nil
+}

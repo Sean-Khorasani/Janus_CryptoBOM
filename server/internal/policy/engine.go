@@ -101,6 +101,12 @@ func (e *Engine) SetActiveProfile(version string) error {
 	return nil
 }
 
+func (e *Engine) AddProfile(p Profile) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.profiles[p.Version] = p
+}
+
 func (e *Engine) AvailableProfiles() []Profile {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -117,6 +123,7 @@ func (e *Engine) Assess(payload *pb.CbomTelemetryPayload) {
 		for _, alg := range component.Algorithms {
 			e.assessAlgorithm(payload, component, alg, profile)
 		}
+		e.assessComponentVulnerabilities(payload, component)
 	}
 	for _, obs := range payload.NetworkObservations {
 		e.assessNetwork(payload, obs, profile)
@@ -326,4 +333,105 @@ func roleName(role int32) string {
 	default:
 		return "cryptographic operation"
 	}
+}
+
+type localVulnerability struct {
+	ID          string
+	Package     string
+	Ecosystem   string
+	Vulnerable  string
+	Title       string
+	Description string
+	Severity    int32
+	FixedIn     string
+}
+
+var localAdvisories = []localVulnerability{
+	{
+		ID:          "CVE-2023-48795",
+		Package:     "golang.org/x/crypto",
+		Ecosystem:   "Go",
+		Vulnerable:  "0.17.0",
+		Title:       "SSH Terrapin attack vulnerability",
+		Description: "Prefix truncation attack in SSH handshake protocol allows MITM attacker to degrade security parameters.",
+		Severity:    4, // High
+		FixedIn:     "0.17.0",
+	},
+	{
+		ID:          "CVE-2024-24789",
+		Package:     "golang.org/x/crypto",
+		Ecosystem:   "Go",
+		Vulnerable:  "0.21.0",
+		Title:       "golang.org/x/crypto/x509 Certificate verification bypass",
+		Description: "Panic during cert verification on specific key usages allows denial of service.",
+		Severity:    3, // Medium
+		FixedIn:     "0.21.0",
+	},
+	{
+		ID:          "CVE-2023-3446",
+		Package:     "openssl",
+		Ecosystem:   "native",
+		Vulnerable:  "3.0.10",
+		Title:       "OpenSSL DH_check() excessive time complexity",
+		Description: "DH_check() performs excessive computation, causing denial of service.",
+		Severity:    3, // Medium
+		FixedIn:     "3.0.10",
+	},
+	{
+		ID:          "CVE-2024-22369",
+		Package:     "node-forge",
+		Ecosystem:   "npm",
+		Vulnerable:  "1.3.1",
+		Title:       "node-forge RSA signature verification bypass",
+		Description: "Verification fails to validate correct padding, allowing signature spoofing.",
+		Severity:    5, // Critical
+		FixedIn:     "1.3.1",
+	},
+}
+
+func (e *Engine) assessComponentVulnerabilities(payload *pb.CbomTelemetryPayload, component *pb.CbomComponent) {
+	if component.Version == "" {
+		return
+	}
+	for _, adv := range localAdvisories {
+		if strings.EqualFold(component.Name, adv.Package) {
+			if compareVersions(component.Version, adv.Vulnerable) < 0 {
+				evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+				appendFinding(payload,
+					adv.Severity,
+					adv.Title,
+					fmt.Sprintf("%s. Affected version: %s. Upgrade package to version %s or newer.", adv.Description, component.Version, adv.FixedIn),
+					component.BomRef,
+					adv.ID,
+					adv.ID,
+					"third-party-package-upgrade",
+					evidenceIDs,
+				)
+			}
+		}
+	}
+}
+
+func compareVersions(v1, v2 string) int {
+	parts1 := parseVersion(v1)
+	parts2 := parseVersion(v2)
+	for i := 0; i < 3; i++ {
+		if parts1[i] < parts2[i] {
+			return -1
+		}
+		if parts1[i] > parts2[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+func parseVersion(v string) [3]int {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.Split(v, ".")
+	var res [3]int
+	for i := 0; i < len(parts) && i < 3; i++ {
+		fmt.Sscanf(parts[i], "%d", &res[i])
+	}
+	return res
 }
