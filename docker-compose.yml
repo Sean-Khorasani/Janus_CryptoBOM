@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: janus-postgres
+    environment:
+      POSTGRES_USER: janus
+      POSTGRES_PASSWORD: janus
+      POSTGRES_DB: janus
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U janus"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  janus-server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: janus-server
+    ports:
+      - "8080:8080"
+      - "9443:9443"
+    environment:
+      JANUS_DATABASE_URL: postgres://janus:janus@postgres:5432/janus?sslmode=disable
+      JANUS_HTTP_ADDR: 0.0.0.0:8080
+      JANUS_GRPC_ADDR: 0.0.0.0:9443
+      JANUS_DISABLE_AUTH: "false"
+      JANUS_COMMAND_SIGNING_KEY: local-development-command-signing-key
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  janus-agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: janus-agent
+    environment:
+      JANUS_CONTROLLER_ENDPOINT: http://janus-server:9443
+      JANUS_SCAN_ROOTS: /scan
+      JANUS_CACHE_PATH: /data/agent.db
+    volumes:
+      - .:/scan:ro
+      - agent-data:/data
+    depends_on:
+      - janus-server
+
+volumes:
+  pg-data:
+  agent-data:

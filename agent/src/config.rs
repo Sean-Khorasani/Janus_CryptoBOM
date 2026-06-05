@@ -5,6 +5,10 @@ use std::{fs, path::Path};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentConfig {
     pub controller_endpoint: String,
+    pub http_controller_endpoint: Option<String>,
+    pub tls_ca_cert: Option<String>,
+    pub tls_client_cert: Option<String>,
+    pub tls_client_key: Option<String>,
     pub execution_mode: String,
     pub cache_path: String,
     pub host_uuid_path: String,
@@ -60,6 +64,13 @@ impl AgentConfig {
         let raw = fs::read_to_string(path.as_ref())
             .with_context(|| format!("read {}", path.as_ref().display()))?;
         let mut cfg: AgentConfig = toml::from_str(&raw).context("parse TOML")?;
+        if cfg.command_signing_key.starts_with("dpapi:") || cfg.command_signing_key.starts_with("plain:") {
+            if let Ok(decrypted) = crate::storage::unprotect(&cfg.command_signing_key) {
+                if let Ok(dec_str) = String::from_utf8(decrypted) {
+                    cfg.command_signing_key = dec_str;
+                }
+            }
+        }
         cfg.load_plugin_manifests()?;
         cfg.validate()?;
         Ok(cfg)
@@ -118,5 +129,16 @@ impl AgentConfig {
             }
         }
         Ok(())
+    }
+
+    pub fn http_endpoint(&self) -> String {
+        if let Some(ref ep) = self.http_controller_endpoint {
+            return ep.clone();
+        }
+        if self.controller_endpoint.contains(":9443") {
+            self.controller_endpoint.replace(":9443", ":8080")
+        } else {
+            "http://127.0.0.1:8080".to_string()
+        }
     }
 }

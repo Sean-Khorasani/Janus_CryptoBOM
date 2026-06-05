@@ -65,6 +65,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 Ok(e) => e,
                 Err(_) => continue,
             };
+            super::status::update_progress("Dependency Analysis", entry.path());
             if !entry.file_type().is_file() || !is_manifest(entry.path()) {
                 continue;
             }

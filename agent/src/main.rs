@@ -29,12 +29,30 @@ async fn main() -> Result<()> {
     let cfg = AgentConfig::load(&args.config).context("load config")?;
     let db = storage::OfflineStore::open(&cfg.cache_path).context("open offline cache")?;
     db.ensure_schema().context("ensure offline cache schema")?;
+    db.perform_maintenance().ok();
+    discovery::status::run_self_test(&cfg);
+
+    if let Ok(prev) = db.get_stat("total_files_scanned") {
+        if prev > 0 {
+            discovery::status::PREVIOUS_TOTAL_FILES.store(prev, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 
     let reg = host::registration(&cfg).context("build registration")?;
     let active = mutation::MutationEngine::new(cfg.clone());
 
+    comms::start_heartbeat_loop(cfg.http_endpoint(), reg.host_uuid.clone()).await;
+
     loop {
+        discovery::status::SharedScanState::global().total_files_scanned.store(0, std::sync::atomic::Ordering::SeqCst);
+        discovery::status::SharedScanState::global().scan_progress.store(0, std::sync::atomic::Ordering::SeqCst);
+
         let mut payload = discovery::collect(&cfg, &reg.host_uuid).await.context("collect telemetry")?;
+        
+        let total_scanned = discovery::status::SharedScanState::global().total_files_scanned.load(std::sync::atomic::Ordering::SeqCst);
+        db.set_stat("total_files_scanned", total_scanned).ok();
+        discovery::status::set_phase("Idle");
+
         policy::assess(&mut payload);
         if !cfg.report_path.is_empty() {
             report::write_html_report(&cfg.report_path, &payload).context("write local report")?;

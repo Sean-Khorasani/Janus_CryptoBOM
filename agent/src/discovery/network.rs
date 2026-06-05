@@ -1,6 +1,6 @@
 use crate::{
     config::AgentConfig,
-    proto::{Evidence, NetworkObservation},
+    proto::{Evidence, NetworkObservation, CbomComponent, CryptoAlgorithm, CryptoRole},
 };
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use rustls::pki_types::ServerName;
 #[derive(Default)]
 pub struct NetworkScanResult {
     pub observations: Vec<NetworkObservation>,
+    pub components: Vec<CbomComponent>,
     pub evidence: Vec<Evidence>,
 }
 
@@ -102,9 +103,87 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
         }
 
         match native_probe(target, config_arc.clone()).await {
-            Ok((obs, raw)) => {
+            Ok((obs, raw, peer_certs)) => {
                 out.observations.push(obs);
                 out.evidence.push(evidence(target, "rustls-handshake", &raw, 0.90));
+
+                // Intermediate CA Auditing
+                // Check all certificates in the chain beyond the end-entity (i.e. index >= 1)
+                for (idx, cert) in peer_certs.iter().enumerate() {
+                    let cert_bytes = cert.as_ref();
+                    let (subj, iss, _not_after, sig) = parse_x509_der(cert_bytes);
+                    let (pubkey_alg, key_bits) = parse_x509_pubkey(cert_bytes).unwrap_or(("unknown".to_string(), 0));
+
+                    let is_intermediate = idx > 0;
+                    let mut is_weak_intermediate = false;
+                    let mut weak_reason = String::new();
+
+                    if is_intermediate {
+                        // Check if signature algorithm is MD5 or SHA-1
+                        let sig_upper = sig.to_uppercase();
+                        if sig_upper.contains("SHA1") || sig_upper.contains("SHA-1") || sig_upper.contains("MD5") {
+                            is_weak_intermediate = true;
+                            weak_reason = format!("Weak Intermediate CA Signature: {}", sig);
+                        }
+                        // Check if RSA key size is below 2048 bits
+                        if pubkey_alg == "RSA" && key_bits > 0 && key_bits < 2048 {
+                            is_weak_intermediate = true;
+                            weak_reason = format!("Weak Intermediate CA RSA key length: {} bits", key_bits);
+                        }
+                    }
+
+                    // Add intermediate CAs to components so they can be audited by policy engine
+                    if is_intermediate {
+                        let mut algorithms = vec![
+                            CryptoAlgorithm {
+                                name: sig.clone(),
+                                family: if sig.to_uppercase().contains("ECDSA") { "ECC".to_string() } else if sig.to_uppercase().contains("RSA") { "RSA".to_string() } else { "hash".to_string() },
+                                role: CryptoRole::CertSignature as i32,
+                                status: if is_weak_intermediate { "weak-intermediate-ca-observed".to_string() } else { "intermediate-ca-observed".to_string() },
+                                key_bits: 0,
+                                curve: String::new(),
+                                implementation_library: "Network TLS Chain".to_string(),
+                                source_file: target.clone(),
+                                source_line: 0,
+                                source_column: 0,
+                                symbol: weak_reason.clone(),
+                                confidence: 0.90,
+                                quantum_vulnerable: sig.to_uppercase().contains("RSA") || sig.to_uppercase().contains("ECDSA"),
+                            }
+                        ];
+
+                        if key_bits > 0 {
+                            algorithms.push(CryptoAlgorithm {
+                                name: format!("{}-{}", pubkey_alg, key_bits),
+                                family: pubkey_alg.clone(),
+                                role: CryptoRole::CertPublicKey as i32,
+                                status: if is_weak_intermediate { "weak-intermediate-ca-observed".to_string() } else { "intermediate-ca-observed".to_string() },
+                                key_bits,
+                                curve: String::new(),
+                                implementation_library: "Network TLS Chain".to_string(),
+                                source_file: target.clone(),
+                                source_line: 0,
+                                source_column: 0,
+                                symbol: pubkey_alg.clone(),
+                                confidence: 0.90,
+                                quantum_vulnerable: pubkey_alg == "RSA" || pubkey_alg.contains("ECDSA"),
+                            });
+                        }
+
+                        out.components.push(CbomComponent {
+                            bom_ref: format!("certificate:intermediate-ca:{}", sha256_hex(cert_bytes)),
+                            name: subj.clone(),
+                            version: String::new(),
+                            component_type: "certificate".to_string(),
+                            purl: String::new(),
+                            file_path: "network-tls-chain".to_string(),
+                            language: "tls".to_string(),
+                            algorithms,
+                            dependencies: if iss.is_empty() { Vec::new() } else { vec![iss] },
+                            reachable: true,
+                        });
+                    }
+                }
             }
             Err(err) => {
                 let raw = format!("probe-error:{err}");
@@ -115,12 +194,86 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
     Ok(out)
 }
 
-async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(NetworkObservation, Vec<u8>)> {
+async fn negotiate_starttls(stream: &mut TcpStream, port: u16) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = [0u8; 4096];
+    match port {
+        25 | 587 => {
+            // Read SMTP Banner
+            let _ = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
+            // Send EHLO
+            stream.write_all(b"EHLO janus-agent\r\n").await?;
+            // Read EHLO response
+            loop {
+                let n = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
+                if n == 0 {
+                    break;
+                }
+                let s = String::from_utf8_lossy(&buf[..n]);
+                if s.contains("250 ") || s.contains("250\r\n") {
+                    break;
+                }
+            }
+            // Send STARTTLS
+            stream.write_all(b"STARTTLS\r\n").await?;
+            let n = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
+            let resp = String::from_utf8_lossy(&buf[..n]);
+            if !resp.starts_with("220") {
+                return Err(anyhow::anyhow!("SMTP STARTTLS negotiation failed: {}", resp));
+            }
+        }
+        389 => {
+            // LDAP STARTTLS
+            let ldap_start_tls = &[
+                0x30, 0x1d, 0x02, 0x01, 0x01, 0x77, 0x18, 0x80, 0x16, 0x31, 0x2e, 0x33, 0x2e, 0x36,
+                0x2e, 0x31, 0x2e, 0x34, 0x2e, 0x31, 0x2e, 0x31, 0x34, 0x36, 0x36, 0x2e, 0x32, 0x30,
+                0x30, 0x33, 0x37,
+            ];
+            stream.write_all(ldap_start_tls).await?;
+            let n = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
+            if n < 7 || buf[0] != 0x30 {
+                return Err(anyhow::anyhow!("LDAP STARTTLS negotiation failed"));
+            }
+        }
+        5432 => {
+            // PostgreSQL SSLRequest
+            let ssl_req = &[0, 0, 0, 8, 4, 210, 45, 47];
+            stream.write_all(ssl_req).await?;
+            let mut resp = [0u8; 1];
+            timeout(Duration::from_secs(2), stream.read_exact(&mut resp)).await??;
+            if resp[0] != b'S' {
+                return Err(anyhow::anyhow!("PostgreSQL SSL not supported"));
+            }
+        }
+        3306 => {
+            // MySQL Handshake & SSLRequest
+            // Read handshake packet
+            let _ = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
+            // Send SSLRequest
+            let ssl_req = &[
+                0x20, 0x00, 0x00, 0x01,
+                0x00, 0x8a, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x01,
+                0x21,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ];
+            stream.write_all(ssl_req).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(NetworkObservation, Vec<u8>, Vec<rustls::pki_types::CertificateDer<'static>>)> {
     let host = target.split(':').next().unwrap_or(target);
+    let port = target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(443);
     
     let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(target))
         .await
         .map_err(|e| anyhow::anyhow!("Connection timeout: {}", e))??;
+
+    negotiate_starttls(&mut stream, port).await?;
         
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|_| anyhow::anyhow!("invalid server name: {}", host))?;
@@ -164,14 +317,19 @@ async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(Networ
     let mut cert_not_after = 0;
     let mut sig_alg = String::new();
 
+    let mut peer_certs = Vec::new();
     if let Some(certs) = conn.peer_certificates() {
-        if let Some(first_cert) = certs.first() {
-            let (subj, iss, not_after, sig) = parse_x509_der(first_cert.as_ref());
-            cert_subject = subj;
-            cert_issuer = iss;
-            cert_not_after = not_after;
-            sig_alg = sig;
+        for cert in certs {
+            peer_certs.push(rustls::pki_types::CertificateDer::from(cert.as_ref().to_vec()));
         }
+    }
+
+    if let Some(first_cert) = peer_certs.first() {
+        let (subj, iss, not_after, sig) = parse_x509_der(first_cert.as_ref());
+        cert_subject = subj;
+        cert_issuer = iss;
+        cert_not_after = not_after;
+        sig_alg = sig;
     }
 
     // Extract named group from raw ServerHello bytes
@@ -205,7 +363,7 @@ async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(Networ
         cleartext: false,
     };
 
-    Ok((obs, raw_bytes))
+    Ok((obs, raw_bytes, peer_certs))
 }
 
 pub(crate) fn extract_named_group(bytes: &[u8]) -> Option<u16> {
@@ -266,47 +424,47 @@ pub(crate) fn extract_named_group(bytes: &[u8]) -> Option<u16> {
     None
 }
 
+struct Element<'a> {
+    tag: u8,
+    value: &'a [u8],
+}
+
+fn read_tlv(mut data: &[u8]) -> Vec<Element<'_>> {
+    let mut elements = Vec::new();
+    while !data.is_empty() {
+        let tag = data[0];
+        if data.len() < 2 {
+            break;
+        }
+        let len_byte = data[1];
+        let (len, header_len) = if len_byte & 0x80 == 0 {
+            (len_byte as usize, 2)
+        } else {
+            let num_bytes = (len_byte & 0x7f) as usize;
+            if data.len() < 2 + num_bytes {
+                break;
+            }
+            let mut l = 0;
+            for b in &data[2..2 + num_bytes] {
+                l = (l << 8) | (*b as usize);
+            }
+            (l, 2 + num_bytes)
+        };
+        if data.len() < header_len + len {
+            break;
+        }
+        let value = &data[header_len..header_len + len];
+        elements.push(Element { tag, value });
+        data = &data[header_len + len..];
+    }
+    elements
+}
+
 pub(crate) fn parse_x509_der(der: &[u8]) -> (String, String, i64, String) {
     let mut subject = String::new();
     let mut issuer = String::new();
     let mut not_after = 0;
     let mut sig_alg = String::new();
-
-    struct Element<'a> {
-        tag: u8,
-        value: &'a [u8],
-    }
-
-    fn read_tlv(mut data: &[u8]) -> Vec<Element<'_>> {
-        let mut elements = Vec::new();
-        while !data.is_empty() {
-            let tag = data[0];
-            if data.len() < 2 {
-                break;
-            }
-            let len_byte = data[1];
-            let (len, header_len) = if len_byte & 0x80 == 0 {
-                (len_byte as usize, 2)
-            } else {
-                let num_bytes = (len_byte & 0x7f) as usize;
-                if data.len() < 2 + num_bytes {
-                    break;
-                }
-                let mut l = 0;
-                for b in &data[2..2 + num_bytes] {
-                    l = (l << 8) | (*b as usize);
-                }
-                (l, 2 + num_bytes)
-            };
-            if data.len() < header_len + len {
-                break;
-            }
-            let value = &data[header_len..header_len + len];
-            elements.push(Element { tag, value });
-            data = &data[header_len + len..];
-        }
-        elements
-    }
 
     let top = read_tlv(der);
     if let Some(cert_seq) = top.first().filter(|e| e.tag == 0x30) {
@@ -422,12 +580,92 @@ pub(crate) fn parse_x509_der(der: &[u8]) -> (String, String, i64, String) {
             "ECDSA-SHA256".to_string()
         } else if oid == [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03] {
             "ECDSA-SHA384".to_string()
+        } else if oid == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05] {
+            "SHA1-RSA".to_string()
+        } else if oid == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x04] {
+            "MD5-RSA".to_string()
         } else {
             "unknown".to_string()
         }
     }
 
     (subject, issuer, not_after, sig_alg)
+}
+
+fn parse_x509_pubkey(der: &[u8]) -> Option<(String, u32)> {
+    let top = read_tlv(der);
+    let cert_seq = top.first().filter(|e| e.tag == 0x30)?;
+    let tbs_seq = read_tlv(cert_seq.value);
+    let tbs = tbs_seq.first().filter(|e| e.tag == 0x30)?;
+    let tbs_elements = read_tlv(tbs.value);
+    
+    let mut idx = 0;
+    if idx < tbs_elements.len() && tbs_elements[idx].tag == 0xa0 {
+        idx += 1;
+    }
+    if idx < tbs_elements.len() && tbs_elements[idx].tag == 0x02 {
+        idx += 1;
+    }
+    if idx < tbs_elements.len() && tbs_elements[idx].tag == 0x30 {
+        idx += 1; // signature algorithm
+    }
+    if idx < tbs_elements.len() && tbs_elements[idx].tag == 0x30 {
+        idx += 1; // issuer
+    }
+    if idx < tbs_elements.len() && tbs_elements[idx].tag == 0x30 {
+        idx += 1; // validity
+    }
+    if idx < tbs_elements.len() && tbs_elements[idx].tag == 0x30 {
+        idx += 1; // subject
+    }
+    if idx < tbs_elements.len() && tbs_elements[idx].tag == 0x30 {
+        // subjectPublicKeyInfo
+        let spki_elements = read_tlv(tbs_elements[idx].value);
+        if spki_elements.len() >= 2 {
+            let alg_seq = &spki_elements[0];
+            let pubkey_bitstring = &spki_elements[1];
+            
+            // Extract OID from alg_seq
+            let alg_elements = read_tlv(alg_seq.value);
+            let oid = alg_elements.first().filter(|e| e.tag == 0x06)?.value;
+            
+            if oid == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01] {
+                // RSA Public Key
+                if pubkey_bitstring.value.len() > 1 {
+                    let rsa_der = &pubkey_bitstring.value[1..];
+                    let rsa_seq = read_tlv(rsa_der);
+                    if let Some(seq) = rsa_seq.first().filter(|e| e.tag == 0x30) {
+                        let rsa_elements = read_tlv(seq.value);
+                        if let Some(modulus) = rsa_elements.first().filter(|e| e.tag == 0x02) {
+                            let mut val = modulus.value;
+                            if !val.is_empty() && val[0] == 0 {
+                                val = &val[1..];
+                            }
+                            let bits = val.len() as u32 * 8;
+                            return Some(("RSA".to_string(), bits));
+                        }
+                    }
+                }
+            } else if oid == [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01] {
+                // EC Public Key
+                let mut curve = "unknown-curve".to_string();
+                if alg_elements.len() >= 2 && alg_elements[1].tag == 0x06 {
+                    let curve_oid = alg_elements[1].value;
+                    if curve_oid == [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] {
+                        curve = "secp256r1".to_string();
+                    } else if curve_oid == [0x2b, 0x81, 0x04, 0x00, 0x0a] {
+                        curve = "secp256k1".to_string();
+                    } else if curve_oid == [0x2b, 0x81, 0x04, 0x00, 0x22] {
+                        curve = "secp384r1".to_string();
+                    } else if curve_oid == [0x2b, 0x81, 0x04, 0x00, 0x23] {
+                        curve = "secp521r1".to_string();
+                    }
+                }
+                return Some((format!("ECDSA ({curve})"), 256));
+            }
+        }
+    }
+    None
 }
 
 fn evidence(target: &str, tool: &str, raw: &[u8], confidence: f64) -> Evidence {
@@ -443,6 +681,12 @@ fn evidence(target: &str, tool: &str, raw: &[u8], confidence: f64) -> Evidence {
         confidence,
         sensitivity_class: "handshake-metadata".to_string(),
     }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(data);
+    hex::encode(h.finalize())
 }
 
 fn now() -> i64 {

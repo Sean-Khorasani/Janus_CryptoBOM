@@ -36,6 +36,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 Ok(e) => e,
                 Err(_) => continue,
             };
+            super::status::update_progress("Binary PE/ELF Inspection", entry.path());
             if !entry.file_type().is_file() {
                 continue;
             }

@@ -191,6 +191,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 Ok(e) => e,
                 Err(_) => continue,
             };
+            super::status::update_progress("Static Source Analysis", entry.path());
             if !entry.file_type().is_file() || !is_source(entry.path()) {
                 continue;
             }
@@ -318,7 +319,13 @@ fn patterns() -> Result<Vec<Pattern>> {
 
 fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
     let s = path.to_string_lossy();
-    !cfg.exclude_dirs.iter().any(|d| s.contains(d))
+    if cfg.exclude_dirs.iter().any(|d| s.contains(d)) {
+        return false;
+    }
+    if super::status::get_exclusions().iter().any(|d| s.contains(d)) {
+        return false;
+    }
+    true
 }
 
 fn is_source(path: &Path) -> bool {

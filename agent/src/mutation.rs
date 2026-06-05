@@ -107,13 +107,24 @@ impl MutationEngine {
         fs::write(&config_path, patched).with_context(|| format!("write patched {}", config_path.display()))?;
 
         if let Err(err) = self.validate(&cmd.target_service, &config_path).await {
-            let _ = fs::write(&config_path, original);
+            let _ = fs::write(&config_path, &original);
             anyhow::bail!("validation failed and rollback restored backup: {err:#}");
         }
 
         if let Err(err) = self.reload(&cmd.target_service).await {
-            let _ = fs::write(&config_path, original);
+            let _ = fs::write(&config_path, &original);
             anyhow::bail!("reload failed and rollback restored backup: {err:#}");
+        }
+
+        if !cmd.dry_run && !self.cfg.network_targets.is_empty() {
+            let has_tls_targets = self.cfg.network_targets.iter().any(|t| !t.ends_with(":80"));
+            if has_tls_targets {
+                if verify_post_migration(&cmd.target_service, &self.cfg).await.is_none() {
+                    let _ = fs::write(&config_path, &original);
+                    let _ = self.reload(&cmd.target_service).await;
+                    anyhow::bail!("post-migration TLS handshake verification failed; rollback restored backup");
+                }
+            }
         }
 
         Ok(format!(
@@ -138,6 +149,14 @@ impl MutationEngine {
     fn checked_config_path(&self, raw: &str) -> Result<PathBuf> {
         let path = PathBuf::from(raw);
         let canonical = path.canonicalize().with_context(|| format!("canonicalize {raw}"))?;
+        
+        if let Some(ext) = canonical.extension().and_then(|s| s.to_str()) {
+            let ext_lower = ext.to_ascii_lowercase();
+            if ["exe", "dll", "bat", "sh", "cmd", "bin", "msi", "com", "vbs", "ps1"].contains(&ext_lower.as_str()) {
+                anyhow::bail!("mutation blocked: target file extension '.{}' is restricted", ext);
+            }
+        }
+
         for root in &self.cfg.active.allowed_config_roots {
             let root = PathBuf::from(root).canonicalize().with_context(|| format!("canonicalize root {root}"))?;
             if canonical.starts_with(root) {
@@ -250,6 +269,16 @@ impl MutationEngine {
                 anyhow::bail!("certificate validation failed and rollback was attempted: {err:#}");
             }
 
+            if !self.cfg.network_targets.is_empty() {
+                let has_tls_targets = self.cfg.network_targets.iter().any(|t| !t.ends_with(":80"));
+                if has_tls_targets {
+                    if verify_post_migration(&cmd.target_service, &self.cfg).await.is_none() {
+                        let _ = rollback_windows_cert(&store, &thumbprint).await;
+                        anyhow::bail!("post-migration TLS handshake verification failed; certificate import rolled back");
+                    }
+                }
+            }
+
             Ok(format!(
                 "certificate imported into Windows store {} with thumbprint {}",
                 store, thumbprint
@@ -292,6 +321,16 @@ impl MutationEngine {
                 if let Err(err) = write_registry_dword(change).await {
                     let _ = rollback_registry_dwords(&rollback).await;
                     anyhow::bail!("Schannel registry update failed and rollback was attempted: {err:#}");
+                }
+            }
+
+            if !self.cfg.network_targets.is_empty() {
+                let has_tls_targets = self.cfg.network_targets.iter().any(|t| !t.ends_with(":80"));
+                if has_tls_targets {
+                    if verify_post_migration(&cmd.target_service, &self.cfg).await.is_none() {
+                        let _ = rollback_registry_dwords(&rollback).await;
+                        anyhow::bail!("post-migration TLS handshake verification failed; Schannel registry update rolled back");
+                    }
                 }
             }
 

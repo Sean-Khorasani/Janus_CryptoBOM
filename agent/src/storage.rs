@@ -33,7 +33,46 @@ CREATE TABLE IF NOT EXISTS sync_audit (
   detail TEXT NOT NULL,
   created_at_unix INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scan_stats (
+  stat_key TEXT PRIMARY KEY,
+  stat_value INTEGER NOT NULL
+);
 "#,
+        )?;
+        Ok(())
+    }
+
+    pub fn perform_maintenance(&self) -> Result<()> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            let res: String = row.get(0)?;
+            if res != "ok" {
+                anyhow::bail!("sqlite integrity check failed: {}", res);
+            }
+        }
+        conn.execute("VACUUM", [])?;
+        Ok(())
+    }
+
+    pub fn get_stat(&self, key: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut stmt = conn.prepare("SELECT stat_value FROM scan_stats WHERE stat_key = ?1")?;
+        let mut rows = stmt.query([key])?;
+        if let Some(row) = rows.next()? {
+            let val: i64 = row.get(0)?;
+            Ok(val as usize)
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn set_stat(&self, key: &str, val: usize) -> Result<()> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO scan_stats (stat_key, stat_value) VALUES (?1, ?2)",
+            params![key, val as i64],
         )?;
         Ok(())
     }
@@ -88,7 +127,7 @@ CREATE TABLE IF NOT EXISTS sync_audit (
 }
 
 #[cfg(target_os = "windows")]
-fn protect(data: &[u8]) -> Result<String> {
+pub fn protect(data: &[u8]) -> Result<String> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Security::Cryptography::{
         CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
@@ -126,7 +165,7 @@ fn protect(data: &[u8]) -> Result<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn unprotect(raw: &str) -> Result<Vec<u8>> {
+pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Security::Cryptography::{
         CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
@@ -168,12 +207,12 @@ fn unprotect(raw: &str) -> Result<Vec<u8>> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn protect(data: &[u8]) -> Result<String> {
+pub fn protect(data: &[u8]) -> Result<String> {
     Ok(format!("plain:{}", STANDARD.encode(data)))
 }
 
 #[cfg(not(target_os = "windows"))]
-fn unprotect(raw: &str) -> Result<Vec<u8>> {
+pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
     if let Some(encoded) = raw.strip_prefix("plain:") {
         return Ok(STANDARD.decode(encoded)?);
     }
