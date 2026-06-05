@@ -139,12 +139,15 @@ The implementation deliberately treats runtime and memory discovery as secret-sa
 
 ### Central Server & Administration (Go & React)
 * **Dynamic Compliance Policy Studio**: Allows security administrators to create, test, and apply cryptographic compliance profiles (such as requiring TLS 1.3, hybrid PQC, specific preferred KEM/signatures, and minimum classical key bits) through a visual studio console.
+* **Context-Aware Risk Engine**: Intelligently scores vulnerabilities based on heuristic usage intent, downgrading findings related to verification-only or negotiation paths to drastically reduce false positives.
+* **Live OSV.dev Integration**: Automated cross-referencing of discovered libraries and components against the live OSV.dev vulnerability database to identify active CVEs in cryptographic implementations.
 * **Asynchronous Webhook Dispatcher**: Fires instant real-time alerts to pre-configured webhooks (like Slack, Microsoft Teams, or webhook receivers) upon discovery of non-compliant/critical cryptographic vulnerabilities.
 * **Telemetry Data Retention Manager**: Configures automatic aging thresholds and runs background cleanup workers (along with manual on-demand triggers) to keep telemetry data size optimized.
 * **SIEM Auditing & Export**: Packages and serializes fleet audit logs and system telemetry into structured JSON streams formatted for native Splunk, Elastic, or Sentinel ingestion.
 * **Prometheus Observability**: Native HTTP `/metrics` endpoint exporting real-time fleet health, active assets, vulnerability metrics, and pending/failed PQC migrations.
 
 ### Multi-Platform Endpoint Agent (Rust)
+* **Semantic Context Analysis**: Multi-language code scanning enriched with context awareness to identify whether a cryptographic algorithm is actively protecting data, verifying signatures, or merely referenced in test code or comments.
 * **Process DLL Auditing**: Inspects running processes on-host to enumerate active dynamically loaded modules, identifying cryptography library hooks (like `openssl.dll`, `bcrypt.dll`) and capturing live runtime bindings.
 * **SQLite Cache Optimization Suite**: Standard local cache maintenance system conducting integrity checkups (`PRAGMA integrity_check`) and database vacuuming (`VACUUM`) to ensure filesystem efficiency.
 * **Startup Diagnostics Console**: Diagnostic routines validating system environment, offline database state, and gRPC network latency on startup.
@@ -256,6 +259,10 @@ $env:JANUS_DATABASE_URL="postgres://janus:janus@127.0.0.1:5432/janus?sslmode=dis
 $env:JANUS_GRPC_ADDR="127.0.0.1:9443"
 $env:JANUS_HTTP_ADDR="127.0.0.1:8080"
 $env:JANUS_COMMAND_SIGNING_KEY="local-development-command-signing-key"
+
+# (Optional) Enable LLM-Powered Context Analysis for False Positive Reduction
+# $env:JANUS_LLM_API_KEY="sk-..."
+# $env:JANUS_LLM_API_URL="https://api.openai.com/v1" # (Defaults to OpenAI if omitted)
 
 # 2. Run the server executable
 .\bin\janus-server.exe
