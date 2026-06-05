@@ -7,39 +7,33 @@
 ------------------------------
 ## 1. Functional & Technical Requirements
 
-```
-                                +---------------------------+
+```mermaid
+graph TD
+    UI[Janus Central UI<br>React WebUI / Go Backend]
+    subgraph AGENT [Janus Multi-Platform Agent]
+        CE[Core Engine<br>Rust State Machine]
+        TB[Telemetry Bus<br>JSON-RPC / Protobuf]
+        DB[(Local SQLite DB<br>Offline Cache)]
+        
+        subgraph PLUGINS [Pluggable Architecture Layer]
+            direction TB
+            subgraph PHASE1 [Phase 1: Discovery & Passive Scanning]
+                SAS[Static AppSec Scan<br>Binaries, OS, Source]
+                DMS[Dynamic Memory Scan<br>Process DLL / loaded modules]
+                NET[Network Infrastructure<br>PCAP / TLS handshake]
+            end
+            subgraph PHASE2 [Phase 2: Active Mutation & Upgrade]
+                ACC[Automated CA Connector<br>EST / ACME PQC Profile]
+                TSM[Trust Store Mutator<br>OS, JVM, Browsers]
+                SHP[Service Hot-Patcher<br>Config Sandboxed unified diffs]
+            end
+        end
+    end
 
-                                |    Janus Central UI       |
-                                | (React WebUI / Go Backend)|
-                                +---------------------------+
-                                              ^
-
-                                              | HTTPS/gRPC (TLS 1.3 / ML-KEM)
-                                              v
-+---------------------------------------------------------------------------------------------------------+
-|                                        JANUS MULTI-PLATFORM AGENT                                       |
-|                                                                                                         |
-|  +--------------------+       +------------------------------------+       +-------------------------+  |
-|  |    Core Engine     | ----> |           Telemetry Bus            | ----> |     Local SQLite DB     |  |
-|  | (Rust State Machine)|       |  (JSON-RPC / Protobuf Transport)   |       |  (Offline Cache/State)  |  |
-|  +--------------------+       +------------------------------------+       +-------------------------+  |
-|            |                                                                                             |
-|            v                                                                                             |
-|  +----------------------------------------------------------------------------------------------------+  |
-|  |                                    PLUGGABLE ARCHITECTURE LAYER                                    |
-|  |                                                                                                    |
-|  |  +-------------------------+   +--------------------------+   +---------------------------------+  |
-|  |  |   Static AppSec Scan    |   |    Dynamic Memory Scan   |   |      Network Infrastructure     |  |
-|  |  |  (Binaries, OS, Source) |   | (eBPF Hooking/RAM Carve) |   |    (PCAP / TLS/SSL Handshake)  |  |
-|  |  +-------------------------+   +--------------------------+   +---------------------------------+  |
-|  |               =========================== PHASE 2: MUTATION ===========================            |
-|  |  +-------------------------+   +--------------------------+   +---------------------------------+  |
-|  |  |   Automated CA Connector|   |  Trust Store Mutator     |   |      Service Hot-Patcher        |  |
-|  |  | (EST / ACME PQC Profile)|   | (OS, JVM, Browser Stores)|   |  (Conf Updates, Process Reload) |  |
-|  |  +-------------------------+   +--------------------------+   +---------------------------------+  |
-+--+----------------------------------------------------------------------------------------------------+--+
-
+    UI <-- "HTTPS / gRPC<br>(TLS 1.3 / ML-KEM)" --> CE
+    CE --> TB
+    TB --> DB
+    CE --> PLUGINS
 ```
 ## 1.1 Discovery & Passive Mapping
 
@@ -111,23 +105,21 @@
 ------------------------------
 ## 3. High-Level Architectural Design (HLD)## 3.1 Central Controller Architecture
 The Central Server runs a high-performance Go backend coupled to a decoupled single-page React frontend console. It processes asymmetric JSON payloads and protobuf packets over gRPC pipelines.
-```
+```mermaid
+graph LR
+    subgraph Central Controller
+        FE[React Frontend<br>Admin Dashboard]
+        API[Go Server API<br>Gateway / Controllers]
+        ORCH[Orchestration Engine<br>Task Workers]
+        DB[(Persistent Storage<br>PostgreSQL)]
+    end
+    
+    AGENT[Janus Local Agent]
 
-                                 CENTRAL CONTROLLER ARCHITECTURE
-                                 
- +------------------+     +-------------------+     +--------------------+     +-------------------+
-
- |  React Frontend  | <-> |  Go Fiber API     | <-> |  Orchestration     | <-> | Persistent Storage|
- |  Admin Dashboard |     |  Gateway Server   |     |  Engine / Workers  |     | PostgreSQL/Timescale|
- +------------------+     +-------------------+     +--------------------+     +-------------------+
-                                    ^
-
-                                    | gRPC over TLS 1.3 / ML-KEM
-                                    v
-                          +-------------------+
-                          | Janus Local Agent |
-                          +-------------------+
-
+    FE <--> API
+    API <--> ORCH
+    ORCH <--> DB
+    API <-- "gRPC over TLS 1.3 / ML-KEM" --> AGENT
 ```
 ## Storage Schema Essentials
 
@@ -138,43 +130,31 @@ The Central Server runs a high-performance Go backend coupled to a decoupled sin
 The agent is written in Rust to guarantee low overhead and memory safety. It uses a decoupled modular design that runs completely in user space during Passive operations.
 
 * **DPAPI Configuration & Secret Decryption Engine**: On Windows, the agent supports native Data Protection API (DPAPI) decryption of sensitive parameters (such as gRPC authentication keys or CA passwords). Decryption occurs dynamically in-memory on startup, protecting local agent configurations from raw credential exposure on the filesystem.
-```
+```mermaid
+graph TD
+    SERVER[Janus Central Server]
+    
+    subgraph Agent [Janus Agent Workspace - Rust Loop]
+        SCH[Internal Scheduler<br>Ticker Loop / Tasks]
+        MGR[Module Plugin Manager<br>Dynamic Loader]
+        BUS[Local Execution Bus<br>IPC Communication]
+        
+        PSP[Passive Scan Plugin<br>SCA / OS / Process DLL Discovery]
+        DMP[Dynamic Memory Plugin<br>Library Hooks]
+        AMP[Active Mutation Plugin<br>Cert Engine / Config Mutator]
+        
+        DB[(Secure Local Store DB<br>SQLite DPAPI Encrypted)]
+    end
 
-                                     JANUS AGENT ARCHITECTURE
-                                     
-                                     +--------------------+
-
-                                     | Janus Central Server|
-                                     +--------------------+
-                                               ^
-
-                                               | gRPC (TLS 1.3 / Hybrid)
-                                               v
-+---------------------------------------------------------------------------------------------------------+
-|  Janus Core Agent Workspace (Rust Platform Loop)                                                         |
-|                                                                                                         |
-|  +-----------------------+     +-------------------------+     +-------------------------+              |
-|  | Internal Scheduler    | --> | Module Plugin Manager   | --> | Local Execution Bus     |              |
-|  | (Ticker Loop / Tasks) |     | (Dynamic Load/Unload)   |     | (IPC Communication)     |              |
-|  +-----------------------+     +-------------------------+     +-------------------------+              |
-|                                             |                                                           |
-|                     +-----------------------+-----------------------+                                   |
-|                     |                       |                       |                                   |
-|                     v                       v                       v                                   |
-|        +-------------------------+ +-------------------------+ +-------------------------+              |
-|        |   Passive Scan Plugin   | |   Dynamic Memory Plugin | |  Active Mutation Plugin |              |
-|        | (SCA / OS Discovery)    | |  (eBPF / Library Hook)  | |  (Cert Engine/Configs)  |              |
-|        +-------------------------+ +-------------------------+ +-------------------------+              |
-|                     |                       |                       |                                   |
-|                     +-----------------------+-----------------------+                                   |
-|                                             |                                                           |
-|                                             v                                                           |
-|                                +-------------------------+                                              |
-|                                | Secure Local Store DB   |                                              |
-|                                | (SQLite Ledger Encrypted|                                              |
-|                                +-------------------------+                                              |
-+---------------------------------------------------------------------------------------------------------+
-
+    SERVER <-- "gRPC (TLS 1.3 / Hybrid PQC)" --> Agent
+    SCH --> MGR
+    MGR --> BUS
+    BUS --> PSP
+    BUS --> DMP
+    BUS --> AMP
+    PSP --> DB
+    DMP --> DB
+    AMP --> DB
 ```
 ## 3.3 System Control Workflows## Network & Asset Processing Sequence
 
