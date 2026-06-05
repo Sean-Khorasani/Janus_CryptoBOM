@@ -50,39 +50,76 @@ export function OverviewView({ overview, score, findings, components, assets, st
         </section>
       </div>
 
-      <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
-        <h2 className="text-base font-semibold mb-3">Asset Remediation Status</h2>
-        <div className="flex flex-wrap gap-4">
-          {assets.length === 0 ? (
-            <span className="remediation-progress text-sm font-medium text-[#4d594f]" data-testid="remediation-progress">
-              {findings.filter(f => statuses[f.finding_id] === "remediated" || statuses[f.finding_id] === "false-positive").length}/{findings.length} findings remediated
-            </span>
-          ) : (
-            (() => {
-              const anyAssetHasFindings = assets.some(asset => findings.some(f => f.host_uuid === asset.host_uuid || f.asset_ref === asset.hostname));
-              return assets.map((asset, idx) => {
-                let assetFindings = findings.filter(f => f.host_uuid === asset.host_uuid || f.asset_ref === asset.hostname);
-                if (!anyAssetHasFindings && idx === 0) {
-                  assetFindings = findings;
-                }
-                const total = assetFindings.length;
-                const remediated = assetFindings.filter(f => {
-                  const s = statuses[f.finding_id];
-                  return s === "remediated" || s === "false-positive";
-                }).length;
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-base font-semibold">Algorithm Exposure Distribution</h2>
+            <GitBranch size={18} className="text-[#8b5cf6]" />
+          </div>
+          <div className="space-y-3">
+            {histogram.length === 0 ? (
+              <div className="text-xs text-[#697469] text-center py-8">
+                No algorithms cataloged in the CBOM index yet.
+              </div>
+            ) : (
+              histogram.map(([alg, count]) => {
+                const percent = Math.round((count / max) * 100);
+                const isPQC = alg.toUpperCase().includes("ML-KEM") || alg.toUpperCase().includes("ML-DSA") || alg.toUpperCase().includes("SLH-DSA") || alg.toUpperCase().includes("MLKEM");
                 return (
-                  <div key={asset.host_uuid} className="rounded border border-[#edf1ea] p-3 bg-[#f7f8f5]">
-                    <div className="text-xs font-semibold text-[#697469] mb-1">Asset Status ({asset.hostname.slice(0, 5)}...)</div>
-                    <span className="remediation-progress font-medium text-sm text-[#17211c]" data-testid="remediation-progress">
-                      {remediated}/{total} findings remediated
-                    </span>
+                  <div key={alg} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold font-mono text-[#17211c]">{alg}</span>
+                      <span className="text-[#697469] font-medium">{count} instances</span>
+                    </div>
+                    <div className="h-2 w-full rounded-full bg-[#f7f8f5] overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          isPQC ? "bg-[#11845b]" : "bg-[#8b5cf6]"
+                        }`}
+                        style={{ width: `${percent}%` }}
+                      />
+                    </div>
                   </div>
                 );
-              });
-            })()
-          )}
-        </div>
-      </section>
+              })
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
+          <h2 className="text-base font-semibold mb-3">Asset Remediation Status</h2>
+          <div className="flex flex-wrap gap-4">
+            {assets.length === 0 ? (
+              <span className="remediation-progress text-sm font-medium text-[#4d594f]" data-testid="remediation-progress">
+                {findings.filter(f => statuses[f.finding_id] === "remediated" || statuses[f.finding_id] === "false-positive").length}/{findings.length} findings remediated
+              </span>
+            ) : (
+              (() => {
+                const anyAssetHasFindings = assets.some(asset => findings.some(f => f.host_uuid === asset.host_uuid || f.asset_ref === asset.hostname));
+                return assets.map((asset, idx) => {
+                  let assetFindings = findings.filter(f => f.host_uuid === asset.host_uuid || f.asset_ref === asset.hostname);
+                  if (!anyAssetHasFindings && idx === 0) {
+                    assetFindings = findings;
+                  }
+                  const total = assetFindings.length;
+                  const remediated = assetFindings.filter(f => {
+                    const s = statuses[f.finding_id];
+                    return s === "remediated" || s === "false-positive";
+                  }).length;
+                  return (
+                    <div key={asset.host_uuid} className="rounded border border-[#edf1ea] p-3 bg-[#f7f8f5] flex-1 min-w-[200px]">
+                      <div className="text-xs font-semibold text-[#697469] mb-1">Asset Status ({asset.hostname})</div>
+                      <span className="remediation-progress font-medium text-sm text-[#17211c]" data-testid="remediation-progress">
+                        {remediated}/{total} findings remediated
+                      </span>
+                    </div>
+                  );
+                });
+              })()
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

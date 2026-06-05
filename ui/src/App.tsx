@@ -7,6 +7,8 @@ import { CbomViewer } from "./components/CbomViewer";
 import { MigrationConsole } from "./components/MigrationConsole";
 import { ComplianceMatrix } from "./components/ComplianceMatrix";
 import { PolicyStudio } from "./components/PolicyStudio";
+import { FleetManagement } from "./components/FleetManagement";
+import { Activity } from "lucide-react";
 
 function TabButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
   return (
@@ -24,8 +26,25 @@ function TabButton({ active, onClick, icon, label }: { active: boolean; onClick:
 }
 
 function App() {
-  const { overview, assets, components, findings, migrations, activePolicy, policies, error, score, loading, enqueueMigration, switchPolicy } = useApi();
-  const [tab, setTab] = useState<"overview" | "cbom" | "compliance" | "policy" | "migrations">("overview");
+  const {
+    overview,
+    assets,
+    components,
+    findings,
+    migrations,
+    activePolicy,
+    policies,
+    error,
+    score,
+    loading,
+    enqueueMigration,
+    switchPolicy,
+    fetchFleetConfig,
+    saveFleetConfig,
+    fetchAuditLogs,
+    fetchAgentDiagnostics
+  } = useApi();
+  const [tab, setTab] = useState<"overview" | "cbom" | "compliance" | "policy" | "migrations" | "fleet">("overview");
 
   const [statuses, setStatuses] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
@@ -77,6 +96,7 @@ function App() {
             <TabButton active={tab === "compliance"} onClick={() => setTab("compliance")} icon={<Shield size={16} />} label="Compliance" />
             <TabButton active={tab === "policy"} onClick={() => setTab("policy")} icon={<Sliders size={16} />} label="Policy Studio" />
             <TabButton active={tab === "migrations"} onClick={() => setTab("migrations")} icon={<TerminalSquare size={16} />} label="Migrations" />
+            <TabButton active={tab === "fleet"} onClick={() => setTab("fleet")} icon={<Activity size={16} />} label="Fleet Command" />
           </nav>
           
           <button
@@ -102,6 +122,15 @@ function App() {
             {tab === "compliance" && <ComplianceMatrix assets={assets} findings={findings} statuses={statuses} />}
             {tab === "policy" && <PolicyStudio activePolicy={activePolicy} policies={policies} switchPolicy={switchPolicy} />}
             {tab === "migrations" && <MigrationConsole migrations={migrations} assets={assets} enqueueMigration={enqueueMigration} />}
+            {tab === "fleet" && (
+              <FleetManagement
+                assets={assets}
+                fetchFleetConfig={fetchFleetConfig}
+                saveFleetConfig={saveFleetConfig}
+                fetchAuditLogs={fetchAuditLogs}
+                fetchAgentDiagnostics={fetchAgentDiagnostics}
+              />
+            )}
           </>
         )}
       </section>

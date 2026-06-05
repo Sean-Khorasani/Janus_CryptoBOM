@@ -18,6 +18,12 @@ export type Asset = {
   arch: string;
   execution_mode: number;
   last_seen: string;
+  scan_progress: number;
+  current_scan_path: string;
+  cpu_usage: number;
+  mem_usage: number;
+  status: string;
+  total_files_scanned: number;
 };
 
 export type Finding = {
@@ -94,13 +100,23 @@ function migrationProfileFor(targetService: string) {
   return "hybrid-tls13-mlkem-mldsa";
 }
 
+function authedFetch(url: string, options?: RequestInit): Promise<Response> {
+  const token = localStorage.getItem("janus_token");
+  const finalOpts = options || {};
+  const headers = new Headers(finalOpts.headers || {});
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return fetch(url, { ...finalOpts, headers });
+}
+
 function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
   return new Promise<Response>((resolve) => {
     const timer = setTimeout(() => {
       resolve(new Response("Timeout", { status: 504 }));
     }, 1500);
 
-    fetch(url, options)
+    authedFetch(url, options)
       .then((res) => {
         clearTimeout(timer);
         resolve(res);
@@ -197,7 +213,7 @@ export function useApi() {
   }, [overview]);
 
   const enqueueMigration = async (hostUuid: string, targetService: string, configPath: string, patch: string) => {
-    const response = await fetch("/api/migrations/enqueue", {
+    const response = await authedFetch("/api/migrations/enqueue", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -218,7 +234,7 @@ export function useApi() {
   };
 
   const switchPolicy = async (version: string) => {
-    const response = await fetch("/api/policies/active", {
+    const response = await authedFetch("/api/policies/active", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ version })
@@ -230,6 +246,44 @@ export function useApi() {
     setActivePolicy(body.active);
     load();
     return body.active;
+  };
+
+  const fetchFleetConfig = async () => {
+    const res = await authedFetch("/api/fleet/config");
+    if (!res.ok) throw new Error("Failed to fetch fleet config");
+    return await res.json();
+  };
+
+  const saveFleetConfig = async (fc: { exclude_dirs: string; min_key_size: number; scan_schedule: string }) => {
+    const res = await authedFetch("/api/fleet/config", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fc)
+    });
+    if (!res.ok) throw new Error("Failed to save fleet config");
+    return await res.json();
+  };
+
+  const fetchAuditLogs = async () => {
+    const res = await authedFetch("/api/audit-logs");
+    if (!res.ok) throw new Error("Failed to fetch audit logs");
+    return await res.json();
+  };
+
+  const fetchAgentDiagnostics = async (hostUuid: string) => {
+    const res = await authedFetch(`/api/agent/diagnostics?host_uuid=${hostUuid}`);
+    if (!res.ok) throw new Error("Failed to fetch diagnostics");
+    return await res.json();
+  };
+
+  const saveAgentDiagnostics = async (hostUuid: string, logs: string) => {
+    const res = await authedFetch("/api/agent/diagnostics", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ host_uuid: hostUuid, logs })
+    });
+    if (!res.ok) throw new Error("Failed to save diagnostics");
+    return await res.json();
   };
 
   return {
@@ -244,6 +298,11 @@ export function useApi() {
     score,
     loading,
     enqueueMigration,
-    switchPolicy
+    switchPolicy,
+    fetchFleetConfig,
+    saveFleetConfig,
+    fetchAuditLogs,
+    fetchAgentDiagnostics,
+    saveAgentDiagnostics
   };
 }

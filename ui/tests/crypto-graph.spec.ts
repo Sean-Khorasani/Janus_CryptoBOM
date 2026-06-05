@@ -78,7 +78,7 @@ test.describe("Feature 1: Interactive Crypto Exposure Graph (R2)", () => {
     await page.goto("/");
     const hostNode = page.locator('rect.node-host, [data-node-type="host"]');
     await expect(hostNode.first()).toBeVisible();
-    await expect(page.locator(':text("host-production-01"), [data-node-label="host-production-01"]')).toBeVisible();
+    await expect(page.locator(':text("host-production-01"), [data-node-label="host-production-01"]').first()).toBeVisible();
   });
 
   test("Tier 1.3: Component nodes are rendered and labeled", async ({ page }) => {
