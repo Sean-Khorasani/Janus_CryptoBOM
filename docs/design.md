@@ -46,6 +46,7 @@
 * Cryptographic Bill of Materials (CBOM) Generation: Multi-language source code scanning (C/C++, Go, Rust, Java, Python, .NET) to construct a valid CycloneDX v1.6 CBOM with cryptographic extensions.
 * Static Binary Analysis: Automated parsing of compiled assets (ELF, PE, Mach-O) to flag statically or dynamically linked cryptographic modules (OpenSSL, BoringSSL, LibreSSL, WolfSSL).
 * Dynamic Runtime Memory Discovery: Live detection of running process cryptographic structures, ephemeral symmetric keys, and active session objects via non-intrusive memory mappings.
+* Active Process DLL & Loaded Modules Auditing: Discovery of statically or dynamically linked DLLs and loaded libraries (e.g. `bcrypt.dll`, `openssl.dll`) inside running processes, capturing active cryptographic provider allocations.
 * Network & Infrastructure Sweeper: Deep packet inspection and active port scanning to inventory cipher configurations across corporate infrastructure, SSH daemons, web servers, database endpoints, and appliances.
 * OS/Hardware Cryptographic Asset Inventory: Mapping of underlying hardware components, including Hardware Security Modules (HSMs), Trusted Platform Modules (TPMs), and OS-native crypto abstractions (Windows CNG, macOS CryptoTokenKit, Linux /proc/sys/crypto).
 
@@ -53,15 +54,26 @@
 
 * Local CA Integration / Automation Protocol Link: Direct programmatic control over internal Certificate Authorities via automated protocols (ACME, EST, CMP), specifically requesting hybrid and post-quantum certificate profiles.
 * Targeted Configuration Mutators: Scriptable execution modules capable of editing web server structures (Nginx, Apache), directory services, and network node configurations to enforce post-quantum rules.
+* Sandboxed Unified Diff & Extension Guard: Enforces a strict file extension safety whitelist, restricting mutations to configuration files (`.conf`, `.config`, `.json`, `.toml`, `.yaml`, `.xml`) and validating file paths to prevent arbitrary system files from being overwritten.
 * System and Environment Trust Store Enrollment: Direct automated insertion, rotation, and structural invalidation of trust chains across diverse operating system trust stores, custom Java Virtual Machine (cacerts) runtimes, and local browser keystores.
 * Safe Hot-Patching / Service Restart Routines: Orderly execution strings to swap out local credentials, update daemon parameters, verify operational validity, and invoke graceful reloads of critical communication pipes without system degradation.
 
-## 1.3 Non-Functional Requirements
+## 1.3 Non-Functional Requirements & Diagnostics
 
 * Platform Neutrality: Native cross-compilation matching core agent operations flawlessly across targets: Linux (amd64, arm64), Windows (x86_64, arm64), macOS (Intel, Apple Silicon), and embedded runtime capability blocks for Android/iOS.
 * Zero-Impact Operational Guardrails: CPU consumption caps strict at < 5% baseline capacity, storage caching footprints under 50MB locally, and zero memory leak tolerances implemented through precise compile-time memory bounds tracking.
+* Local Cache Self-Maintenance: Automated database integrity validation (`PRAGMA integrity_check`) and space recovery (`VACUUM`) on the local SQLite offline cache to prevent storage fragmentation and excessive disk utilization.
+* Startup Diagnostics & Self-Test Suite: Automatic environment inspection, database checkups, and network gRPC connection latency logging on daemon startup to verify operational readiness.
 * Decoupled Operation Mode: Native fallback paths preserving fully sandboxed telemetry gathering routines if administrative modification authorization is absent.
 * Air-Gapped Telemetry Survivability: Local high-speed, secure cache layers preserving metrics during long connectivity drops, syncing payloads via encrypted channels upon central connection recovery.
+
+## 1.4 Enterprise Audit, Scoring & Observability
+
+* Dynamic PQC Compliance Policy Studio: Real-time rules checking and scoring engine allowing custom compliance profiles (defining minimum key sizes, TLS 1.3 requirements, hybrid PQC requirements, and preferred signature/KEM algorithms) with visual dynamic grading.
+* Critical Telemetry Webhook Dispatcher: Asynchronous messaging pipelines for instantly sending critical cryptographic vulnerability findings to alert webhooks (like Slack, Teams, or custom alert targets).
+* Telemetry Retention & Automated Purge Engine: Configurable duration threshold data lifecycles with automated background cleanup worker jobs and manual immediate database purging options.
+* Structured SIEM & Audit Log Exporter: Native SIEM log schema serializer formatting operational logs and security telemetry events into standard JSON payloads optimized for Splunk/Elastic ingestion.
+* High-Performance Prometheus Observability Endpoint: Standardized `/metrics` instrumentation exposing system health metrics, assets count, finding categorizations, and migration metrics.
 
 ------------------------------
 ## 2. Open-Source Component Selection & Integration Blueprint
@@ -123,8 +135,9 @@ The Central Server runs a high-performance Go backend coupled to a decoupled sin
 * CBOM Graph Datastore: Tracks cryptographic components, including algorithm properties, dependency hierarchies, key lengths, and compliance status.
 * Migration Pipeline State Table: Coordinates real-time scheduling, software patching sequences, rollbacks, and verification logs.
 
-## 3.2 Agent Framework Architecture
 The agent is written in Rust to guarantee low overhead and memory safety. It uses a decoupled modular design that runs completely in user space during Passive operations.
+
+* **DPAPI Configuration & Secret Decryption Engine**: On Windows, the agent supports native Data Protection API (DPAPI) decryption of sensitive parameters (such as gRPC authentication keys or CA passwords). Decryption occurs dynamically in-memory on startup, protecting local agent configurations from raw credential exposure on the filesystem.
 ```
 
                                      JANUS AGENT ARCHITECTURE
