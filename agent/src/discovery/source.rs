@@ -182,6 +182,68 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
     out
 }
 
+fn analyze_snippet_llm_sync(http_endpoint: &str, name: &str, source_file: &str, snippet: &str) -> Result<String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let host_port = http_endpoint
+        .strip_prefix("http://")
+        .unwrap_or(http_endpoint)
+        .split('/')
+        .next()
+        .unwrap_or("127.0.0.1:8080");
+
+    let prompt = format!(
+        "You are a cryptography security expert. Analyze the following code snippet which contains a reference to the cryptographic algorithm '{}'. Classify the usage intent into exactly one of the following categories: 'protect', 'verify', 'negotiate', 'test'. Reply with a JSON object exactly matching this format: {{\"intent\": \"one-of-the-categories\", \"confidence\": 0.9}}\nCode Snippet (from {}):\n{}",
+        name, source_file, snippet
+    );
+
+    let body_json = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.0
+    }).to_string();
+
+    let mut stream = TcpStream::connect(host_port)?;
+    let req = format!(
+        "POST /api/llm/proxy HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n\
+         {}",
+        host_port,
+        body_json.len(),
+        body_json
+    );
+    stream.write_all(req.as_bytes())?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+
+    if let Some(idx) = response.find("\r\n\r\n") {
+        let body = &response[idx + 4..];
+        let val: serde_json::Value = serde_json::from_str(body)?;
+        
+        if let Some(choices) = val.get("choices") {
+            if let Some(content) = choices[0]["message"]["content"].as_str() {
+                let clean = content.replace("```json", "").replace("```", "").trim().to_string();
+                let parsed: serde_json::Value = serde_json::from_str(&clean)?;
+                if let Some(intent) = parsed.get("intent").and_then(|i| i.as_str()) {
+                    return Ok(intent.to_string());
+                }
+            }
+        }
+    }
+    
+    anyhow::bail!("failed to parse LLM response")
+}
+
 pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
     let patterns = patterns()?;
     let mut out = ScanResult::default();
@@ -211,15 +273,43 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
             let stripped = strip_comments_and_strings(&text, &ext);
             let mut algorithms = Vec::new();
             
-            // Zip lines to perform line-by-line comparison
-            for (line_idx, (line, stripped_line)) in text.lines().zip(stripped.lines()).enumerate() {
+            let is_test_file = is_test_path(entry.path());
+            let text_lines: Vec<&str> = text.lines().collect();
+            let stripped_lines: Vec<&str> = stripped.lines().collect();
+            // Only match against comment/string-stripped lines to avoid false positives
+            for (line_idx, (line, stripped_line)) in text_lines.iter().zip(stripped_lines.iter()).enumerate() {
                 for pat in &patterns {
                     if let Some(m) = pat.regex.find(stripped_line) {
+                        let intent = infer_usage_intent(line);
+                        let base_confidence: f64 = if is_test_file {
+                            0.20 // test code is low-confidence
+                        } else {
+                            match intent.as_str() {
+                                "verify" | "parse" => 0.50,
+                                "negotiate" => 0.70,
+                                _ => 0.90, // protect / unknown
+                            }
+                        };
+                        let start_idx = line_idx.saturating_sub(5);
+                        let end_idx = (line_idx + 6).min(text_lines.len());
+                        let snippet = text_lines[start_idx..end_idx].join("\n");
+
+                        let mut algo_status = if is_test_file { "test-only".to_string() } else { intent.clone() };
+                        let mut algo_conf = base_confidence;
+
+                        // Try calling LLM proxy
+                        if !is_test_file && base_confidence > 0.0 {
+                            if let Ok(llm_intent) = analyze_snippet_llm_sync(&cfg.http_endpoint(), pat.name, &entry.path().display().to_string(), &snippet) {
+                                algo_status = llm_intent;
+                                algo_conf = 0.95; // LLM confidence boost
+                            }
+                        }
+
                         algorithms.push(CryptoAlgorithm {
                             name: pat.name.to_string(),
                             family: pat.family.to_string(),
                             role: pat.role as i32,
-                            status: "observed".to_string(),
+                            status: algo_status,
                             key_bits: infer_key_bits(pat.name, line),
                             curve: infer_curve(line),
                             implementation_library: infer_library(line),
@@ -227,24 +317,9 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             source_line: (line_idx + 1) as u32,
                             source_column: (m.start() + 1) as u32,
                             symbol: m.as_str().to_string(),
-                            confidence: 0.90,
+                            confidence: algo_conf,
                             quantum_vulnerable: false,
-                        });
-                    } else if let Some(m) = pat.regex.find(line) {
-                        algorithms.push(CryptoAlgorithm {
-                            name: pat.name.to_string(),
-                            family: pat.family.to_string(),
-                            role: pat.role as i32,
-                            status: "observed".to_string(),
-                            key_bits: infer_key_bits(pat.name, line),
-                            curve: infer_curve(line),
-                            implementation_library: infer_library(line),
-                            source_file: entry.path().display().to_string(),
-                            source_line: (line_idx + 1) as u32,
-                            source_column: (m.start() + 1) as u32,
-                            symbol: m.as_str().to_string(),
-                            confidence: 0.30,
-                            quantum_vulnerable: false,
+                            context_snippet: snippet,
                         });
                     }
                 }
@@ -333,6 +408,52 @@ fn is_source(path: &Path) -> bool {
         path.extension().and_then(|s| s.to_str()).unwrap_or_default(),
         "rs" | "go" | "js" | "jsx" | "ts" | "tsx" | "py" | "java" | "kt" | "cs" | "c" | "h" | "cpp" | "hpp" | "rb" | "php" | "swift" | "m" | "mm" | "scala" | "sh" | "yaml" | "yml" | "toml" | "xml" | "conf" | "cnf"
     )
+}
+
+/// Detect test files by naming conventions across languages.
+fn is_test_path(path: &Path) -> bool {
+    let s = path.to_string_lossy().to_ascii_lowercase();
+    let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
+    // Directory-level test markers
+    if s.contains("__tests__") || s.contains("test_fixtures") || s.contains("testdata") {
+        return true;
+    }
+    // File-level test markers by language convention
+    name.ends_with("_test")       // Go, Rust
+        || name.starts_with("test_") // Python
+        || name.ends_with(".test")   // JS/TS
+        || name.ends_with(".spec")   // JS/TS
+        || name.ends_with("tests")   // General
+        || name.contains("_test_")   // Embedded tests
+}
+
+/// Infer usage intent from surrounding code context.
+/// Returns one of: "protect", "verify", "parse", "negotiate", "observed".
+fn infer_usage_intent(line: &str) -> String {
+    let l = line.to_ascii_lowercase();
+    // Verification / read-only patterns
+    if l.contains("verify") || l.contains("check") || l.contains("validate")
+        || l.contains("parse") || l.contains("decode") || l.contains("unmarshal")
+        || l.contains("deserialize") || l.contains("read") || l.contains("load_cert")
+        || l.contains("x509_check") || l.contains("certificate_verify")
+    {
+        return "verify".to_string();
+    }
+    // Negotiation / capability listing patterns
+    if l.contains("cipher_list") || l.contains("ciphersuite") || l.contains("supported")
+        || l.contains("preferred") || l.contains("available") || l.contains("offered")
+        || l.contains("set_ciphers") || l.contains("cipher_suites")
+    {
+        return "negotiate".to_string();
+    }
+    // Active protection patterns
+    if l.contains("sign") || l.contains("encrypt") || l.contains("generate_key")
+        || l.contains("new_key") || l.contains("keygen") || l.contains("seal")
+        || l.contains("wrap_key") || l.contains("derive")
+    {
+        return "protect".to_string();
+    }
+    "observed".to_string()
 }
 
 fn language(path: &Path) -> String {

@@ -163,6 +163,8 @@ pub struct CryptoAlgorithm {
     pub confidence: f64,
     #[prost(bool, tag = "13")]
     pub quantum_vulnerable: bool,
+    #[prost(string, tag = "14")]
+    pub context_snippet: String,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message, Serialize, Deserialize)]
