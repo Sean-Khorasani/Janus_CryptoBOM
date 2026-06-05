@@ -254,7 +254,7 @@ export function useApi() {
     return await res.json();
   };
 
-  const saveFleetConfig = async (fc: { exclude_dirs: string; min_key_size: number; scan_schedule: string }) => {
+  const saveFleetConfig = async (fc: { exclude_dirs: string; min_key_size: number; scan_schedule: string; llm_api_key?: string; llm_api_url?: string }) => {
     const res = await authedFetch("/api/fleet/config", {
       method: "POST",
       headers: { "content-type": "application/json" },

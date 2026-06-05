@@ -4,8 +4,8 @@ import { Asset } from "../hooks/useApi";
 
 interface FleetManagementProps {
   assets: Asset[];
-  fetchFleetConfig?: () => Promise<{ exclude_dirs: string; min_key_size: number; scan_schedule: string }>;
-  saveFleetConfig?: (fc: { exclude_dirs: string; min_key_size: number; scan_schedule: string }) => Promise<any>;
+  fetchFleetConfig?: () => Promise<{ exclude_dirs: string; min_key_size: number; scan_schedule: string; llm_api_key?: string; llm_api_url?: string }>;
+  saveFleetConfig?: (fc: { exclude_dirs: string; min_key_size: number; scan_schedule: string; llm_api_key?: string; llm_api_url?: string }) => Promise<any>;
   fetchAuditLogs?: () => Promise<any[]>;
   fetchAgentDiagnostics?: (hostUuid: string) => Promise<{ logs: string }>;
 }
@@ -23,8 +23,10 @@ export function FleetManagement({
   const [isLogsOpen, setIsLogsOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [minKeySize, setMinKeySize] = useState(2048);
-  const [excludeDirs, setExcludeDirs] = useState(".git, target, node_modules, dist, .venv, temp");
-  const [scanSchedule, setScanSchedule] = useState("daily");
+  const [excludeDirs, setExcludeDirs] = useState<string>(".git, target, node_modules, dist, .venv, temp");
+  const [scanSchedule, setScanSchedule] = useState<string>("daily");
+  const [llmApiKey, setLlmApiKey] = useState<string>("");
+  const [llmApiUrl, setLlmApiUrl] = useState<string>("https://api.openai.com/v1");
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [webhooks, setWebhooks] = useState<any[]>([]);
   const [newWebhook, setNewWebhook] = useState("");
@@ -151,6 +153,8 @@ export function FleetManagement({
             setMinKeySize(cfg.min_key_size || 2048);
             setExcludeDirs(cfg.exclude_dirs || "");
             setScanSchedule(cfg.scan_schedule || "daily");
+            if (cfg.llm_api_key !== undefined) setLlmApiKey(cfg.llm_api_key);
+            if (cfg.llm_api_url !== undefined) setLlmApiUrl(cfg.llm_api_url);
           }
         })
         .catch(err => console.error("Error loading fleet config:", err));
@@ -265,7 +269,9 @@ export function FleetManagement({
       saveFleetConfig({
         exclude_dirs: excludeDirs,
         min_key_size: minKeySize,
-        scan_schedule: scanSchedule
+        scan_schedule: scanSchedule,
+        llm_api_key: llmApiKey,
+        llm_api_url: llmApiUrl
       })
         .then(() => {
           showToast("Global fleet configurations applied and dispatched to all connected agents.");
@@ -459,31 +465,16 @@ export function FleetManagement({
             </h2>
 
             <form onSubmit={handleSaveConfigs} className="space-y-4">
+            {/* Existing Global Configurations */}
+            <div className="space-y-4 pt-2">
               <div>
-                <label className="block text-xs font-semibold text-[#697469] mb-1">
-                  Minimum Key Size Requirement (Bits)
+                <label className="block text-sm font-medium text-[#49504a] mb-1">
+                  Global Exclusion Directories
                 </label>
                 <input
-                  id="cfg-min-key-size"
-                  type="number"
-                  value={minKeySize}
-                  onChange={e => setMinKeySize(parseInt(e.target.value) || 2048)}
-                  className="w-full rounded border border-[#dfe5dc] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#17211c]"
-                />
-                <p className="text-[10px] text-[#697469] mt-1">
-                  Keys smaller than this will trigger PQC migration warnings.
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#697469] mb-1">
-                  Central Excluded Directories
-                </label>
-                <textarea
-                  id="cfg-exclude-dirs"
+                  type="text"
                   value={excludeDirs}
                   onChange={e => setExcludeDirs(e.target.value)}
-                  rows={3}
                   className="w-full rounded border border-[#dfe5dc] px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-[#17211c]"
                 />
                 <p className="text-[10px] text-[#697469] mt-1">
@@ -508,6 +499,45 @@ export function FleetManagement({
                 </select>
               </div>
 
+              
+              {/* Advanced LLM Configuration */}
+              <div className="border-t border-[#dfe5dc] pt-4 mt-4">
+                <h4 className="text-sm font-semibold text-[#161a17] mb-3 flex items-center gap-2">
+                  <Settings size={16} className="text-[#096b45]" />
+                  LLM AI Context Analysis (Optional)
+                </h4>
+                <p className="text-xs text-[#697469] mb-4">
+                  Configure an LLM to dramatically reduce false positives by analyzing the intent of cryptographic API usage (e.g., distinguishing between signing and verifying).
+                </p>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#697469] mb-1">
+                      LLM API URL
+                    </label>
+                    <input
+                      type="text"
+                      value={llmApiUrl}
+                      onChange={e => setLlmApiUrl(e.target.value)}
+                      placeholder="https://api.openai.com/v1"
+                      className="w-full rounded border border-[#dfe5dc] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#17211c]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[#697469] mb-1">
+                      LLM API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={llmApiKey}
+                      onChange={e => setLlmApiKey(e.target.value)}
+                      placeholder="sk-..."
+                      className="w-full rounded border border-[#dfe5dc] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#17211c]"
+                    />
+                  </div>
+                </div>
+              </div>
+
+            </div>
               <button
                 id="cfg-save-btn"
                 type="submit"

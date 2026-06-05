@@ -8,6 +8,21 @@ export function SeverityBadge({ severity }: { severity: number }) {
   return <span className={`rounded px-2 py-1 text-xs font-medium ${color}`}>{label}</span>;
 }
 
+export function UsageContextBadge({ description }: { description: string }) {
+  const desc = (description || "").toLowerCase();
+  let label = "";
+  let color = "";
+  if (desc.includes("usage context: verify") || desc.includes("usage context: parse")) {
+    label = "Verify-Only";
+    color = "bg-sky-100 text-sky-800";
+  } else if (desc.includes("usage context: negotiate")) {
+    label = "Negotiation";
+    color = "bg-violet-100 text-violet-800";
+  }
+  if (!label) return null;
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${color}`}>{label}</span>;
+}
+
 export function Empty({ label }: { label: string }) {
   return <div className="py-8 text-center text-sm text-[#697469]">{label}</div>;
 }
@@ -358,6 +373,7 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
                   <td className="py-2 pr-3">
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{finding.title}</span>
+                      <UsageContextBadge description={finding.description} />
                       {status === "accepted" && <span className="badge bg-[#edf1ea] text-[#4d594f] text-xs px-2 py-0.5 rounded font-medium">Accepted</span>}
                       {status === "false-positive" && <span className="badge bg-[#edf1ea] text-[#4d594f] text-xs px-2 py-0.5 rounded font-medium">False Positive</span>}
                       {status === "remediated" && <span className="badge bg-[#edf1ea] text-[#4d594f] text-xs px-2 py-0.5 rounded font-medium">Remediated</span>}
@@ -444,12 +460,17 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
                     <span className="inline-block rounded bg-green-100 text-green-800 text-[10px] px-1.5 py-0.5 font-semibold">
                       ✓ AST-Aware (High Confidence)
                     </span>
+                  ) : currentSelected.confidence && currentSelected.confidence >= 0.5 ? (
+                    <span className="inline-block rounded bg-sky-100 text-sky-800 text-[10px] px-1.5 py-0.5 font-semibold">
+                      ◐ Context-Adjusted (Medium Confidence)
+                    </span>
                   ) : (
                     <span className="inline-block rounded bg-amber-100 text-amber-800 text-[10px] px-1.5 py-0.5 font-semibold">
                       ⚠ Regex/Pattern (Low Confidence)
                     </span>
                   )}
                 </div>
+                <UsageContextBadge description={currentSelected.description} />
               </div>
 
               <div>
