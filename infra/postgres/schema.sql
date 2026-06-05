@@ -6,7 +6,13 @@ CREATE TABLE IF NOT EXISTS assets (
   arch TEXT NOT NULL,
   execution_mode INTEGER NOT NULL,
   capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
-  last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+  scan_progress INTEGER NOT NULL DEFAULT 0,
+  current_scan_path TEXT NOT NULL DEFAULT '',
+  cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+  mem_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+  status TEXT NOT NULL DEFAULT 'offline',
+  total_files_scanned INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS telemetry_payloads (
