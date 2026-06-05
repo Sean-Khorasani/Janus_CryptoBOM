@@ -19,6 +19,7 @@ graph TD
             direction TB
             subgraph PHASE1 [Phase 1: Discovery & Passive Scanning]
                 SAS[Static AppSec Scan<br>Binaries, OS, Source]
+                SEM[Semantic Context Engine<br>AST / Usage Intent Classifier]
                 DMS[Dynamic Memory Scan<br>Process DLL / loaded modules]
                 NET[Network Infrastructure<br>PCAP / TLS handshake]
             end
@@ -38,6 +39,7 @@ graph TD
 ## 1.1 Discovery & Passive Mapping
 
 * Cryptographic Bill of Materials (CBOM) Generation: Multi-language source code scanning (C/C++, Go, Rust, Java, Python, .NET) to construct a valid CycloneDX v1.6 CBOM with cryptographic extensions.
+* Semantic Context Analysis: Heuristic usage-intent classification differentiating active cryptographic usage (protection) from verification-only or capability negotiation paths to eliminate false positives.
 * Static Binary Analysis: Automated parsing of compiled assets (ELF, PE, Mach-O) to flag statically or dynamically linked cryptographic modules (OpenSSL, BoringSSL, LibreSSL, WolfSSL).
 * Dynamic Runtime Memory Discovery: Live detection of running process cryptographic structures, ephemeral symmetric keys, and active session objects via non-intrusive memory mappings.
 * Active Process DLL & Loaded Modules Auditing: Discovery of statically or dynamically linked DLLs and loaded libraries (e.g. `bcrypt.dll`, `openssl.dll`) inside running processes, capturing active cryptographic provider allocations.
@@ -64,6 +66,8 @@ graph TD
 ## 1.4 Enterprise Audit, Scoring & Observability
 
 * Dynamic PQC Compliance Policy Studio: Real-time rules checking and scoring engine allowing custom compliance profiles (defining minimum key sizes, TLS 1.3 requirements, hybrid PQC requirements, and preferred signature/KEM algorithms) with visual dynamic grading.
+* Context-Aware Confidence Scoring: Risk scoring that adapts based on the source of the finding, intelligently downgrading verification/negotiation usages and ignoring test-code artifacts.
+* Live OSV.dev Integration: Automated cross-referencing of discovered libraries and components against the live OSV.dev vulnerability database to identify active CVEs in cryptographic implementations.
 * Critical Telemetry Webhook Dispatcher: Asynchronous messaging pipelines for instantly sending critical cryptographic vulnerability findings to alert webhooks (like Slack, Teams, or custom alert targets).
 * Telemetry Retention & Automated Purge Engine: Configurable duration threshold data lifecycles with automated background cleanup worker jobs and manual immediate database purging options.
 * Structured SIEM & Audit Log Exporter: Native SIEM log schema serializer formatting operational logs and security telemetry events into standard JSON payloads optimized for Splunk/Elastic ingestion.
