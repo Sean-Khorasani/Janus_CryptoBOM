@@ -135,6 +135,22 @@ The implementation deliberately treats runtime and memory discovery as secret-sa
 *   **TLS Migration Target**: TLS 1.3 with hybrid ECDHE-MLKEM groups where the runtime supports them.
 *   **CBOM Interchange**: CycloneDX 1.6.
 
+## Advanced Platform Capabilities
+
+### Central Server & Administration (Go & React)
+* **Dynamic Compliance Policy Studio**: Allows security administrators to create, test, and apply cryptographic compliance profiles (such as requiring TLS 1.3, hybrid PQC, specific preferred KEM/signatures, and minimum classical key bits) through a visual studio console.
+* **Asynchronous Webhook Dispatcher**: Fires instant real-time alerts to pre-configured webhooks (like Slack, Microsoft Teams, or webhook receivers) upon discovery of non-compliant/critical cryptographic vulnerabilities.
+* **Telemetry Data Retention Manager**: Configures automatic aging thresholds and runs background cleanup workers (along with manual on-demand triggers) to keep telemetry data size optimized.
+* **SIEM Auditing & Export**: Packages and serializes fleet audit logs and system telemetry into structured JSON streams formatted for native Splunk, Elastic, or Sentinel ingestion.
+* **Prometheus Observability**: Native HTTP `/metrics` endpoint exporting real-time fleet health, active assets, vulnerability metrics, and pending/failed PQC migrations.
+
+### Multi-Platform Endpoint Agent (Rust)
+* **Process DLL Auditing**: Inspects running processes on-host to enumerate active dynamically loaded modules, identifying cryptography library hooks (like `openssl.dll`, `bcrypt.dll`) and capturing live runtime bindings.
+* **SQLite Cache Optimization Suite**: Standard local cache maintenance system conducting integrity checkups (`PRAGMA integrity_check`) and database vacuuming (`VACUUM`) to ensure filesystem efficiency.
+* **Startup Diagnostics Console**: Diagnostic routines validating system environment, offline database state, and gRPC network latency on startup.
+* **Sandboxed Mutation Sandbox**: Strict file extension verification layer enforcing safe configuration file targets (`.conf`, `.config`, `.json`, `.toml`, `.yaml`, `.xml`) to block arbitrary path traversals or malicious overwriting of executable bin paths.
+* **Windows DPAPI Secret Shield**: Secure DPAPI runtime configuration decryption module that encrypts sensitive parameters (like certificates, private key passwords, and server communication tokens) in local configuration files, decrypting them in-memory only.
+
 ---
 
 ## Build Instructions
