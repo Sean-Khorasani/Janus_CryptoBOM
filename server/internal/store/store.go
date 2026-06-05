@@ -204,8 +204,12 @@ CREATE TABLE IF NOT EXISTS fleet_configs (
   exclude_dirs TEXT NOT NULL DEFAULT '',
   min_key_size INTEGER NOT NULL DEFAULT 2048,
   scan_schedule TEXT NOT NULL DEFAULT 'daily',
+  llm_api_key TEXT NOT NULL DEFAULT '',
+  llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE fleet_configs ADD COLUMN IF NOT EXISTS llm_api_key TEXT NOT NULL DEFAULT ''`)
+	_, _ = p.pool.Exec(ctx, `ALTER TABLE fleet_configs ADD COLUMN IF NOT EXISTS llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1'`)
 	_, _ = p.pool.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS audit_logs (
   log_id TEXT PRIMARY KEY,
@@ -745,6 +749,8 @@ type FleetConfig struct {
 	ExcludeDirs  string    `json:"exclude_dirs"`
 	MinKeySize   int       `json:"min_key_size"`
 	ScanSchedule string    `json:"scan_schedule"`
+	LLMApiKey    string    `json:"llm_api_key"`
+	LLMApiUrl    string    `json:"llm_api_url"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
@@ -757,13 +763,13 @@ type AuditLog struct {
 }
 
 func (p *Postgres) GetFleetConfig(ctx context.Context) (*FleetConfig, error) {
-	row := p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, updated_at FROM fleet_configs LIMIT 1`)
+	row := p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url, updated_at FROM fleet_configs LIMIT 1`)
 	var fc FleetConfig
-	err := row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.UpdatedAt)
+	err := row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.LLMApiKey, &fc.LLMApiUrl, &fc.UpdatedAt)
 	if err != nil {
-		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule) VALUES ('default', '.git, target, node_modules, dist, .venv, temp', 2048, 'daily') ON CONFLICT DO NOTHING`)
-		row = p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, updated_at FROM fleet_configs LIMIT 1`)
-		err = row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.UpdatedAt)
+		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url) VALUES ('default', '.git, target, node_modules, dist, .venv, temp', 2048, 'daily', '', 'https://api.openai.com/v1') ON CONFLICT DO NOTHING`)
+		row = p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url, updated_at FROM fleet_configs LIMIT 1`)
+		err = row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.LLMApiKey, &fc.LLMApiUrl, &fc.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -773,13 +779,15 @@ func (p *Postgres) GetFleetConfig(ctx context.Context) (*FleetConfig, error) {
 
 func (p *Postgres) UpdateFleetConfig(ctx context.Context, fc *FleetConfig) error {
 	_, err := p.pool.Exec(ctx, `
-INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, updated_at)
-VALUES ('default', $1, $2, $3, now())
+INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url, updated_at)
+VALUES ('default', $1, $2, $3, $4, $5, now())
 ON CONFLICT (config_id) DO UPDATE SET
   exclude_dirs = EXCLUDED.exclude_dirs,
   min_key_size = EXCLUDED.min_key_size,
   scan_schedule = EXCLUDED.scan_schedule,
-  updated_at = now()`, fc.ExcludeDirs, fc.MinKeySize, fc.ScanSchedule)
+  llm_api_key = EXCLUDED.llm_api_key,
+  llm_api_url = EXCLUDED.llm_api_url,
+  updated_at = now()`, fc.ExcludeDirs, fc.MinKeySize, fc.ScanSchedule, fc.LLMApiKey, fc.LLMApiUrl)
 	return err
 }
 

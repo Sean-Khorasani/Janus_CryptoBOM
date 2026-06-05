@@ -26,6 +26,7 @@ type Engine struct {
 	mu       sync.RWMutex
 	active   string
 	profiles map[string]Profile
+	osv      *OSVClient
 }
 
 func NIST2026Profile() Profile {
@@ -44,6 +45,7 @@ func NewEngine(profile Profile) *Engine {
 	e := &Engine{
 		profiles: make(map[string]Profile),
 		active:   profile.Version,
+		osv:      NewOSVClient(true),
 	}
 	e.profiles[profile.Version] = profile
 	return e
@@ -53,6 +55,7 @@ func LoadEngine(policiesDir string) (*Engine, error) {
 	e := &Engine{
 		profiles: make(map[string]Profile),
 		active:   "nist-pqc-2026.1",
+		osv:      NewOSVClient(true),
 	}
 
 	// Always seed NIST profile by default
@@ -148,6 +151,15 @@ func findEvidenceIDs(payload *pb.CbomTelemetryPayload, assetRef string) []string
 }
 
 func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb.CbomComponent, alg *pb.CryptoAlgorithm, profile Profile) {
+	// Skip low-confidence findings (test code, comment/string matches)
+	if alg.Confidence > 0 && alg.Confidence < 0.4 {
+		return
+	}
+	// Skip test-only code entirely
+	if alg.Status == "test-only" {
+		return
+	}
+
 	name := strings.ToUpper(alg.Name)
 	family := strings.ToUpper(alg.Family)
 	classicalPublicKey := containsAny(name, "RSA", "ECDSA", "ECDH", "ECDHE", "DH", "DSA") ||
@@ -155,10 +167,12 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 
 	if isPublicKeyRole(alg.Role) && classicalPublicKey {
 		alg.QuantumVulnerable = true
-		alg.Status = "quantum-vulnerable"
-		severity := pb.RiskSeverityHigh
+		severity := int32(pb.RiskSeverityHigh)
 		var title, desc, rule, profileName string
 		evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+
+		// Adjust severity based on usage intent
+		severity = adjustSeverityForIntent(severity, alg)
 
 		if alg.Role == pb.CryptoRoleCertSignature || alg.Role == pb.CryptoRoleSignature || alg.Role == pb.CryptoRoleCertPublicKey {
 			title = "Classical public-key signature cryptography is quantum-vulnerable"
@@ -166,7 +180,7 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 			rule = "JANUS-PQC-001"
 			profileName = "certificate-signature-modernization"
 			if strings.Contains(name, "RSA") && alg.KeyBits > 0 && alg.KeyBits < profile.MinimumRSAKeyBits {
-				severity = pb.RiskSeverityCritical
+				severity = adjustSeverityForIntent(pb.RiskSeverityCritical, alg)
 				title = "RSA key size below 2026 transition threshold"
 				desc = fmt.Sprintf("%s uses RSA-%d; minimum transitional threshold is RSA-%d. Migrate to signature standard %s (ML-DSA).", component.BomRef, alg.KeyBits, profile.MinimumRSAKeyBits, profile.PreferredSignature)
 				rule = "JANUS-PQC-002"
@@ -177,14 +191,21 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 			rule = "JANUS-PQC-007"
 			profileName = "hybrid-tls13-key-exchange"
 		}
+
+		// Annotate description with usage context for operator awareness
+		if isLowRiskIntent(alg) {
+			desc += fmt.Sprintf(" [Usage context: %s — severity adjusted from original assessment]", alg.Status)
+		}
+
 		appendFinding(payload, severity, title, desc, component.BomRef, alg.Name, rule, profileName, evidenceIDs)
 		return
 	}
 
 	if strings.Contains(name, "MD5") || strings.Contains(name, "SHA1") || strings.Contains(name, "SHA-1") {
 		evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+		severity := adjustSeverityForIntent(pb.RiskSeverityHigh, alg)
 		appendFinding(payload,
-			pb.RiskSeverityHigh,
+			severity,
 			"Deprecated hash detected",
 			fmt.Sprintf("%s references %s. Replace with SHA-384/SHA-512/SHA-3 according to the calling protocol.", component.BomRef, alg.Name),
 			component.BomRef,
@@ -197,8 +218,9 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 
 	if strings.Contains(name, "AES-128") && alg.Role == pb.CryptoRoleSymmetric {
 		evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+		severity := adjustSeverityForIntent(pb.RiskSeverityMedium, alg)
 		appendFinding(payload,
-			pb.RiskSeverityMedium,
+			severity,
 			"AES-128 used where long-term confidentiality may require AES-256",
 			fmt.Sprintf("%s references AES-128. Review data lifetime and upgrade crown-jewel or long-retention data paths to AES-256.", component.BomRef),
 			component.BomRef,
@@ -208,6 +230,36 @@ func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb
 			evidenceIDs,
 		)
 	}
+}
+
+// adjustSeverityForIntent lowers severity when the algorithm usage is verification-only or negotiation.
+func adjustSeverityForIntent(baseSeverity int32, alg *pb.CryptoAlgorithm) int32 {
+	if alg == nil {
+		return baseSeverity
+	}
+	status := strings.ToLower(alg.Status)
+	switch {
+	case status == "verify" || status == "parse":
+		// Verification-only usage: private key is not at risk, downgrade by 2 levels
+		if baseSeverity >= 2 {
+			return baseSeverity - 2
+		}
+		return pb.RiskSeverityInfo
+	case status == "negotiate":
+		// Negotiation context: algorithm may not be selected, downgrade by 1
+		if baseSeverity >= 1 {
+			return baseSeverity - 1
+		}
+		return pb.RiskSeverityInfo
+	default:
+		return baseSeverity
+	}
+}
+
+// isLowRiskIntent returns true if the algorithm status indicates verify/negotiate/parse context.
+func isLowRiskIntent(alg *pb.CryptoAlgorithm) bool {
+	s := strings.ToLower(alg.Status)
+	return s == "verify" || s == "parse" || s == "negotiate"
 }
 
 func (e *Engine) assessNetwork(payload *pb.CbomTelemetryPayload, obs *pb.NetworkObservation, profile Profile) {
@@ -393,6 +445,7 @@ func (e *Engine) assessComponentVulnerabilities(payload *pb.CbomTelemetryPayload
 	if component.Version == "" {
 		return
 	}
+	// Check local advisory database first
 	for _, adv := range localAdvisories {
 		if strings.EqualFold(component.Name, adv.Package) {
 			if compareVersions(component.Version, adv.Vulnerable) < 0 {
@@ -404,6 +457,30 @@ func (e *Engine) assessComponentVulnerabilities(payload *pb.CbomTelemetryPayload
 					component.BomRef,
 					adv.ID,
 					adv.ID,
+					"third-party-package-upgrade",
+					evidenceIDs,
+				)
+			}
+		}
+	}
+
+	// Query OSV.dev for live vulnerability data (if enabled)
+	if e.osv != nil && component.Language != "" {
+		vulns, err := e.osv.QueryPackage(component.Language, component.Name, component.Version)
+		if err == nil && len(vulns) > 0 {
+			// Filter to crypto-relevant vulnerabilities only
+			cryptoVulns := FilterCryptoRelevant(vulns)
+			for _, v := range cryptoVulns {
+				evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+				severity := OSVSeverityToJanus(v.Severity)
+				fixed := GetFixedVersion(v)
+				appendFinding(payload,
+					severity,
+					v.Summary,
+					fmt.Sprintf("%s [OSV: %s]. Fix: upgrade to %s.", v.Details, v.ID, fixed),
+					component.BomRef,
+					v.ID,
+					v.ID,
 					"third-party-package-upgrade",
 					evidenceIDs,
 				)

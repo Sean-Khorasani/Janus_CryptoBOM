@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -50,6 +51,7 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/webhooks", api.webhooks)
 	mux.HandleFunc("/api/retention", api.retention)
 	mux.HandleFunc("/api/export/siem", api.exportSIEM)
+	mux.HandleFunc("/api/llm/proxy", api.llmProxy)
 	mux.HandleFunc("/metrics", api.metrics)
 	
 	authWrapper := AuthMiddleware(jwtSecret, disableAuth)
@@ -862,4 +864,51 @@ func (a *API) exportSIEM(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = encoder.Encode(payload)
 	}
+}
+
+func (a *API) llmProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 1. Get LLM config from DB
+	fc, err := a.store.GetFleetConfig(r.Context())
+	if err != nil || fc.LLMApiKey == "" {
+		writeError(w, fmt.Errorf("LLM API key not configured on server"))
+		return
+	}
+	url := fc.LLMApiUrl
+	if url == "" {
+		url = "https://api.openai.com/v1"
+	}
+
+	// 2. Forward request to OpenAI
+	req, err := http.NewRequest("POST", url+"/chat/completions", r.Body)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+fc.LLMApiKey)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// 3. Forward response back to Agent
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
 }

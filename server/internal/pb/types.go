@@ -104,6 +104,7 @@ type CryptoAlgorithm struct {
 	Symbol                string  `protobuf:"bytes,11,opt,name=symbol,proto3" json:"symbol,omitempty"`
 	Confidence            float64 `protobuf:"fixed64,12,opt,name=confidence,proto3" json:"confidence,omitempty"`
 	QuantumVulnerable     bool    `protobuf:"varint,13,opt,name=quantum_vulnerable,json=quantumVulnerable,proto3" json:"quantum_vulnerable,omitempty"`
+	ContextSnippet        string  `protobuf:"bytes,14,opt,name=context_snippet,json=contextSnippet,proto3" json:"context_snippet,omitempty"`
 }
 
 type CryptoFinding struct {
