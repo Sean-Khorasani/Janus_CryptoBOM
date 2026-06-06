@@ -1,332 +1,221 @@
-# Janus CryptoBOM
+# Janus CryptoBOM: Enterprise Post-Quantum Cryptographic Posture Management & Migration Suite
 
-Janus CryptoBOM is an enterprise-grade, post-quantum cryptographic posture management (PQC-PM), discovery, and automated migration suite. This document serves as the foundational technical blueprint for building the multi-tier platform.
-
-![Janus CryptoBOM Dashboard Preview](docs/images/dashboard_preview.png)
+Janus CryptoBOM is an enterprise-grade, post-quantum cryptographic posture management (PQC-PM), discovery, and automated migration platform. It enables organizations to discover legacy cryptographic vulnerabilities, assess quantum readiness, align with emerging standards, and orchestrate safe, automated migrations to Post-Quantum Cryptography (PQC).
 
 ---
 
-## Ecosystem & Similar Solutions
-
-### Code Scanners & CBOM Generators (AppSec/SCA)
-These tools map source code, software supply chains, and dependencies to find legacy algorithms (like RSA) and generate a Cryptographic Bill of Materials (CBOM).
-
-#### Open-Source
-* **[PQCA CBOMkit](https://github.com/cbomkit/cbomkit)**: A flagship open-source reference implementation from the Post-Quantum Cryptography Alliance (hosted by the Linux Foundation). It scans source code (Java/Python/Go) via its SonarQube plugin (`sonar-cryptography`) and integrates with CI/CD pipelines to construct and manage CBOMs.
-* **[QRAMM CryptoScan](https://github.com/csnp/cryptoscan)**: An open-source CLI scanner built for the PQC era by the CyberSecurity NonProfit (CSNP). It scans codebases for 50+ classical cryptographic algorithms, classifies quantum vulnerabilities, and outputs CycloneDX CBOM and SARIF files.
-* **[CycloneDX cdxgen](https://github.com/CycloneDX/cdxgen)**: A widely adopted open-source CLI utility under the OWASP CycloneDX banner that generates deep CBOMs, SBOMs, and SaasBOMs across dozens of programming languages and ecosystems.
-
-#### Commercial
-* **[SandboxAQ AQtive Guard](https://www.sandboxaq.com/)**: A leading enterprise cryptographic posture management suite. It analyzes public software artifacts, codebases, and filesystems to track and manage cryptographic vulnerabilities at scale.
-* **[ReversingLabs Spectra Assure](https://www.reversinglabs.com/products/spectra-assure)**: A commercial binary and software supply chain security analysis platform. Rather than reading source code, it decompiles compiled binaries, container images, and VM disks to map out hidden cryptographic assets.
+## Table of Contents
+- [Executive Briefing: The Post-Quantum Business Risk](#executive-briefing-the-post-quantum-business-risk)
+- [The Janus Value Proposition](#the-janus-value-proposition)
+- [Enterprise Dashboard Previews](#enterprise-dashboard-previews)
+- [Direct Comparison Matrix](#direct-comparison-matrix)
+- [Platform Architecture](#platform-architecture)
+- [Building from Source](#building-from-source)
+- [Quickstart & Running Instructions](#quickstart--running-instructions)
+- [Safety Model & Security Controls](#safety-model--security-controls)
+- [Platform Support & Windows Coverage](#platform-support--windows-coverage)
+- [License](#license)
 
 ---
 
-### Network & Infrastructure Discovery
-These tools focus on scanning corporate networks, endpoints, and live traffic to identify outdated TLS handshakes, cipher suites, and unapproved algorithms.
+## Executive Briefing: The Post-Quantum Business Risk
 
-#### Open-Source
-* **[QRAMM TLS-Analyzer](https://github.com/csnp/tls-analyzer)**: An open-source CLI utility from the CSNP QRAMM framework. It tests active network endpoints for TLS/SSL configurations and flags compliance gaps against modern government standards like CNSA 2.0.
-* **[OWASP CycloneDX Sunshine (CryptoSunshine Extension)](https://github.com/CycloneDX/Sunshine)**: Developed by MONET+, CryptoSunshine is an open-source extension of OWASP CycloneDX Sunshine designed to visualize cryptographic inventories, manage CBOMs, and track compliance.
+### The Quantum Threat (Shor's Algorithm)
+Symmetric and asymmetric encryption form the bedrock of trust for modern enterprise infrastructure. However, the development of cryptanalytically relevant quantum computers (CRQCs) threatens to dismantle this foundation. Shor's algorithm demonstrates that a quantum computer of sufficient scale will solve prime factorization and discrete logarithms in polynomial time, rendering legacy public-key cryptosystems—including RSA, Diffie-Hellman, ECDH, and ECDSA—completely obsolete.
 
-#### Commercial
-* **[IBM Z Crypto Discovery Inventory (zCDI)](https://www.ibm.com/products/z-crypto-discovery-inventory)**: A specialized mainframe-oriented cryptographic posture dashboard. It aggregates crypto usage statistics across mainframe configurations, networks, and data sources for audit reports, but lacks active migration agents.
-* **[QuantumGate Crypto Discovery Tool (CDT)](https://quantumgate.ae)**: A commercial infrastructure monitoring and risk assessment tool that relies on network and cloud sensors to map protocols and keys across AWS, Azure, and on-prem hardware. In 2026, it was adopted nationally by the UAE Cyber Security Council for critical infrastructure.
+### Harvest Now, Decrypt Later (HNDL)
+This threat is not futuristic; it is active today. Hostile state actors and sophisticated syndicates are executing "Harvest Now, Decrypt Later" (HNDL) operations. Adversaries intercept and store encrypted enterprise and government communications today, waiting to decrypt them once quantum computers reach sufficient capability. CISOs and investors must realize that any sensitive data transmitted or stored using classical cryptography is already exposed to long-term risk.
 
----
+### Regulatory Alignment (NIST FIPS 203/204/205)
+Global standards are rapidly adapting to enforce PQC transition timelines. The National Institute of Standards and Technology (NIST) has released the finalized post-quantum standards:
+- **NIST FIPS 203**: ML-KEM (Module-Lattice-Based Key-Encapsulation Mechanism) for key establishment.
+- **NIST FIPS 204**: ML-DSA (Module-Lattice-Based Digital Signature Algorithm) for digital signatures.
+- **NIST FIPS 205**: SLH-DSA (Stateless Hash-Based Digital Signature Algorithm) for digital signatures.
 
-### Key Management, PKI, & Certificate Lifecycle Management (CLM)
-These solutions handle the "upgrade and transition" side of Janus. They manage the Certificate Authorities (CAs) and automate the deployment of hybrid or post-quantum certificates.
-
-#### Commercial
-* **[Keyfactor AgileSec](https://www.keyfactor.com/products/agilesec/)**: A major enterprise tool in the Crypto Posture Management space. It provides end-to-end discovery of machine identities, certificates, and keys while preparing PKI setups for hybrid ML-DSA or ML-KEM deployment.
-* **[Fortanix Data Security Manager (DSM)](https://www.fortanix.com/products/data-security-manager)**: A software-defined, HSM-backed key management and data security system. It provides a comprehensive inventory of all active cloud and on-prem keys, flagging weak and legacy algorithms.
-* **[Thales Post-Quantum Crypto Agility](https://cpl.thalesgroup.com/encryption/post-quantum-cryptography)**: A suite of post-quantum-ready Hardware Security Modules (HSMs), encryptors, and software connectors designed to let enterprises switch classical keys for post-quantum variants (like ML-KEM, ML-DSA) with minimal disruption.
+Compliance frameworks, including the Commercial National Security Algorithm (CNSA) Suite 2.0 and the Quantum Computing Cybersecurity Preparedness Act, mandate public and private enterprises to inventory their cryptographic assets, compile a Cryptographic Bill of Materials (CBOM), and begin immediate post-quantum migration.
 
 ---
 
-## Direct Comparison: Competitors vs. Janus CryptoBOM
+## The Janus Value Proposition
 
-The following matrix compares the core features of similar solutions against Janus CryptoBOM:
+Janus addresses the quantum transition challenge through three core business value pillars:
 
-| Solution Name | License Model | Code/Binary Scanner | Network Discovery | Key/Cert Management | Active Migration Automation |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **Janus CryptoBOM** | Commercial / Enterprise | **Yes** | **Yes** | **Yes** | **Yes (Full Suite)** |
-| **PQCA CBOMkit** | Open-Source | Yes | No | No | No |
-| **QRAMM Toolkit** | Open-Source | Yes (CryptoScan) | Yes (TLS-Analyzer) | No | No |
-| **CycloneDX cdxgen** | Open-Source | Yes | No | No | No |
-| **OWASP CryptoSunshine** | Open-Source | No | Yes | Yes (Inventory) | No |
-| **SandboxAQ AQtive Guard** | Commercial | Yes | Yes | No | Partial |
-| **ReversingLabs Spectra Assure**| Commercial | Yes (Binary Only) | No | No | No |
-| **IBM zCDI** | Commercial | No | Yes | Partial | No |
-| **QuantumGate CDT** | Commercial | No | Yes | Yes | No |
-| **Keyfactor AgileSec** | Commercial | Partial | Yes | Yes | Yes (PKI Focus) |
-| **Fortanix DSM** | Commercial | No | No | Yes (HSM/KM) | No |
-| **Thales PQC Agility** | Commercial | No | No | Yes (HSM/KM) | Partial |
+1. **Post-Quantum Cryptographic Posture Management (PQC-PM)**: Providing complete visibility across codebases, compiled binaries, operating system trust stores, network protocol suites, and process memory footprints to identify vulnerable public-key implementations.
+2. **Context-Aware Semantic Intent Analysis**: Enterprise codebases contain legacy cryptosystems used in non-critical paths (e.g., test suites, signature verification of old files, or capability negotiations). Janus's AST-based semantic analysis engine differentiates active cryptographic protection from legacy verification-only paths, reducing security operation center (SOC) alert fatigue.
+3. **Automated Sandboxed Migration**: Rather than leaving remediation to manual, error-prone software engineering cycles, Janus orchestrates signed, automated migration directives. It deploys hybrid and PQC certificates, updates server configurations (such as Nginx and Windows Schannel), verifies connectivity, and rolls back configuration states automatically if validation checks fail.
 
 ---
 
-## Solutions with Memory Scanning Capabilities
+## Enterprise Dashboard Previews
 
-While no tool explicitly scans memory purely for "PQC migration mapping," several established open-source and commercial solutions across Windows, Linux, and macOS scan live memory to extract cryptographic keys, configurations, or process data.
+The platform's unified interface bridges the gap between executive risk assessment and technical operations.
 
-### 1. [Volatility Framework](https://github.com/volatilityfoundation/volatility) (Open-Source)
-The absolute industry standard for memory forensics. It ingests a raw RAM dump or interfaces with live memory acquisition tools to reconstruct the state of OS processes.
-* **Crypto Capability**: Features specific plugins (like `aesfinder` and `rsafinder`) designed to scan memory pages for structural byte alignments unique to AES key schedules and RSA private key structures.
-* **Supported OS**: Windows, Linux, macOS.
+### Centralized CISO Fleet Safety Dashboard
+The CISO Fleet Safety Dashboard provides real-time posture reporting across the enterprise. It displays aggregated Fleet Safety Scores, active monitored assets, real-time cryptographic vulnerability alerts, and the overall NIST FIPS compliance index.
 
-### 2. [SandboxAQ AQtive Guard](https://www.sandboxaq.com/) (Commercial)
-A direct competitor in the cryptographic management space. It focuses heavily on discovering quantum-vulnerable algorithms.
-* **Crypto Capability**: It uses non-disruptive local discovery mechanisms that can analyze active runtime environments to build a comprehensive Cryptographic Bill of Materials (CBOM) including live cryptographic providers.
-* **Supported OS**: Mainly Windows and Linux enterprise environments.
+![Centralized CISO Fleet Safety Dashboard](docs/images/dashboard_preview_1780620392773.png)
 
-### 3. Microsoft [AVML](https://github.com/microsoft/avml) & [WinPmem](https://github.com/velocidex/WinPmem) (Open-Source / Forensic Tools)
-AVML (developed by Microsoft for Linux) and WinPmem (for Windows) are capture agents. They do not analyze data themselves but cleanly map raw physical memory to user space.
-* **Crypto Capability**: When combined with a parsing script, they allow you to scrape a server's entire running RAM for active TLS master keys or outdated cipher configurations without interrupting the service.
-* **Supported OS**: Windows (WinPmem) and Linux (AVML).
+### Interactive Crypto Exposure Graph & Live Scan Status
+The interactive Crypto Exposure Graph maps host-to-host and component-to-component cryptographic dependencies. Below the graph, the active scanning status banner displays client-side telemetry throughput and queue status, showing data synchronization rates from remote agents.
 
-### 4. [Frida](https://frida.re) (Open-Source)
-A dynamic instrumentation toolkit for developers and security researchers. Rather than taking a massive memory dump, it injects a JavaScript engine directly into a target process's memory space.
-* **Crypto Capability**: It hooks directly into standard crypto libraries (OpenSSL, Apple CommonCrypto, Windows CryptoAPI). It monitors arguments in real-time, instantly extracting public/private keys as they are passed to encryption functions.
-* **Supported OS**: Windows, Linux, macOS, Android, iOS.
-
-### 5. [Keyfactor AgileSec](https://www.keyfactor.com/products/agilesec/) (Commercial)
-An enterprise cryptographic agility platform. It actively discovers keys and machine identities at scale.
-* **Crypto Capability**: Scans local file systems, application configurations, and accessible runtime environments to detect weak keys, expiring certificates, and algorithms vulnerable to quantum threats.
-* **Supported OS**: Windows, Linux.
+![Interactive Crypto Exposure Graph & Live Scan Status](docs/images/dashboard_preview_1780512832245.png)
 
 ---
 
-### Direct Memory Comparison Matrix
+## Direct Comparison Matrix
 
-| Solution Name | OS Support | Scanning Mechanism | Primary Purpose | EDR Impact |
-| :--- | :--- | :--- | :--- | :--- |
-| **Janus CryptoBOM** | Windows, Linux, macOS | API Injection / Kernel Driver | CBOM Discovery & PQC Migration | High (Requires Explicit EDR Whitelisting) |
-| **Volatility Framework** | Windows, Linux, macOS | Post-Capture Artifact Carving | Digital Forensics / Malware Hunt | None (Analyzes static offline files) |
-| **SandboxAQ AQtive Guard** | Windows, Linux | Process & Runtime Inspection | Post-Quantum Compliance | Medium (Enterprise Whitelisting required) |
-| **AVML / WinPmem** | Windows, Linux | Raw Physical Memory Dump | Forensic Capture | Critical (Triggers immediate EDR alert) |
-| **Frida** | Windows, Linux, macOS, Mobile | Dynamic Runtime Hooking | Reverse Engineering / Auditing | High (Antivirus blocks its process injection) |
-| **Keyfactor AgileSec** | Windows, Linux | Systems & Memory Inventory | PKI & Certificate Agility | Low to Medium (Enterprise Signed) |
+The table below contrasts Janus CryptoBOM against open-source and commercial security suites:
 
----
-## Workspace Components
-
-Janus CryptoBOM is a crypto posture management and PQC migration foundation. It includes:
-
-- **[proto/](file:///D:/src/Janus_CryptoBOM/proto)**: Shared Protobuf contract for agent registration, CBOM telemetry, migration commands, and status reports.
-- **[server/](file:///D:/src/Janus_CryptoBOM/server)**: Go controller with gRPC intake, PostgreSQL persistence, policy scoring, command signing, and a JSON API for the UI.
-- **[agent/](file:///D:/src/Janus_CryptoBOM/agent)**: Rust endpoint agent with passive discovery, binary/source/config/dependency scanners, offline SQLite cache, and signed active-mode mutation support.
-- **[ui/](file:///D:/src/Janus_CryptoBOM/ui)**: React/Tailwind dashboard for posture, CBOM exploration, and migration operations.
-- **[infra/](file:///D:/src/Janus_CryptoBOM/infra)**: Local deployment and infrastructure assets.
-- **[docs/](file:///D:/src/Janus_CryptoBOM/docs)**: Documentation and artifact samples, including:
-  - **[sample-agent-report.html](file:///D:/src/Janus_CryptoBOM/docs/sample-agent-report.html)**: An example HTML report generated on-host by the agent.
-  - **[sample-agent.sarif](file:///D:/src/Janus_CryptoBOM/docs/sample-agent.sarif)**: An example SARIF output displaying identified legacy crypto algorithms and locations.
-
-The implementation deliberately treats runtime and memory discovery as secret-safe telemetry. It records crypto metadata and HMAC fingerprints only; raw key/session/plaintext capture is not implemented as a routine operating mode.
+| Competitor / Suite | Discovery Mode | Network Sweep | Cert Management | Active Migration | Memory Scraping | EDR Impact |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Janus CryptoBOM** | **Yes** (Source, binary, configurations) | **Yes** (Agent-based and agentless network socket discovery) | **Yes** (Schannel, Java TrustStore, Windows certutil/CAPI/CNG) | **Yes** (Atomic migration with automated verification, reload & failover rollback) | **Yes** (Safe API hook injection & DLL audit / read DPAPI shielded queue) | **High** (Requires EDR whitelisting/signed agent for active process memory auditing/mutations) |
+| **PQCA CBOMkit** | **Yes** (Source code via SonarQube plugin) | **No** | **No** | **No** | **No** | **None** (Standard SCA/CI-CD scanner impact) |
+| **cdxgen** | **Yes** (Source code & dependency-based SCA) | **No** | **No** | **No** | **No** | **None** (CLI-based developer tooling) |
+| **QRAMM CSNP** | **Yes** (CLI source scan for 50+ classical algos) | **Yes** (TLS-Analyzer for active endpoint sweeping) | **No** | **No** | **No** | **None** / **Low** (Simple CLI/network tools) |
+| **SandboxAQ AQtive Guard** | **Yes** (Source, filesystem, binary analysis) | **Yes** (Cloud/network sensors) | **No** | **Partial** (Configuration alerts, limited mutation automation) | **Yes** (Inspects runtime environments / providers) | **Medium** (Enterprise whitelist needed for local active scanning) |
+| **Keyfactor AgileSec** | **Partial** (Finds weak keys in filesystem/code repositories) | **Yes** (Active network/endpoint scanner) | **Yes** (Full machine identity and certificate lifecycle management) | **Yes** (PKI upgrade focus, hybrid cert issuance) | **No** (Focuses on certificate & key storage, not runtime heap scraping) | **Low to Medium** (Enterprise-signed code agent) |
+| **IBM zCDI** | **No** | **Yes** (Mainframe network connection analysis) | **Partial** (Aggregates cryptographic audit logs) | **No** | **No** | **None** (Mainframe host logs aggregation) |
+| **Thales PQC Agility** | **No** | **No** | **Yes** (Agile HSM & KM connectors) | **Partial** (Automates HSM key transitions, lacks endpoint service mutation) | **No** | **None** / **Low** (Operates at HSM/appliance boundary) |
 
 ---
 
-## Current Standards Baseline
+## Platform Architecture
 
-*   **NIST FIPS 203**: ML-KEM for key establishment.
-*   **NIST FIPS 204**: ML-DSA for digital signatures.
-*   **NIST FIPS 205**: SLH-DSA for stateless hash-based digital signatures.
-*   **NIST CSWP 39**: Cryptographic agility strategy and practices.
-*   **TLS Migration Target**: TLS 1.3 with hybrid ECDHE-MLKEM groups where the runtime supports them.
-*   **CBOM Interchange**: CycloneDX 1.6.
+Janus CryptoBOM is divided into four main layers:
 
-## Advanced Platform Capabilities
-
-### Central Server & Administration (Go & React)
-* **Dynamic Compliance Policy Studio**: Allows security administrators to create, test, and apply cryptographic compliance profiles (such as requiring TLS 1.3, hybrid PQC, specific preferred KEM/signatures, and minimum classical key bits) through a visual studio console.
-* **Context-Aware Risk Engine**: Intelligently scores vulnerabilities based on heuristic usage intent, downgrading findings related to verification-only or negotiation paths to drastically reduce false positives.
-* **Live OSV.dev Integration**: Automated cross-referencing of discovered libraries and components against the live OSV.dev vulnerability database to identify active CVEs in cryptographic implementations.
-* **Asynchronous Webhook Dispatcher**: Fires instant real-time alerts to pre-configured webhooks (like Slack, Microsoft Teams, or webhook receivers) upon discovery of non-compliant/critical cryptographic vulnerabilities.
-* **Telemetry Data Retention Manager**: Configures automatic aging thresholds and runs background cleanup workers (along with manual on-demand triggers) to keep telemetry data size optimized.
-* **SIEM Auditing & Export**: Packages and serializes fleet audit logs and system telemetry into structured JSON streams formatted for native Splunk, Elastic, or Sentinel ingestion.
-* **Prometheus Observability**: Native HTTP `/metrics` endpoint exporting real-time fleet health, active assets, vulnerability metrics, and pending/failed PQC migrations.
-
-### Multi-Platform Endpoint Agent (Rust)
-* **Semantic Context Analysis**: Multi-language code scanning enriched with context awareness to identify whether a cryptographic algorithm is actively protecting data, verifying signatures, or merely referenced in test code or comments.
-* **Process DLL Auditing**: Inspects running processes on-host to enumerate active dynamically loaded modules, identifying cryptography library hooks (like `openssl.dll`, `bcrypt.dll`) and capturing live runtime bindings.
-* **SQLite Cache Optimization Suite**: Standard local cache maintenance system conducting integrity checkups (`PRAGMA integrity_check`) and database vacuuming (`VACUUM`) to ensure filesystem efficiency.
-* **Startup Diagnostics Console**: Diagnostic routines validating system environment, offline database state, and gRPC network latency on startup.
-* **Sandboxed Mutation Sandbox**: Strict file extension verification layer enforcing safe configuration file targets (`.conf`, `.config`, `.json`, `.toml`, `.yaml`, `.xml`) to block arbitrary path traversals or malicious overwriting of executable bin paths.
-* **Windows DPAPI Secret Shield**: Secure DPAPI runtime configuration decryption module that encrypts sensitive parameters (like certificates, private key passwords, and server communication tokens) in local configuration files, decrypting them in-memory only.
+- **React SPA Dashboard (`ui/`)**: A rich TypeScript-based Single-Page Application using React and Tailwind CSS that lets administrators monitor security posture, configure policy rules, and track automated migrations.
+- **Go Server (`server/` and `cmd/janus-server/`)**: The control plane backend that manages agent registrations, aggregates CBOM telemetry payload records over gRPC, evaluates policies against a PostgreSQL database, and coordinates command-line migrations.
+- **Rust Endpoint Agent (`agent/`)**: A high-performance, low-footprint daemon running on Windows, Linux, and macOS. It executes scheduled passive scans, analyzes code/binaries/dependencies, generates CycloneDX v1.6 compliant CBOM outputs, and executes signed active mutation instructions.
+- **Protobuf Contracts (`proto/janus.proto`)**: Canonical definitions of the communication protocols linking the agents to the server, securing control transactions with cryptographically signed directives.
 
 ---
 
-## Build Instructions
+## Building from Source
 
-> [!NOTE]
-> This workspace requires **Go (1.21+)**, **Rust/Cargo**, **Node.js (v18+)**, and **npm**. If you plan to regenerate code using protobuf, you will also need the `protoc` compiler. The checked-in Go and Rust services avoid mandatory code generation for normal builds; **[proto/janus.proto](file:///D:/src/Janus_CryptoBOM/proto/janus.proto)** remains the canonical contract.
+### Prerequisites
+- **Go 1.21+** (for building the server)
+- **Rust & Cargo** (for building the agent)
+- **Node.js v18+ & npm** (for building the dashboard interface)
+- **MSBuild** or **make** (based on operating system)
 
-### Windows / VS 2022 Builds
+### Windows Build (via MSBuild)
+From a Visual Studio 2022 Developer PowerShell or Developer Command Prompt, navigate to the root directory and run:
 
-From a VS 2022 Developer PowerShell or Command Prompt, run MSBuild against **[JanusCryptoBOM.msbuild.proj](file:///D:/src/Janus_CryptoBOM/JanusCryptoBOM.msbuild.proj)**:
+1. **Standard Build** (automatically bootstraps portable Go and Rust toolchains locally if not in your current PATH):
+   ```powershell
+   msbuild JanusCryptoBOM.msbuild.proj /t:Build
+   ```
+2. **System Toolchain Build** (forces the build script to use system-installed Go, Rust, and npm tools):
+   ```powershell
+   msbuild JanusCryptoBOM.msbuild.proj /t:BuildNoTools
+   ```
 
-*   **Standard Build (Autodetects/Bootstraps Tools)**:
-    ```powershell
-    msbuild JanusCryptoBOM.msbuild.proj /t:Build
-    ```
-    This calls **[build-windows.ps1](file:///D:/src/Janus_CryptoBOM/build-windows.ps1)**, which bootstraps portable Go and Rust toolchains under `.tools` when they are not already present on your `PATH`.
-*   **Build Using System Tools Only**:
-    ```powershell
-    msbuild JanusCryptoBOM.msbuild.proj /t:BuildNoTools
-    ```
-    This runs the build steps while skipping any tool download or bootstrap attempts, relying entirely on existing tool versions installed on your system path.
+Built binaries will be located at `bin/janus-server.exe` and `bin/janus-agent.exe`. The static frontend build will be written to `ui/dist`.
 
-The build outputs:
-- `bin\janus-server.exe`
-- `bin\janus-agent.exe`
-- `ui\dist`
-
-#### End-to-End Validation
-To run the automated validation test script:
+To run the full end-to-end automated testing validation suite on Windows:
 ```powershell
 .\scripts\test-e2e-windows.ps1 -SkipBuild
 ```
-This script starts the controller, runs a scan with the agent, and outputs a validation report at `janus-controller-report.html`. You can view the test script code here: **[test-e2e-windows.ps1](file:///D:/src/Janus_CryptoBOM/scripts/test-e2e-windows.ps1)**.
 
-### Manual / Non-Windows Builds
+### Linux & macOS Build (via Makefile)
+For UNIX-compliant environments, execute:
 
-If you prefer building components individually or are running on macOS/Linux, you can use the **[Makefile](file:///D:/src/Janus_CryptoBOM/Makefile)**:
+```bash
+# Build the entire workspace (UI, Server, and Agent)
+make test
 
-```powershell
-# Build UI assets
-cd ui
-npm install
-npm run build
-
-# Build and test the Go Server
-cd ..\server
-go mod tidy
-go test ./...
-go build ./cmd/janus-server
-
-# Build and test the Rust Agent
-cd ..\agent
-cargo test
-cargo build --release
+# Or build individual components:
+make ui
+make server
+make agent
 ```
 
 ---
 
-## Local Run & Environment Configuration
+## Quickstart & Running Instructions
 
 ### 1. Database Setup (PostgreSQL)
+Janus requires a PostgreSQL instance to store assets, telemetry details, policy parameters, and migration execution records.
 
-Janus Server stores CBOM assets, telemetry evidence, findings, and migration records in PostgreSQL. 
+#### Option A: Direct Local Setup (Windows / Linux)
+Log in to your PostgreSQL instance as a superuser and run:
+```sql
+CREATE ROLE janus WITH LOGIN PASSWORD 'janus';
+CREATE DATABASE janus OWNER janus;
+GRANT ALL PRIVILEGES ON DATABASE janus TO janus;
+```
 
-#### A. Direct Host Installation (Windows)
-If installing PostgreSQL directly on Windows (e.g., PostgreSQL 17):
-1. Log in to the database as the superuser (`postgres`):
-   ```cmd
-   "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres
-   ```
-2. Run the following SQL queries to initialize the database schema owner and database:
-   ```sql
-   CREATE ROLE janus WITH LOGIN PASSWORD 'janus';
-   CREATE DATABASE janus OWNER janus;
-   GRANT ALL PRIVILEGES ON DATABASE janus TO janus;
-   ```
+*Note on authentication: Ensure your `pg_hba.conf` allows password authentication (scram-sha-256 or md5) from localhost.*
 
-> [!TIP]
-> **Authentication Configuration (`pg_hba.conf`)**
-> If you experience `password authentication failed` issues, locate your `pg_hba.conf` configuration file (typically in `C:\Program Files\PostgreSQL\17\data\pg_hba.conf`) and ensure there is an entry allowing password authentication for local connections, or temporarily configure it to `trust` for local loopback connections during development:
-> ```text
-> # TYPE  DATABASE        USER            ADDRESS                 METHOD
-> host    all             all             127.0.0.1/32            scram-sha-256
-> host    all             all             ::1/128                 scram-sha-256
-> ```
-
-#### B. Docker Container Setup
-Alternatively, if Docker is available:
-```powershell
+#### Option B: Docker Container Setup
+```bash
 docker compose -f infra/docker-compose.yml up -d postgres
 ```
 
----
+### 2. Launching the Go Server
+Configure the target database URL and service listener ports using environment variables:
 
-### 2. Starting the Server
-
-The server behaves as the central controller orchestrating gRPC telemetry from agents, processing cryptographic compliance checks, and presenting REST APIs to the UI.
-
-To launch the built server binary on Windows:
 ```powershell
-# 1. Set environment variables
+# Set environment parameters
 $env:JANUS_DATABASE_URL="postgres://janus:janus@127.0.0.1:5432/janus?sslmode=disable"
 $env:JANUS_GRPC_ADDR="127.0.0.1:9443"
 $env:JANUS_HTTP_ADDR="127.0.0.1:8080"
 $env:JANUS_COMMAND_SIGNING_KEY="local-development-command-signing-key"
 
-# (Optional) Enable LLM-Powered Context Analysis for False Positive Reduction
+# (Optional) Enable context-aware risk engine API checks
 # $env:JANUS_LLM_API_KEY="sk-..."
-# $env:JANUS_LLM_API_URL="https://api.openai.com/v1" # (Defaults to OpenAI if omitted)
+# $env:JANUS_LLM_API_URL="https://api.openai.com/v1"
 
-# 2. Run the server executable
+# Run the controller executable
 .\bin\janus-server.exe
 ```
 
----
-
-### 3. Running the Agent
-
-The agent is written in Rust and scans endpoints for cryptographic algorithms, active TLS settings, and certificates.
-
-To run the agent on Windows:
-1. Ensure the default configuration file `janus-agent.toml` exists at the root of the repository. You can copy the example file:
+### 3. Deploying the Rust Agent
+1. Copy the template agent configuration file to the working folder:
    ```powershell
-   Copy-Item .\agent\janus-agent.example.toml -Destination .\janus-agent.toml -ErrorAction SilentlyContinue
+   copy .\agent\janus-agent.example.toml .\janus-agent.toml
    ```
-2. Run a one-off telemetry scan and sync:
+2. Run a single scanning iteration and sync directly to the server:
    ```powershell
    .\bin\janus-agent.exe --once
    ```
-3. Alternatively, run the agent in daemon mode to perform periodic background scans:
+3. Alternatively, run the agent as a background daemon to monitor the system dynamically:
    ```powershell
    .\bin\janus-agent.exe
    ```
 
-*The example configuration is located at [agent/janus-agent.example.toml](file:///D:/src/Janus_CryptoBOM/agent/janus-agent.example.toml) and the main configuration file is [janus-agent.toml](file:///D:/src/Janus_CryptoBOM/janus-agent.toml).*
-
----
-
-### 4. Running the Dashboard (React/TypeScript UI)
-
-The frontend is a single-page React app served locally with a proxy connection to the backend REST API on port `8080`.
-
-To start the Vite UI server:
-```powershell
+### 4. Running the Dashboard (React Console)
+To launch the developer console proxying to the Go server REST API:
+```bash
 cd ui
 npm install
 npm run dev
 ```
-Open your web browser and navigate to `http://127.0.0.1:5173` to explore findings, components, and active migration transactions.
-
-
----
-
-## Safety Model
-
-> [!WARNING]
-> Passive mode never mutates host state. Active mode enables automated cryptosystem mutation (e.g., trust store updates, config changes). To execute active modifications:
->
-> 1. `execution_mode = "active"` must be explicitly configured in the local agent config.
-> 2. The controller command must be signed with the configured HMAC key.
-> 3. The target service and config path must be explicitly whitelisted.
-> 4. Active migrations must use atomic backup, verification, reload, and rollback handling.
+Open a browser and navigate to `http://127.0.0.1:5173`.
 
 ---
 
-## Windows Agent Coverage
+## Safety Model & Security Controls
 
-- Windows certificate stores through `certutil` and PowerShell certificate provider metadata.
-- Windows CNG/CAPI provider inventory through `certutil -csplist`.
-- Windows HTTP.sys TLS bindings through `netsh http show sslcert`.
-- Windows Schannel policy through registry inventory.
-- DPAPI-protected offline telemetry queue on Windows.
-- Plugin manifests under **[plugins/windows-inventory/plugin.toml](file:///D:/src/Janus_CryptoBOM/plugins/windows-inventory/plugin.toml)**.
-- Local HTML report and SARIF report on every scan.
-- Active Windows trust-store import with signed directive validation and rollback on failed validation.
+Because Janus is capable of modifying enterprise configurations in Active Mode, a robust safety architecture is enforced:
+1. **Explicit Opt-in**: The agent will run exclusively in passive scanning mode unless `execution_mode = "active"` is configured inside the local `janus-agent.toml`.
+2. **Cryptographic Directives**: All active mutation commands received over gRPC are validated against the `signed_directive` signature field using the HMAC key configured locally in the agent's key database.
+3. **Sandbox Whitelisting**: Path traversal protection restricts config alterations to approved configuration file extensions (`.conf`, `.config`, `.json`, `.toml`, `.yaml`, `.xml`).
+4. **Atomic Rollbacks**: Every active migration executes inside a transaction state: backing up existing configurations, writing updates, verifying health, and automatically restoring backup states on any service failure.
 
+---
+
+## Platform Support & Windows Coverage
+
+While cross-compiling natively across Linux and macOS, Janus provides deep integrations for Microsoft Windows systems:
+- **Windows Certificate Stores**: Complete discovery of system certificates using `certutil` and PowerShell bindings.
+- **Crypto Abstraction Parsing**: Mapping of Active CNG and CryptoAPI (CAPI) provider configurations via `certutil -csplist`.
+- **HTTP.sys SSL Binding Sweeps**: Inspection of active HTTPS bindings using `netsh http show sslcert`.
+- **Schannel Registry Enforcements**: Parsing and updating registry locations under `HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL`.
+- **DPAPI Data Shielding**: Using the Windows Data Protection API (DPAPI) to encrypt local configuration secrets on disk, ensuring decryption happens only in-memory on system startup.
+
+---
+
+## License
+
+Janus CryptoBOM is distributed under the Apache License, Version 2.0. See the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0) for full details.
