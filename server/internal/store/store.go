@@ -40,6 +40,12 @@ type Store interface {
 	GetRetentionPolicy(ctx context.Context) (*RetentionPolicy, error)
 	UpdateRetentionPolicy(ctx context.Context, rp *RetentionPolicy) error
 	PurgeOldTelemetry(ctx context.Context, days int) (int64, error)
+	GetConfigProfiles(ctx context.Context) ([]ConfigProfile, error)
+	CreateConfigProfile(ctx context.Context, cp *ConfigProfile) error
+	DeleteConfigProfile(ctx context.Context, profileID string) error
+	GetAgentProfileMappings(ctx context.Context) ([]AgentProfileMapping, error)
+	MapAgentToProfile(ctx context.Context, hostUUID, profileID string) error
+	GetConfigForAgent(ctx context.Context, hostUUID string) (*FleetConfig, error)
 }
 
 type Postgres struct {
@@ -207,6 +213,23 @@ CREATE TABLE IF NOT EXISTS fleet_configs (
   llm_api_key TEXT NOT NULL DEFAULT '',
   llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
+	_, _ = p.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS config_profiles (
+  profile_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  exclude_dirs TEXT NOT NULL DEFAULT '',
+  min_key_size INTEGER NOT NULL DEFAULT 2048,
+  scan_schedule TEXT NOT NULL DEFAULT 'daily',
+  llm_api_key TEXT NOT NULL DEFAULT '',
+  llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`)
+	_, _ = p.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS agent_profile_mappings (
+  host_uuid TEXT PRIMARY KEY REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  profile_id TEXT NOT NULL REFERENCES config_profiles(profile_id) ON DELETE CASCADE,
+  mapped_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`)
 	_, _ = p.pool.Exec(ctx, `ALTER TABLE fleet_configs ADD COLUMN IF NOT EXISTS llm_api_key TEXT NOT NULL DEFAULT ''`)
 	_, _ = p.pool.Exec(ctx, `ALTER TABLE fleet_configs ADD COLUMN IF NOT EXISTS llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1'`)
@@ -910,4 +933,105 @@ func (p *Postgres) PurgeOldTelemetry(ctx context.Context, days int) (int64, erro
 	_, _ = p.pool.Exec(ctx, `DELETE FROM crypto_findings WHERE updated_at < $1`, cutoff)
 	_, _ = p.pool.Exec(ctx, `DELETE FROM audit_logs WHERE created_at < $1`, cutoff)
 	return tag.RowsAffected(), nil
+}
+
+type ConfigProfile struct {
+	ProfileID    string    `json:"profile_id"`
+	Name         string    `json:"name"`
+	ExcludeDirs  string    `json:"exclude_dirs"`
+	MinKeySize   int       `json:"min_key_size"`
+	ScanSchedule string    `json:"scan_schedule"`
+	LLMApiKey    string    `json:"llm_api_key"`
+	LLMApiUrl    string    `json:"llm_api_url"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type AgentProfileMapping struct {
+	HostUUID  string    `json:"host_uuid"`
+	ProfileID string    `json:"profile_id"`
+	MappedAt  time.Time `json:"mapped_at"`
+}
+
+func (p *Postgres) GetConfigProfiles(ctx context.Context) ([]ConfigProfile, error) {
+	rows, err := p.pool.Query(ctx, `SELECT profile_id, name, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url, updated_at FROM config_profiles ORDER BY name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []ConfigProfile
+	for rows.Next() {
+		var cp ConfigProfile
+		if err := rows.Scan(&cp.ProfileID, &cp.Name, &cp.ExcludeDirs, &cp.MinKeySize, &cp.ScanSchedule, &cp.LLMApiKey, &cp.LLMApiUrl, &cp.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, cp)
+	}
+	return list, rows.Err()
+}
+
+func (p *Postgres) CreateConfigProfile(ctx context.Context, cp *ConfigProfile) error {
+	if cp.ProfileID == "" {
+		cp.ProfileID = uuid.NewString()
+	}
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO config_profiles (profile_id, name, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+ON CONFLICT (profile_id) DO UPDATE SET
+  name = EXCLUDED.name,
+  exclude_dirs = EXCLUDED.exclude_dirs,
+  min_key_size = EXCLUDED.min_key_size,
+  scan_schedule = EXCLUDED.scan_schedule,
+  llm_api_key = EXCLUDED.llm_api_key,
+  llm_api_url = EXCLUDED.llm_api_url,
+  updated_at = now()`, cp.ProfileID, cp.Name, cp.ExcludeDirs, cp.MinKeySize, cp.ScanSchedule, cp.LLMApiKey, cp.LLMApiUrl)
+	return err
+}
+
+func (p *Postgres) DeleteConfigProfile(ctx context.Context, profileID string) error {
+	_, err := p.pool.Exec(ctx, `DELETE FROM config_profiles WHERE profile_id = $1`, profileID)
+	return err
+}
+
+func (p *Postgres) GetAgentProfileMappings(ctx context.Context) ([]AgentProfileMapping, error) {
+	rows, err := p.pool.Query(ctx, `SELECT host_uuid, profile_id, mapped_at FROM agent_profile_mappings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []AgentProfileMapping
+	for rows.Next() {
+		var apm AgentProfileMapping
+		if err := rows.Scan(&apm.HostUUID, &apm.ProfileID, &apm.MappedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, apm)
+	}
+	return list, rows.Err()
+}
+
+func (p *Postgres) MapAgentToProfile(ctx context.Context, hostUUID, profileID string) error {
+	if profileID == "" {
+		_, err := p.pool.Exec(ctx, `DELETE FROM agent_profile_mappings WHERE host_uuid = $1`, hostUUID)
+		return err
+	}
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO agent_profile_mappings (host_uuid, profile_id, mapped_at)
+VALUES ($1, $2, now())
+ON CONFLICT (host_uuid) DO UPDATE SET
+  profile_id = EXCLUDED.profile_id,
+  mapped_at = now()`, hostUUID, profileID)
+	return err
+}
+
+func (p *Postgres) GetConfigForAgent(ctx context.Context, hostUUID string) (*FleetConfig, error) {
+	var fc FleetConfig
+	err := p.pool.QueryRow(ctx, `
+SELECT p.profile_id, p.exclude_dirs, p.min_key_size, p.scan_schedule, p.llm_api_key, p.llm_api_url, p.updated_at
+FROM agent_profile_mappings m
+JOIN config_profiles p ON m.profile_id = p.profile_id
+WHERE m.host_uuid = $1`, hostUUID).Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.LLMApiKey, &fc.LLMApiUrl, &fc.UpdatedAt)
+	if err == nil {
+		return &fc, nil
+	}
+	return p.GetFleetConfig(ctx)
 }

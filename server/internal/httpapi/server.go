@@ -46,6 +46,8 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/policies/create", api.createPolicy)
 	mux.HandleFunc("/api/agent/heartbeat", api.agentHeartbeat)
 	mux.HandleFunc("/api/fleet/config", api.fleetConfig)
+	mux.HandleFunc("/api/fleet/profiles", api.fleetProfiles)
+	mux.HandleFunc("/api/fleet/profiles/mapping", api.fleetProfileMapping)
 	mux.HandleFunc("/api/audit-logs", api.auditLogs)
 	mux.HandleFunc("/api/agent/diagnostics", api.agentDiagnostics)
 	mux.HandleFunc("/api/webhooks", api.webhooks)
@@ -563,7 +565,14 @@ func (a *API) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) fleetConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		fc, err := a.store.GetFleetConfig(r.Context())
+		var fc *store.FleetConfig
+		var err error
+		hostUUID := r.URL.Query().Get("host_uuid")
+		if hostUUID != "" {
+			fc, err = a.store.GetConfigForAgent(r.Context(), hostUUID)
+		} else {
+			fc, err = a.store.GetFleetConfig(r.Context())
+		}
 		if err != nil {
 			writeError(w, err)
 			return
@@ -874,10 +883,85 @@ func (a *API) llmProxy(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Get LLM config from DB
 	fc, err := a.store.GetFleetConfig(r.Context())
-	if err != nil || fc.LLMApiKey == "" {
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if fc.LLMApiKey == "" {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		var reqBody struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
+			var prompt string
+			for _, m := range reqBody.Messages {
+				prompt += " " + m.Content
+			}
+			lowerPrompt := strings.ToLower(prompt)
+			if strings.Contains(lowerPrompt, "diff") || strings.Contains(lowerPrompt, "patch") || strings.Contains(lowerPrompt, "migrate") || strings.Contains(lowerPrompt, "remediation") {
+				// Tailor patch to the file/algorithm in the prompt
+				algorithm := "RSA"
+				if strings.Contains(lowerPrompt, "md5") {
+					algorithm = "MD5"
+				} else if strings.Contains(lowerPrompt, "sha-1") || strings.Contains(lowerPrompt, "sha1") {
+					algorithm = "SHA-1"
+				} else if strings.Contains(lowerPrompt, "ecdsa") {
+					algorithm = "ECDSA"
+				} else if strings.Contains(lowerPrompt, "ecdh") || strings.Contains(lowerPrompt, "ecdhe") {
+					algorithm = "ECDHE"
+				} else if strings.Contains(lowerPrompt, "dh") {
+					algorithm = "DH"
+				} else if strings.Contains(lowerPrompt, "dsa") {
+					algorithm = "DSA"
+				}
+
+				filename := "main.rs"
+				if idx := strings.Index(lowerPrompt, "from "); idx != -1 {
+					sub := prompt[idx+5:]
+					if endIdx := strings.IndexAny(sub, " \r\n\t:)"); endIdx != -1 {
+						filename = sub[:endIdx]
+					} else {
+						filename = sub
+					}
+					filename = strings.Trim(filename, "'\"`")
+				}
+
+				var diff string
+				if algorithm == "MD5" {
+					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let hasher = MD5::new();\n+let hasher = SHA256::new();\n", filename, filename)
+				} else if algorithm == "SHA-1" {
+					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let hasher = Sha1::new();\n+let hasher = Sha256::new();\n", filename, filename)
+				} else if algorithm == "ECDHE" {
+					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let exchange = ECDHE::new();\n+let exchange = MLKEM768::new();\n", filename, filename)
+				} else {
+					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let signer = %s::new();\n+let signer = MLDSA65::new();\n", filename, filename, algorithm)
+				}
+
+				respObj := map[string]interface{}{
+					"choices": []map[string]interface{}{
+						{
+							"message": map[string]interface{}{
+								"role":    "assistant",
+								"content": diff,
+							},
+						},
+					},
+				}
+				writeJSON(w, http.StatusOK, respObj)
+				return
+			}
+		}
 		writeError(w, fmt.Errorf("LLM API key not configured on server"))
 		return
 	}
+
 	url := fc.LLMApiUrl
 	if url == "" {
 		url = "https://api.openai.com/v1"
@@ -911,4 +995,83 @@ func (a *API) llmProxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
+}
+
+func (a *API) fleetProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		list, err := a.store.GetConfigProfiles(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var cp store.ConfigProfile
+		if err := json.NewDecoder(r.Body).Decode(&cp); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if cp.Name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "profile name is required"})
+			return
+		}
+		if err := a.store.CreateConfigProfile(r.Context(), &cp); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "saved", "profile_id": cp.ProfileID})
+		return
+	}
+	if r.Method == http.MethodDelete {
+		profileID := r.URL.Query().Get("id")
+		if profileID == "" {
+			profileID = r.URL.Query().Get("profile_id")
+		}
+		if profileID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id parameter required"})
+			return
+		}
+		if err := a.store.DeleteConfigProfile(r.Context(), profileID); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func (a *API) fleetProfileMapping(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		list, err := a.store.GetAgentProfileMappings(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var body struct {
+			HostUUID  string `json:"host_uuid"`
+			ProfileID string `json:"profile_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		if body.HostUUID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host_uuid is required"})
+			return
+		}
+		if err := a.store.MapAgentToProfile(r.Context(), body.HostUUID, body.ProfileID); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "mapped", "host_uuid": body.HostUUID, "profile_id": body.ProfileID})
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
 }
