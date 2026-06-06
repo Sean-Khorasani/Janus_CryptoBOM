@@ -72,6 +72,8 @@ if (!$SkipAgent) {
   cargo build --release
   Ensure-Dir (Join-Path $Root "bin")
   Copy-Item -Force (Join-Path $Root "agent\target\release\janus-agent.exe") (Join-Path $Root "bin\janus-agent.exe")
+  Copy-Item -Force (Join-Path $Root "agent\target\release\janus_interceptor.dll") (Join-Path $Root "bin\janus_interceptor.dll")
+  Copy-Item -Force (Join-Path $Root "agent\target\release\janus-agent.exe") (Join-Path $Root "bin\janus-cli.exe")
   Pop-Location
 }
 
