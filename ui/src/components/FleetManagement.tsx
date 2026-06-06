@@ -33,6 +33,17 @@ export function FleetManagement({
   const [retentionDays, setRetentionDays] = useState(90);
   const [autoPurge, setAutoPurge] = useState(true);
 
+  // Profile Management State
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [mappings, setMappings] = useState<Record<string, string>>({}); // host_uuid -> profile_id
+  const [profName, setProfName] = useState("");
+  const [profExcludes, setProfExcludes] = useState("");
+  const [profMinKey, setProfMinKey] = useState(2048);
+  const [profSchedule, setProfSchedule] = useState("daily");
+  const [profLlmKey, setProfLlmKey] = useState("");
+  const [profLlmUrl, setProfLlmUrl] = useState("https://api.openai.com/v1");
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+
   const getAuthHeaders = (extra: Record<string, string> = {}) => {
     const token = localStorage.getItem("janus_token");
     const headers: Record<string, string> = { ...extra };
@@ -61,9 +72,33 @@ export function FleetManagement({
       .catch(err => console.error("Error loading retention:", err));
   };
 
+  const loadProfiles = () => {
+    fetch("/api/fleet/profiles", { headers: getAuthHeaders() })
+      .then(res => res.ok ? res.json() : [])
+      .then(data => setProfiles(data || []))
+      .catch(err => console.error("Error loading profiles:", err));
+  };
+
+  const loadMappings = () => {
+    fetch("/api/fleet/profiles/mapping", { headers: getAuthHeaders() })
+      .then(res => res.ok ? res.json() : [])
+      .then(data => {
+        const map: Record<string, string> = {};
+        if (Array.isArray(data)) {
+          data.forEach((m: any) => {
+            map[m.host_uuid] = m.profile_id;
+          });
+        }
+        setMappings(map);
+      })
+      .catch(err => console.error("Error loading mappings:", err));
+  };
+
   useEffect(() => {
     loadWebhooks();
     loadRetention();
+    loadProfiles();
+    loadMappings();
   }, []);
 
   const handleAddWebhook = () => {
@@ -286,6 +321,88 @@ export function FleetManagement({
     }
   };
 
+  const handleSaveProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profName) {
+      showToast("Profile Name is required");
+      return;
+    }
+    const body: any = {
+      name: profName,
+      exclude_dirs: profExcludes,
+      min_key_size: profMinKey,
+      scan_schedule: profSchedule,
+      llm_api_key: profLlmKey,
+      llm_api_url: profLlmUrl
+    };
+    if (selectedProfileId) {
+      body.profile_id = selectedProfileId;
+    }
+    fetch("/api/fleet/profiles", {
+      method: "POST",
+      headers: getAuthHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify(body)
+    })
+      .then(res => {
+        if (res.ok) {
+          showToast(selectedProfileId ? "Profile updated successfully" : "Profile created successfully");
+          setProfName("");
+          setProfExcludes("");
+          setProfMinKey(2048);
+          setProfSchedule("daily");
+          setProfLlmKey("");
+          setProfLlmUrl("https://api.openai.com/v1");
+          setSelectedProfileId(null);
+          loadProfiles();
+        } else {
+          showToast("Failed to save profile");
+        }
+      });
+  };
+
+  const handleDeleteProfile = (id: string) => {
+    fetch(`/api/fleet/profiles?id=${id}`, {
+      method: "DELETE",
+      headers: getAuthHeaders()
+    })
+      .then(res => {
+        if (res.ok) {
+          showToast("Profile deleted successfully");
+          loadProfiles();
+          loadMappings();
+        } else {
+          showToast("Failed to delete profile");
+        }
+      });
+  };
+
+  const handleEditProfile = (p: any) => {
+    setSelectedProfileId(p.profile_id);
+    setProfName(p.name);
+    setProfExcludes(p.exclude_dirs);
+    setProfMinKey(p.min_key_size);
+    setProfSchedule(p.scan_schedule);
+    setProfLlmKey(p.llm_api_key || "");
+    setProfLlmUrl(p.llm_api_url || "https://api.openai.com/v1");
+  };
+
+  const handleMapProfile = (hostUUID: string, profileID: string) => {
+    fetch("/api/fleet/profiles/mapping", {
+      method: "POST",
+      headers: getAuthHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ host_uuid: hostUUID, profile_id: profileID })
+    })
+      .then(res => {
+        if (res.ok) {
+          const matchedProfileName = profileID === "" ? "Global / Default" : (profiles.find(p => p.profile_id === profileID)?.name || "custom profile");
+          showToast(`Profile status updated: host mapped to ${matchedProfileName}`);
+          loadMappings();
+        } else {
+          showToast("Failed to map profile");
+        }
+      });
+  };
+
   return (
     <div className="space-y-6">
       {/* Toast Alert */}
@@ -426,6 +543,17 @@ export function FleetManagement({
                         </td>
                         <td className="p-3 text-right">
                           <div className="flex items-center justify-end gap-2">
+                            <select
+                              value={mappings[asset.host_uuid] || ""}
+                              onChange={(e) => handleMapProfile(asset.host_uuid, e.target.value)}
+                              className="rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#17211c] bg-white text-gray-700"
+                            >
+                              <option value="">Global / Default</option>
+                              {profiles.map(p => (
+                                <option key={p.profile_id} value={p.profile_id}>{p.name}</option>
+                              ))}
+                            </select>
+
                             <button
                               id={`force-scan-${asset.host_uuid}`}
                               onClick={() => handleForceScan(asset.host_uuid)}
@@ -480,6 +608,19 @@ export function FleetManagement({
                 <p className="text-[10px] text-[#697469] mt-1">
                   Comma-separated directories omitted by agent filesystem scanners.
                 </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-[#49504a] mb-1">
+                  Minimum Key Size
+                </label>
+                <input
+                  id="cfg-min-key-size"
+                  type="number"
+                  value={minKeySize}
+                  onChange={e => setMinKeySize(parseInt(e.target.value) || 2048)}
+                  className="w-full rounded border border-[#dfe5dc] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#17211c]"
+                />
               </div>
 
               <div>
@@ -547,6 +688,152 @@ export function FleetManagement({
                 Deploy Configuration Profile
               </button>
             </form>
+          </section>
+
+          {/* Configuration Profiles Management */}
+          <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
+            <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
+              <Sliders size={18} />
+              Configuration Profiles
+            </h2>
+
+            <form onSubmit={handleSaveProfile} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-[#697469] mb-1">
+                  Profile Name
+                </label>
+                <input
+                  type="text"
+                  value={profName}
+                  onChange={e => setProfName(e.target.value)}
+                  placeholder="e.g. High Security Profile"
+                  className="w-full rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#697469] mb-1">
+                  Exclude Directories
+                </label>
+                <input
+                  type="text"
+                  value={profExcludes}
+                  onChange={e => setProfExcludes(e.target.value)}
+                  placeholder=".git, node_modules"
+                  className="w-full rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-[#697469] mb-1">
+                    Min Key Size
+                  </label>
+                  <input
+                    type="number"
+                    value={profMinKey}
+                    onChange={e => setProfMinKey(parseInt(e.target.value) || 2048)}
+                    className="w-full rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#697469] mb-1">
+                    Scan Schedule
+                  </label>
+                  <select
+                    value={profSchedule}
+                    onChange={e => setProfSchedule(e.target.value)}
+                    className="w-full rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1 bg-white"
+                  >
+                    <option value="realtime">Continuous</option>
+                    <option value="hourly">Hourly</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#697469] mb-1">
+                  LLM API URL
+                </label>
+                <input
+                  type="text"
+                  value={profLlmUrl}
+                  onChange={e => setProfLlmUrl(e.target.value)}
+                  className="w-full rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#697469] mb-1">
+                  LLM API Key
+                </label>
+                <input
+                  type="password"
+                  value={profLlmKey}
+                  onChange={e => setProfLlmKey(e.target.value)}
+                  className="w-full rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1"
+                />
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  className="flex-1 rounded bg-[#11845b] text-white hover:bg-[#0e6b4a] py-1.5 text-xs font-semibold transition"
+                >
+                  {selectedProfileId ? "Update Profile" : "Create Profile"}
+                </button>
+                {selectedProfileId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedProfileId(null);
+                      setProfName("");
+                      setProfExcludes("");
+                      setProfMinKey(2048);
+                      setProfSchedule("daily");
+                      setProfLlmKey("");
+                      setProfLlmUrl("https://api.openai.com/v1");
+                    }}
+                    className="rounded border border-[#dfe5dc] hover:bg-gray-50 px-2 py-1.5 text-xs text-[#4d594f] transition"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </form>
+
+            <ul className="divide-y divide-[#dfe5dc] mt-4 max-h-40 overflow-y-auto">
+              {profiles.length === 0 ? (
+                <li className="py-2 text-[11px] text-[#697469] text-center">No custom profiles configured.</li>
+              ) : (
+                profiles.map(p => (
+                  <li key={p.profile_id} className="py-2 flex items-center justify-between text-xs">
+                    <div>
+                      <span className="font-semibold block">{p.name}</span>
+                      <span className="text-[10px] text-[#697469] block font-mono">Min key: {p.min_key_size} | {p.scan_schedule}</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleEditProfile(p)}
+                        className="text-blue-600 hover:text-blue-800 text-[10px] font-semibold"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteProfile(p.profile_id)}
+                        className="text-red-600 hover:text-red-800 text-[10px] font-semibold"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))
+              )}
+            </ul>
           </section>
 
           {/* New Feature 1: Alert Webhook Console */}

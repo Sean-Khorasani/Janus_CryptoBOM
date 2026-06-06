@@ -181,6 +181,12 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
     return findings.find(f => f.finding_id === selected.finding_id) || selected;
   }, [selected, findings]);
 
+  const currentSelectedFilePath = useMemo(() => {
+    if (!currentSelected) return null;
+    const comp = components.find(c => c.bom_ref === currentSelected.asset_ref);
+    return comp ? comp.file_path : null;
+  }, [currentSelected, components]);
+
   const handleSort = (col: "severity" | "algorithm") => {
     if (sortCol !== col) {
       setSortCol(col);
@@ -363,6 +369,9 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
                 rowClass += " opacity-50 muted false-positive";
               }
 
+              const comp = components.find(c => c.bom_ref === finding.asset_ref);
+              const filePath = comp ? comp.file_path : null;
+
               return (
                 <tr 
                   key={finding.finding_id} 
@@ -379,6 +388,11 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
                       {status === "remediated" && <span className="badge bg-[#edf1ea] text-[#4d594f] text-xs px-2 py-0.5 rounded font-medium">Remediated</span>}
                     </div>
                     <div className="max-w-[420px] truncate text-xs text-[#697469]">{finding.description}</div>
+                    {filePath && (
+                      <div className="text-[11px] font-mono text-[#11845b] mt-0.5 truncate max-w-[420px]" title={filePath}>
+                        {filePath}
+                      </div>
+                    )}
                   </td>
                   <td className="py-2 pr-3 max-w-[240px] truncate">{finding.asset_ref}</td>
                   <td className="py-2 pr-3">{finding.algorithm || "unknown"}</td>
@@ -444,6 +458,13 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
                 <span className="block text-xs font-semibold text-[#697469] uppercase tracking-wider mb-1">Impacted Asset</span>
                 <span className="font-mono text-sm block bg-[#f7f8f5] p-2 rounded border border-[#dfe5dc] max-w-full overflow-x-auto">{currentSelected.asset_ref}</span>
               </div>
+
+              {currentSelectedFilePath && (
+                <div>
+                  <span className="block text-xs font-semibold text-[#697469] uppercase tracking-wider mb-1">Source File Path</span>
+                  <span className="font-mono text-sm block bg-[#f7f8f5] p-2 rounded border border-[#dfe5dc] max-w-full overflow-x-auto text-[#11845b]">{currentSelectedFilePath}</span>
+                </div>
+              )}
 
               <div>
                 <span className="block text-xs font-semibold text-[#697469] uppercase tracking-wider mb-1">Algorithm Observed</span>
