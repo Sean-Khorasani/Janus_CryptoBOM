@@ -44,6 +44,8 @@ pub fn scan(_cfg: &AgentConfig) -> Result<ScanResult> {
                     symbol: process.name().to_string_lossy().to_string(),
                     confidence: 0.55,
                     quantum_vulnerable: false,
+
+                    context_snippet: String::new(),
                 });
             }
         }
@@ -81,6 +83,9 @@ pub fn scan(_cfg: &AgentConfig) -> Result<ScanResult> {
     #[cfg(target_os = "windows")]
     scan_windows_modules(&mut out);
 
+    #[cfg(target_os = "windows")]
+    scrape_process_memory_keys(&mut out);
+
     Ok(out)
 }
 
@@ -109,7 +114,7 @@ fn scan_windows_modules(out: &mut ScanResult) {
 
         if unsafe { Module32First(h_snapshot, &mut entry) } != 0 {
             loop {
-                let module_name = unsafe {
+                let module_name = {
                     let len = entry.szModule.iter().position(|&c| c == 0).unwrap_or(entry.szModule.len());
                     let bytes: Vec<u8> = entry.szModule[..len].iter().map(|&c| c as u8).collect();
                     String::from_utf8_lossy(&bytes).to_string()
@@ -120,7 +125,7 @@ fn scan_windows_modules(out: &mut ScanResult) {
                     || lower_name.contains("libcrypto") 
                     || lower_name.contains("openssl") 
                 {
-                    let module_path = unsafe {
+                    let module_path = {
                         let len = entry.szExePath.iter().position(|&c| c == 0).unwrap_or(entry.szExePath.len());
                         let bytes: Vec<u8> = entry.szExePath[..len].iter().map(|&c| c as u8).collect();
                         String::from_utf8_lossy(&bytes).to_string()
@@ -148,6 +153,8 @@ fn scan_windows_modules(out: &mut ScanResult) {
                             symbol: "process-module".to_string(),
                             confidence: 0.8,
                             quantum_vulnerable: false,
+
+                            context_snippet: String::new(),
                         }],
                         dependencies: Vec::new(),
                         reachable: true,
@@ -213,6 +220,8 @@ fn scan_linux_maps(out: &mut ScanResult) {
                         symbol: "process-map".to_string(),
                         confidence: 0.7,
                         quantum_vulnerable: false,
+
+                        context_snippet: String::new(),
                     }],
                     dependencies: Vec::new(),
                     reachable: true,
@@ -221,6 +230,134 @@ fn scan_linux_maps(out: &mut ScanResult) {
         }
     }
 }
+
+#[cfg(target_os = "windows")]
+fn scrape_process_memory_keys(out: &mut ScanResult) {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ
+    };
+    use windows_sys::Win32::System::Memory::{
+        VirtualQueryEx, MEM_COMMIT, PAGE_NOACCESS, PAGE_GUARD,
+        PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+        MEMORY_BASIC_INFORMATION
+    };
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use sysinfo::{ProcessesToUpdate, System};
+
+    let mut sys = System::new_all();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+    let pem1 = format!("{}-----", "-----BEGIN PRIVATE KEY");
+    let pem2 = format!("{}-----", "-----BEGIN RSA PRIVATE KEY");
+
+    for (pid, process) in sys.processes() {
+        let u32_pid = pid.as_u32();
+        
+        let h_process = unsafe {
+            OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, u32_pid)
+        };
+        if h_process.is_null() {
+            continue;
+        }
+
+        let mut address = std::ptr::null();
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let mbi_size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+
+        let mut found_keys = false;
+
+        while unsafe { VirtualQueryEx(h_process, address, &mut mbi, mbi_size) } != 0 {
+            if mbi.RegionSize == 0 {
+                break;
+            }
+            let is_committed = mbi.State == MEM_COMMIT;
+            let is_readable = (mbi.Protect & PAGE_NOACCESS) == 0
+                && (mbi.Protect & PAGE_GUARD) == 0
+                && (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0;
+
+            if is_committed && is_readable && mbi.RegionSize > 0 && mbi.RegionSize <= 50 * 1024 * 1024 {
+                let mut buffer = vec![0u8; mbi.RegionSize];
+                let mut bytes_read = 0;
+                let ok = unsafe {
+                    ReadProcessMemory(
+                        h_process,
+                        mbi.BaseAddress,
+                        buffer.as_mut_ptr() as *mut _,
+                        mbi.RegionSize,
+                        &mut bytes_read,
+                    )
+                };
+
+                if ok != 0 && bytes_read > 0 {
+                    let chunk = &buffer[..bytes_read];
+                    let has_pem = chunk.windows(pem1.len()).any(|w| w == pem1.as_bytes())
+                        || chunk.windows(pem2.len()).any(|w| w == pem2.as_bytes());
+
+                    if has_pem {
+                        found_keys = true;
+                        break;
+                    }
+                }
+            }
+
+            address = ((mbi.BaseAddress as usize).saturating_add(mbi.RegionSize)) as *const std::ffi::c_void;
+        }
+
+        unsafe {
+            CloseHandle(h_process);
+        }
+
+        if found_keys {
+            let exe_path = process.exe().map(|p| p.display().to_string()).unwrap_or_default();
+            let process_name = process.name().to_string_lossy().to_string();
+            let target = format!("pid:{pid}:{process_name}");
+            
+            out.evidence.push(Evidence {
+                evidence_id: Uuid::new_v4().to_string(),
+                source_type: "process-memory-key".to_string(),
+                source_tool: "janus-agent-memory-scraper".to_string(),
+                target: target.clone(),
+                collection_time_unix: now(),
+                raw_artifact_sha256: hash(&target),
+                confidence: 0.95,
+                sensitivity_class: "metadata-only".to_string(),
+            });
+
+            out.components.push(CbomComponent {
+                bom_ref: target,
+                name: process_name,
+                version: String::new(),
+                component_type: "process-memory-key".to_string(),
+                purl: String::new(),
+                file_path: exe_path,
+                language: "runtime".to_string(),
+                algorithms: vec![CryptoAlgorithm {
+                    name: "Unencrypted-Private-Key".to_string(),
+                    family: "process-memory-key".to_string(),
+                    role: CryptoRole::Unspecified as i32,
+                    status: "scraped-from-memory".to_string(),
+                    key_bits: 0,
+                    curve: String::new(),
+                    implementation_library: "process-memory".to_string(),
+                    source_file: String::new(),
+                    source_line: 0,
+                    source_column: 0,
+                    symbol: "private-key-header".to_string(),
+                    confidence: 0.95,
+                    quantum_vulnerable: false,
+                    context_snippet: String::new(),
+                }],
+                dependencies: Vec::new(),
+                reachable: true,
+            });
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+fn scrape_process_memory_keys(_out: &mut ScanResult) {}
 
 fn hash(s: &str) -> String {
     let mut h = Sha256::new();

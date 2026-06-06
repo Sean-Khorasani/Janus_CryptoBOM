@@ -244,7 +244,75 @@ fn analyze_snippet_llm_sync(http_endpoint: &str, name: &str, source_file: &str, 
     anyhow::bail!("failed to parse LLM response")
 }
 
-pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
+pub fn generate_remediation_patch_llm(
+    http_endpoint: &str,
+    name: &str,
+    source_file: &str,
+    snippet: &str,
+) -> Result<String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let host_port = http_endpoint
+        .strip_prefix("http://")
+        .unwrap_or(http_endpoint)
+        .split('/')
+        .next()
+        .unwrap_or("127.0.0.1:8080");
+
+    let prompt = format!(
+        "You are a cryptography security expert. Rewrite the following code snippet from '{}' to migrate from the quantum-vulnerable algorithm '{}' to a secure post-quantum or modern standard (e.g., ML-KEM, ML-DSA, SHA-256). The response must return ONLY a unified diff patch. Do not include markdown code block formatting (like ```diff), just the raw diff text. Remediation patch target file: {}\nCode Snippet:\n{}",
+        source_file, name, source_file, snippet
+    );
+
+    let body_json = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.0
+    }).to_string();
+
+    let mut stream = TcpStream::connect(host_port)?;
+    let req = format!(
+        "POST /api/llm/proxy HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n\
+         {}",
+        host_port,
+        body_json.len(),
+        body_json
+    );
+    stream.write_all(req.as_bytes())?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+
+    if let Some(idx) = response.find("\r\n\r\n") {
+        let body = &response[idx + 4..];
+        let val: serde_json::Value = serde_json::from_str(body)?;
+        if let Some(choices) = val.get("choices") {
+            if let Some(content) = choices[0]["message"]["content"].as_str() {
+                let clean = content
+                    .replace("```diff", "")
+                    .replace("```patch", "")
+                    .replace("```", "")
+                    .trim()
+                    .to_string();
+                return Ok(clean);
+            }
+        }
+    }
+
+    anyhow::bail!("failed to parse LLM patch response")
+}
+
+pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
     let patterns = patterns()?;
     let mut out = ScanResult::default();
     for root in &cfg.scan_roots {
@@ -298,11 +366,55 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                         let mut algo_conf = base_confidence;
 
                         // Try calling LLM proxy
-                        if !is_test_file && base_confidence > 0.0 {
+                        if use_llm && !is_test_file && base_confidence > 0.0 {
                             if let Ok(llm_intent) = analyze_snippet_llm_sync(&cfg.http_endpoint(), pat.name, &entry.path().display().to_string(), &snippet) {
                                 algo_status = llm_intent;
                                 algo_conf = 0.95; // LLM confidence boost
                             }
+                        }
+
+                        let is_qv = matches!(pat.name, "RSA" | "ECDSA" | "ECDH" | "ECDHE" | "DH" | "DSA" | "MD5" | "SHA-1");
+                        if is_qv {
+                            let patch = if use_llm {
+                                match generate_remediation_patch_llm(
+                                    &cfg.http_endpoint(),
+                                    pat.name,
+                                    &entry.path().display().to_string(),
+                                    &snippet,
+                                ) {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        let path_str = entry.path().display().to_string();
+                                        let line_num = line_idx + 1;
+                                        let replacement = match pat.name {
+                                            "MD5" | "SHA-1" => line.replace(pat.name, "SHA256").replace("SHA-1", "SHA256"),
+                                            "RSA" => line.replace(pat.name, "MLKEM768"),
+                                            "ECDSA" => line.replace(pat.name, "MLDSA65"),
+                                            _ => line.replace(pat.name, "MLKEM768"),
+                                        };
+                                        format!(
+                                            "--- {}\n+++ {}\n@@ -{},1 +{},1 @@\n-{}\n+{}\n",
+                                            path_str, path_str, line_num, line_num, line.trim_end(), replacement.trim_end()
+                                        )
+                                    }
+                                }
+                            } else {
+                                let path_str = entry.path().display().to_string();
+                                let line_num = line_idx + 1;
+                                let replacement = match pat.name {
+                                    "MD5" | "SHA-1" => line.replace(pat.name, "SHA256").replace("SHA-1", "SHA256"),
+                                    "RSA" => line.replace(pat.name, "MLKEM768"),
+                                    "ECDSA" => line.replace(pat.name, "MLDSA65"),
+                                    _ => line.replace(pat.name, "MLKEM768"),
+                                };
+                                format!(
+                                    "--- {}\n+++ {}\n@@ -{},1 +{},1 @@\n-{}\n+{}\n",
+                                    path_str, path_str, line_num, line_num, line.trim_end(), replacement.trim_end()
+                                )
+                            };
+                            let patch_path = format!("{}.patch", entry.path().display());
+                            let _ = fs::write(&patch_path, &patch);
+                            let _ = fs::write("remediation.patch", &patch);
                         }
 
                         algorithms.push(CryptoAlgorithm {
@@ -318,7 +430,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             source_column: (m.start() + 1) as u32,
                             symbol: m.as_str().to_string(),
                             confidence: algo_conf,
-                            quantum_vulnerable: false,
+                            quantum_vulnerable: is_qv,
                             context_snippet: snippet,
                         });
                     }

@@ -149,6 +149,7 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                                 symbol: weak_reason.clone(),
                                 confidence: 0.90,
                                 quantum_vulnerable: sig.to_uppercase().contains("RSA") || sig.to_uppercase().contains("ECDSA"),
+                                context_snippet: String::new(),
                             }
                         ];
 
@@ -167,6 +168,7 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                                 symbol: pubkey_alg.clone(),
                                 confidence: 0.90,
                                 quantum_vulnerable: pubkey_alg == "RSA" || pubkey_alg.contains("ECDSA"),
+                                context_snippet: String::new(),
                             });
                         }
 

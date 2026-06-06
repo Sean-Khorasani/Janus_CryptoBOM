@@ -97,6 +97,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             symbol: dep.clone(),
                             confidence: if is_lockfile(entry.path()) { *confidence } else { confidence * 0.75 },
                             quantum_vulnerable: false,
+                                context_snippet: String::new(),
                         });
                         break; // only first matching package descriptor
                     }

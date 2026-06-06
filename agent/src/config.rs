@@ -59,6 +59,37 @@ fn default_plugin_timeout() -> u64 {
     30
 }
 
+impl Default for AgentConfig {
+    fn default() -> Self {
+        AgentConfig {
+            controller_endpoint: "localhost:9443".to_string(),
+            http_controller_endpoint: None,
+            tls_ca_cert: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            execution_mode: "passive".to_string(),
+            cache_path: "janus-agent.sqlite3".to_string(),
+            host_uuid_path: "janus-host-id".to_string(),
+            report_path: "".to_string(),
+            sarif_path: "".to_string(),
+            scan_interval_seconds: 60,
+            max_file_bytes: 10 * 1024 * 1024,
+            max_binary_bytes: 10 * 1024 * 1024,
+            command_signing_key: "default_signing_key_at_least_16_bytes".to_string(),
+            scan_roots: vec![".".to_string()],
+            exclude_dirs: vec![],
+            network_targets: vec![],
+            plugin_dirs: vec![],
+            plugin_commands: vec![],
+            active: ActiveConfig {
+                allowed_services: vec![],
+                allowed_config_roots: vec![],
+                backup_dir: "backup".to_string(),
+            },
+        }
+    }
+}
+
 impl AgentConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let raw = fs::read_to_string(path.as_ref())

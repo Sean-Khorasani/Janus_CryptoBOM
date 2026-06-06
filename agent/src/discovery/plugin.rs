@@ -89,6 +89,8 @@ fn extract_algorithms(raw: &str, plugin_name: &str) -> Vec<CryptoAlgorithm> {
                 symbol: needle.to_string(),
                 confidence: 0.6,
                 quantum_vulnerable: false,
+
+                context_snippet: String::new(),
             });
         }
     }

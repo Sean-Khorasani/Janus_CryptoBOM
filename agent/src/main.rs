@@ -21,11 +21,62 @@ struct Args {
 
     #[arg(long)]
     once: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum Commands {
+    Check {
+        #[arg(default_value = ".")]
+        path: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(Commands::Check { path }) = args.command {
+        let mut cfg = if std::path::Path::new(&args.config).exists() {
+            AgentConfig::load(&args.config).context("load config")?
+        } else {
+            AgentConfig::default()
+        };
+        cfg.scan_roots = vec![path.clone()];
+        cfg.report_path = String::new();
+        cfg.sarif_path = String::new();
+
+        let mut payload = discovery::collect_static(&cfg)
+            .context("collect telemetry")?;
+        policy::assess(&mut payload);
+
+        if !payload.findings.is_empty() {
+            for finding in &payload.findings {
+                let severity_str = match finding.severity {
+                    1 => "Info",
+                    2 => "Low",
+                    3 => "Medium",
+                    4 => "High",
+                    5 => "Critical",
+                    _ => "Unspecified",
+                };
+                println!(
+                    "Rule ID: {}, Title: {}, Severity: {}, Asset Ref: {}",
+                    finding.policy_rule_id,
+                    finding.title,
+                    severity_str,
+                    finding.asset_ref
+                );
+            }
+            std::process::exit(1);
+        } else {
+            println!("No vulnerable cryptography found. Check passed.");
+            std::process::exit(0);
+        }
+    }
+
     let cfg = AgentConfig::load(&args.config).context("load config")?;
     let db = storage::OfflineStore::open(&cfg.cache_path).context("open offline cache")?;
     db.ensure_schema().context("ensure offline cache schema")?;

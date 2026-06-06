@@ -85,6 +85,8 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                                     symbol: sym.to_string(),
                                     confidence: 0.90, // Structural import is high confidence
                                     quantum_vulnerable: false,
+
+                                    context_snippet: String::new(),
                                 });
                             }
                         }
@@ -111,6 +113,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                                         symbol: sym.to_string(),
                                         confidence: 0.90, // Structural export is high confidence
                                         quantum_vulnerable: false,
+                                context_snippet: String::new(),
                                     });
                                 }
                             }
@@ -137,6 +140,8 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             symbol: symbol.to_string(),
                             confidence: 0.30, // Regex fallback is low confidence
                             quantum_vulnerable: false,
+
+                            context_snippet: String::new(),
                         });
                     }
                 }

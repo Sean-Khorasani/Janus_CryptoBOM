@@ -50,13 +50,14 @@ fn assess_algorithm(
 
     if public_key_role(alg.role) && classical_public_key {
         let mut severity = RiskSeverity::High;
-        let mut title = "Classical public-key cryptography is quantum-vulnerable".to_string();
+        let mut title; // = "Classical public-key cryptography is quantum-vulnerable".to_string();
         let mut desc = format!(
             "{} uses {} for role {}. Migrate to hybrid/PQC profile X25519MLKEM768 and ML-DSA where supported.",
             component.bom_ref, alg.name, alg.role
         );
-        let mut rule = "JANUS-PQC-001";
-        let mut profile = "hybrid-tls13-mlkem-mldsa";
+        let mut rule; // = "JANUS-PQC-001";
+        // let mut profile = "hybrid-tls13-mlkem-mldsa"; toreview and todel
+        let profile;
         let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
 
         if alg.role == CryptoRole::CertSignature as i32 || alg.role == CryptoRole::Signature as i32 || alg.role == CryptoRole::CertPublicKey as i32 {
@@ -132,6 +133,40 @@ fn assess_algorithm(
             &alg.name,
             "JANUS-PQC-004",
             "symmetric-margin-upgrade",
+            evidence_ids,
+        );
+    }
+
+    let name_upper = alg.name.to_ascii_uppercase();
+    let family_upper = alg.family.to_ascii_uppercase();
+    if name_upper.contains("TLS 1.0") || name_upper.contains("TLS 1.1") || name_upper.contains("RC4") || name_upper.contains("3DES")
+        || family_upper.contains("TLS 1.0") || family_upper.contains("TLS 1.1") || family_upper.contains("RC4") || family_upper.contains("3DES")
+    {
+        let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
+        push_finding(
+            payload,
+            RiskSeverity::High,
+            "Weak Schannel/TLS Policy enabled in Registry",
+            &format!("Weak registry cipher or protocol enabled: {}", alg.name),
+            &component.bom_ref,
+            &alg.name,
+            "JANUS-CLASSICAL-009",
+            "registry-hardening",
+            evidence_ids,
+        );
+    }
+
+    if alg.name == "Unencrypted-Private-Key" {
+        let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
+        push_finding(
+            payload,
+            RiskSeverity::Critical,
+            "Unencrypted private key found in process memory",
+            &format!("Unencrypted private key found in process memory: {}", component.bom_ref),
+            &component.bom_ref,
+            &alg.name,
+            "JANUS-CLASSICAL-008",
+            "memory-key-leak",
             evidence_ids,
         );
     }
@@ -268,4 +303,107 @@ fn public_key_role(role: i32) -> bool {
 
 fn contains_any(s: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| s.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{CbomComponent, CbomTelemetryPayload, CryptoAlgorithm, CryptoRole, RiskSeverity};
+
+    #[test]
+    fn test_assess_unencrypted_private_key() {
+        let mut payload = CbomTelemetryPayload::default();
+        let comp = CbomComponent {
+            bom_ref: "test-proc".to_string(),
+            name: "test-process".to_string(),
+            version: String::new(),
+            component_type: "process-memory-key".to_string(),
+            purl: String::new(),
+            file_path: String::new(),
+            language: "runtime".to_string(),
+            algorithms: vec![CryptoAlgorithm {
+                name: "Unencrypted-Private-Key".to_string(),
+                family: "process-memory-key".to_string(),
+                role: CryptoRole::Unspecified as i32,
+                status: "scraped-from-memory".to_string(),
+                key_bits: 0,
+                curve: String::new(),
+                implementation_library: "process-memory".to_string(),
+                source_file: String::new(),
+                source_line: 0,
+                source_column: 0,
+                symbol: "private-key-header".to_string(),
+                confidence: 0.95,
+                quantum_vulnerable: false,
+                context_snippet: String::new(),
+            }],
+            dependencies: Vec::new(),
+            reachable: true,
+        };
+        assess_algorithm(&mut payload, &comp, &comp.algorithms[0]);
+
+        assert_eq!(payload.findings.len(), 1);
+        assert_eq!(payload.findings[0].policy_rule_id, "JANUS-CLASSICAL-008");
+        assert_eq!(payload.findings[0].severity, RiskSeverity::Critical as i32);
+        assert_eq!(payload.findings[0].title, "Unencrypted private key found in process memory");
+    }
+
+    #[test]
+    fn test_assess_weak_registry_policies() {
+        let mut payload = CbomTelemetryPayload::default();
+        let comp = CbomComponent {
+            bom_ref: "windows-gpo".to_string(),
+            name: "Windows Cryptography Group Policy".to_string(),
+            version: String::new(),
+            component_type: "windows-gpo-cryptography".to_string(),
+            purl: String::new(),
+            file_path: String::new(),
+            language: "windows-registry".to_string(),
+            algorithms: vec![
+                CryptoAlgorithm {
+                    name: "TLS 1.0".to_string(),
+                    family: "TLS".to_string(),
+                    role: CryptoRole::KeyExchange as i32,
+                    status: "windows-registry-observed".to_string(),
+                    key_bits: 0,
+                    curve: String::new(),
+                    implementation_library: "Windows Cryptography".to_string(),
+                    source_file: String::new(),
+                    source_line: 0,
+                    source_column: 0,
+                    symbol: String::new(),
+                    confidence: 0.80,
+                    quantum_vulnerable: false,
+                    context_snippet: String::new(),
+                },
+                CryptoAlgorithm {
+                    name: "3DES".to_string(),
+                    family: "legacy".to_string(),
+                    role: CryptoRole::Symmetric as i32,
+                    status: "windows-registry-observed".to_string(),
+                    key_bits: 0,
+                    curve: String::new(),
+                    implementation_library: "Windows Cryptography".to_string(),
+                    source_file: String::new(),
+                    source_line: 0,
+                    source_column: 0,
+                    symbol: String::new(),
+                    confidence: 0.80,
+                    quantum_vulnerable: false,
+                    context_snippet: String::new(),
+                }
+            ],
+            dependencies: Vec::new(),
+            reachable: true,
+        };
+
+        assess_algorithm(&mut payload, &comp, &comp.algorithms[0]);
+        assess_algorithm(&mut payload, &comp, &comp.algorithms[1]);
+
+        assert_eq!(payload.findings.len(), 2);
+        assert_eq!(payload.findings[0].policy_rule_id, "JANUS-CLASSICAL-009");
+        assert_eq!(payload.findings[0].severity, RiskSeverity::High as i32);
+        assert_eq!(payload.findings[0].title, "Weak Schannel/TLS Policy enabled in Registry");
+        assert_eq!(payload.findings[1].policy_rule_id, "JANUS-CLASSICAL-009");
+    }
 }

@@ -149,7 +149,7 @@ pub async fn start_heartbeat_loop(http_endpoint: String, host_uuid: String) {
             }
 
             // Dynamically fetch and update global scan exclusions
-            if let Ok(dynamic_excs) = fetch_fleet_config(&http_endpoint).await {
+            if let Ok(dynamic_excs) = fetch_fleet_config(&http_endpoint, &host_uuid).await {
                 if !dynamic_excs.is_empty() {
                     crate::discovery::status::set_exclusions(dynamic_excs);
                 }
@@ -219,7 +219,7 @@ async fn post_diagnostics(addr: &str, host_uuid: &str, logs: &str) -> anyhow::Re
     Ok(())
 }
 
-async fn fetch_fleet_config(addr: &str) -> anyhow::Result<Vec<String>> {
+async fn fetch_fleet_config(addr: &str, host_uuid: &str) -> anyhow::Result<Vec<String>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -232,9 +232,10 @@ async fn fetch_fleet_config(addr: &str) -> anyhow::Result<Vec<String>> {
 
     let mut stream = TcpStream::connect(host_port).await?;
     let req = format!(
-        "GET /api/fleet/config HTTP/1.1\r\n\
+        "GET /api/fleet/config?host_uuid={} HTTP/1.1\r\n\
          Host: {}\r\n\
          Connection: close\r\n\r\n",
+         host_uuid,
          host_port
     );
     stream.write_all(req.as_bytes()).await?;

@@ -94,6 +94,8 @@ fn ingest_command_output(
                 symbol: "sslcert".to_string(),
                 confidence: 0.62,
                 quantum_vulnerable: false,
+
+                context_snippet: String::new(),
             }],
             dependencies: Vec::new(),
             reachable: true,
@@ -186,6 +188,8 @@ fn parse_capabilities(source_type: &str, raw: &str) -> Vec<CbomComponent> {
                 symbol: needle.to_string(),
                 confidence: 0.58,
                 quantum_vulnerable: false,
+
+                context_snippet: String::new(),
             });
         }
     }
@@ -236,6 +240,8 @@ fn parse_schannel_policy(raw: &str) -> CbomComponent {
                 symbol: needle.to_string(),
                 confidence: 0.66,
                 quantum_vulnerable: false,
+
+                context_snippet: String::new(),
             });
         }
     }
@@ -318,6 +324,8 @@ fn algorithm_from_windows_line(
         symbol: line.to_string(),
         confidence: 0.74,
         quantum_vulnerable: false,
+
+        context_snippet: String::new(),
     }
 }
 
@@ -388,6 +396,8 @@ fn parse_gpo_cryptography(raw: &str) -> CbomComponent {
             symbol: "FIPS".to_string(),
             confidence: 0.85,
             quantum_vulnerable: false,
+
+            context_snippet: String::new(),
         });
     }
 
@@ -406,6 +416,8 @@ fn parse_gpo_cryptography(raw: &str) -> CbomComponent {
             symbol: "PinRules".to_string(),
             confidence: 0.85,
             quantum_vulnerable: false,
+
+            context_snippet: String::new(),
         });
     }
 
@@ -424,6 +436,8 @@ fn parse_gpo_cryptography(raw: &str) -> CbomComponent {
             symbol: "ECCCurves".to_string(),
             confidence: 0.85,
             quantum_vulnerable: false,
+
+            context_snippet: String::new(),
         });
     }
 
@@ -442,6 +456,8 @@ fn parse_gpo_cryptography(raw: &str) -> CbomComponent {
             symbol: "Microsoft\\Cryptography".to_string(),
             confidence: 0.80,
             quantum_vulnerable: false,
+
+            context_snippet: String::new(),
         });
     }
 
@@ -486,6 +502,8 @@ fn parse_cng_ssl_ciphers(raw: &str) -> CbomComponent {
                 symbol: needle.to_string(),
                 confidence: 0.85,
                 quantum_vulnerable: needle == "rsa" || needle == "ecdhe",
+
+                context_snippet: String::new(),
             });
         }
     }
@@ -505,6 +523,8 @@ fn parse_cng_ssl_ciphers(raw: &str) -> CbomComponent {
             symbol: "Functions".to_string(),
             confidence: 0.80,
             quantum_vulnerable: false,
+
+            context_snippet: String::new(),
         });
     }
 
@@ -560,6 +580,7 @@ fn parse_listening_ports(raw: &str) -> Vec<CbomComponent> {
                 symbol: format!("port:{}", port),
                 confidence: 0.90,
                 quantum_vulnerable: false,
+                context_snippet: String::new(),
             });
         }
     }
@@ -621,6 +642,7 @@ fn parse_loaded_crypto_modules(raw: &str) -> Vec<CbomComponent> {
                     symbol: process_name.to_string(),
                     confidence: 0.95,
                     quantum_vulnerable: module_name.to_ascii_lowercase().contains("openssl") || module_name.to_ascii_lowercase().contains("libcrypto"),
+                    context_snippet: String::new(),
                 }],
                 dependencies: Vec::new(),
                 reachable: true,

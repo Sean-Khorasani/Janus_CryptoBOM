@@ -306,6 +306,7 @@ pub mod janus_telemetry_client {
         inner: tonic::client::Grpc<T>,
     }
 
+/* toreview and todel
     impl JanusTelemetryClient<tonic::transport::Channel> {
         pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
         where
@@ -316,6 +317,7 @@ pub mod janus_telemetry_client {
             Ok(Self::new(conn))
         }
     }
+*/
 
     impl<T> JanusTelemetryClient<T>
     where
