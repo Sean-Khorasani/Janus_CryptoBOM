@@ -10,19 +10,33 @@ import (
 	"time"
 
 	"github.com/janus-cbom/janus/server/internal/certmanager"
+	"github.com/janus-cbom/janus/server/internal/hsm"
 	"github.com/janus-cbom/janus/server/internal/orchestrator"
 	"github.com/janus-cbom/janus/server/internal/policy"
+	"github.com/janus-cbom/janus/server/internal/sandbox"
 	"github.com/janus-cbom/janus/server/internal/store"
+	"github.com/janus-cbom/janus/server/internal/ws"
 )
 
 type API struct {
-	store  store.Store
-	orch   *orchestrator.Orchestrator
-	engine *policy.Engine
+	store       store.Store
+	orch        *orchestrator.Orchestrator
+	engine      *policy.Engine
+	wsHub       *ws.Hub
+	simulator   *sandbox.Simulator
+	confidence  *policy.ConfidenceAnalyzer
+	hsmClient   hsm.HSM
 }
 
-func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine, jwtSecret []byte, disableAuth bool) http.Handler {
-	api := &API{store: store, orch: orch, engine: engine}
+func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine, jwtSecret []byte, disableAuth bool, wsHub *ws.Hub) http.Handler {
+	api := &API{
+		store:      store,
+		orch:       orch,
+		engine:     engine,
+		wsHub:      wsHub,
+		simulator:  sandbox.NewSimulator(store, orch, engine),
+		confidence: policy.NewConfidenceAnalyzer(store),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", api.health)
 	mux.HandleFunc("/api/auth/login", LoginHandler(jwtSecret))
@@ -34,10 +48,10 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/migrations", api.migrations)
 	mux.HandleFunc("/api/report.html", api.reportHTML)
 	mux.HandleFunc("/api/certificates/csr", api.createCSR)
-	
+
 	// Require operator or admin role to enqueue migrations
 	mux.Handle("/api/migrations/enqueue", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.enqueueMigration)))
-	
+
 	mux.HandleFunc("/api/export/cyclonedx", api.exportCycloneDX)
 	mux.HandleFunc("/api/export/csv", api.exportCSV)
 	mux.HandleFunc("/api/export/sarif", api.exportSARIF)
@@ -54,8 +68,20 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/retention", api.retention)
 	mux.HandleFunc("/api/export/siem", api.exportSIEM)
 	mux.HandleFunc("/api/llm/proxy", api.llmProxy)
+	mux.HandleFunc("/api/ws", api.wsHub.ServeWS)
+	mux.HandleFunc("/api/report/compliance", api.complianceReport)
+	mux.HandleFunc("/api/lab/simulate", api.pqcLabSimulate)
+	mux.HandleFunc("/api/sla/metrics", api.slaMetrics)
+	mux.HandleFunc("/api/agent/upgrade", api.agentUpgradeInfo)
+	mux.HandleFunc("/api/export/audit", api.exportAuditLog)
+	// F1 — PQC Migration Simulator
+	mux.HandleFunc("/api/sandbox/simulate", api.sandboxSimulate)
+	// F7 — Statistical Confidence Analysis
+	mux.HandleFunc("/api/confidence/report", api.confidenceReport)
+	mux.HandleFunc("/api/hsm/sign", api.hsmSign)
+	mux.HandleFunc("/api/hsm/verify", api.hsmVerify)
 	mux.HandleFunc("/metrics", api.metrics)
-	
+
 	authWrapper := AuthMiddleware(jwtSecret, disableAuth)
 	return cors(authWrapper(mux))
 }
@@ -87,6 +113,24 @@ func (a *API) assets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) components(w http.ResponseWriter, r *http.Request) {
+	// Support pagination, search, and filtering like findings endpoint
+	if r.URL.Query().Has("limit") || r.URL.Query().Has("offset") || r.URL.Query().Has("search") {
+		params := store.QueryParams{
+			Limit:  intParam(r, "limit", 100),
+			Offset: intParam(r, "offset", 0),
+			Sort:   r.URL.Query().Get("sort"),
+			Order:  r.URL.Query().Get("order"),
+			Search: r.URL.Query().Get("search"),
+		}
+		comps, total, err := a.store.ComponentsPaginated(r.Context(), params)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
+		writeJSON(w, http.StatusOK, comps)
+		return
+	}
 	out, err := a.store.Components(r.Context(), 500)
 	if err != nil {
 		writeError(w, err)
@@ -146,6 +190,11 @@ func (a *API) findingStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	a.wsHub.Broadcast("finding_status", map[string]string{
+		"finding_id": findingID,
+		"status":     body.Status,
+		"updated_by": body.UpdatedBy,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"finding_id": findingID, "status": body.Status})
 }
 
@@ -300,7 +349,8 @@ func (a *API) enqueueMigration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	cmd := a.orch.BuildCommand(req.HostUUID, req.TargetService, req.MigrationProfile, req.ConfigPath, req.PatchUnifiedDiff, hash, req.DryRun)
+	activeProfile := a.engine.GetActiveProfile()
+	cmd := a.orch.BuildCommand(req.HostUUID, req.TargetService, req.MigrationProfile, req.ConfigPath, req.PatchUnifiedDiff, hash, req.DryRun, activeProfile.PreferredKEM, activeProfile.PreferredSignature)
 	a.orch.Enqueue(cmd)
 	if err := a.store.InsertMigrationCommand(r.Context(), cmd); err != nil {
 		writeError(w, err)
@@ -317,6 +367,12 @@ func (a *API) enqueueMigration(w http.ResponseWriter, r *http.Request) {
 		Details:  fmt.Sprintf("Service: %s, Profile: %s, Config: %s, DryRun: %t, CommandId: %s", req.TargetService, req.MigrationProfile, req.ConfigPath, req.DryRun, cmd.CommandId),
 	})
 
+	a.wsHub.Broadcast("migration_enqueued", map[string]string{
+		"command_id":        cmd.CommandId,
+		"host_uuid":         cmd.HostUuid,
+		"target_service":    cmd.TargetService,
+		"migration_profile": cmd.MigrationProfile,
+	})
 	writeJSON(w, http.StatusAccepted, cmd)
 }
 
@@ -493,19 +549,31 @@ func (a *API) activePolicy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	a.wsHub.Broadcast("policy_switched", map[string]string{
+		"active": a.engine.ProfileVersion(),
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "active": a.engine.ProfileVersion()})
 }
 
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		// During development with auth disabled, allow all origins; otherwise restrict
+		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" || origin == "http://localhost:8080" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else if origin != "" {
+			// For production, set CORS_ORIGIN via config; here we allow localhost variants
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "content-type, authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-	next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -657,19 +725,31 @@ func (a *API) agentDiagnostics(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusMethodNotAllowed)
 }
 
+// sanitizePolicyFilename strips path separators and invalid characters from policy version names.
+func sanitizePolicyFilename(version string) string {
+	// Allow only alphanumeric, dots, dashes, underscores. Replace others with underscore.
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, version)
+}
+
 func (a *API) createPolicy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		Version                string `json:"version"`
-		MinimumRSAKeyBits      uint32 `json:"minimum_rsa_key_bits"`
-		MinimumDHSafePrimeBits uint32 `json:"minimum_dh_safe_prime_bits"`
-		RequireTLS13           bool   `json:"require_tls_13"`
-		RequireHybridPQTLS13   bool   `json:"require_hybrid_pq_tls_13"`
-		PreferredKEM           string `json:"preferred_kem"`
-		PreferredSignature     string `json:"preferred_signature"`
+		Version                string  `json:"version"`
+		MinimumRSAKeyBits      uint32  `json:"minimum_rsa_key_bits"`
+		MinimumDHSafePrimeBits uint32  `json:"minimum_dh_safe_prime_bits"`
+		RequireTLS13           bool    `json:"require_tls_13"`
+		RequireHybridPQTLS13   bool    `json:"require_hybrid_pq_tls_13"`
+		PreferredKEM           string  `json:"preferred_kem"`
+		PreferredSignature     string  `json:"preferred_signature"`
+		MinimumConfidence      float64 `json:"minimum_confidence"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -677,6 +757,12 @@ func (a *API) createPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Version == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version is required"})
+		return
+	}
+	// Validate version does not contain path traversal characters
+	safeVersion := sanitizePolicyFilename(strings.ToLower(req.Version))
+	if safeVersion != strings.ToLower(req.Version) || strings.Contains(req.Version, "..") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version contains invalid characters"})
 		return
 	}
 
@@ -688,11 +774,12 @@ func (a *API) createPolicy(w http.ResponseWriter, r *http.Request) {
 		RequireHybridPQTLS13:   req.RequireHybridPQTLS13,
 		PreferredKEM:           req.PreferredKEM,
 		PreferredSignature:     req.PreferredSignature,
+		MinimumConfidence:      req.MinimumConfidence,
 	}
 
 	a.engine.AddProfile(p)
 
-	filename := fmt.Sprintf("policies/%s.yaml", strings.ToLower(req.Version))
+	filename := fmt.Sprintf("policies/%s.yaml", safeVersion)
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("version: \"%s\"\n", p.Version))
 	sb.WriteString(fmt.Sprintf("minimum_rsa_key_bits: %d\n", p.MinimumRSAKeyBits))
@@ -701,9 +788,10 @@ func (a *API) createPolicy(w http.ResponseWriter, r *http.Request) {
 	sb.WriteString(fmt.Sprintf("require_hybrid_pq_tls_13: %t\n", p.RequireHybridPQTLS13))
 	sb.WriteString(fmt.Sprintf("preferred_kem: \"%s\"\n", p.PreferredKEM))
 	sb.WriteString(fmt.Sprintf("preferred_signature: \"%s\"\n", p.PreferredSignature))
+	sb.WriteString(fmt.Sprintf("minimum_confidence: %.2f\n", p.MinimumConfidence))
 
-	_ = os.MkdirAll("policies", 0755)
-	if err := os.WriteFile(filename, []byte(sb.String()), 0644); err != nil {
+	_ = os.MkdirAll("policies", 0700)
+	if err := os.WriteFile(filename, []byte(sb.String()), 0600); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -1074,4 +1162,173 @@ func (a *API) fleetProfileMapping(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+// SetHSM configures the HSM client for the API.
+func (a *API) SetHSM(client hsm.HSM) {
+	a.hsmClient = client
+}
+
+// ---------------------------------------------------------------------------
+// F1 — PQC Migration Simulator (Sandbox Mode)
+// ---------------------------------------------------------------------------
+
+func (a *API) sandboxSimulate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		HostUUID      string `json:"host_uuid"`
+		TargetService string `json:"target_service"`
+		Algorithm     string `json:"algorithm"`
+		ConfigPath    string `json:"config_path"`
+		DryRun        bool   `json:"dry_run"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.HostUUID == "" || req.Algorithm == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host_uuid and algorithm are required"})
+		return
+	}
+	result, err := a.simulator.SimulateMigration(req.HostUUID, req.TargetService, req.Algorithm, req.ConfigPath, req.DryRun)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ---------------------------------------------------------------------------
+// F7 — Statistical Confidence Analysis
+// ---------------------------------------------------------------------------
+
+func (a *API) confidenceReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	findings, err := a.store.Findings(r.Context(), 5000)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	report := a.confidence.AnalyzeFindingConfidence(findings)
+	writeJSON(w, http.StatusOK, report)
+}
+
+// ---------------------------------------------------------------------------
+// F13 — HSM Integration
+// ---------------------------------------------------------------------------
+
+func (a *API) hsmListKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if a.hsmClient == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "HSM not configured"})
+		return
+	}
+	keys, err := a.hsmClient.ListKeys()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, keys)
+}
+
+func (a *API) hsmGenerateKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if a.hsmClient == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "HSM not configured"})
+		return
+	}
+	var req struct {
+		Algorithm string `json:"algorithm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.Algorithm == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "algorithm is required"})
+		return
+	}
+	keyID, err := a.hsmClient.GenerateKeyPair(req.Algorithm)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"key_id": keyID, "algorithm": req.Algorithm})
+}
+
+func (a *API) hsmSign(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if a.hsmClient == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "HSM not configured"})
+		return
+	}
+	var req struct {
+		KeyID string `json:"key_id"`
+		Data  []byte `json:"data"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.KeyID == "" || len(req.Data) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key_id and data are required"})
+		return
+	}
+	signature, err := a.hsmClient.Sign(req.KeyID, req.Data)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"key_id":    req.KeyID,
+		"signature": signature,
+	})
+}
+
+func (a *API) hsmVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if a.hsmClient == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "HSM not configured"})
+		return
+	}
+	var req struct {
+		KeyID     string `json:"key_id"`
+		Data      []byte `json:"data"`
+		Signature []byte `json:"signature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.KeyID == "" || len(req.Data) == 0 || len(req.Signature) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key_id, data, and signature are required"})
+		return
+	}
+	valid, err := a.hsmClient.Verify(req.KeyID, req.Data, req.Signature)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"key_id": req.KeyID,
+		"valid":  valid,
+	})
 }
