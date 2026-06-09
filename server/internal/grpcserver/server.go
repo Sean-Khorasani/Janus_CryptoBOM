@@ -6,25 +6,70 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/janus-cbom/janus/server/internal/orchestrator"
 	"github.com/janus-cbom/janus/server/internal/pb"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/store"
+	"github.com/janus-cbom/janus/server/internal/ws"
 )
+
+// webhookCircuit tracks failure state for circuit-breaking.
+type webhookCircuit struct {
+	mu           sync.Mutex
+	failures     map[string]int       // url -> consecutive failure count
+	cooldownUntil map[string]time.Time // url -> cooldown expiry
+}
+
+func (wc *webhookCircuit) recordFailure(url string) {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	wc.failures[url]++
+	if wc.failures[url] >= 5 {
+		wc.cooldownUntil[url] = time.Now().Add(60 * time.Second)
+	}
+}
+
+func (wc *webhookCircuit) recordSuccess(url string) {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	delete(wc.failures, url)
+	delete(wc.cooldownUntil, url)
+}
+
+func (wc *webhookCircuit) isOpen(url string) bool {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	if cooldown, ok := wc.cooldownUntil[url]; ok && time.Now().Before(cooldown) {
+		return true
+	}
+	return false
+}
 
 type Server struct {
 	pb.UnimplementedJanusTelemetryServer
-	store store.Store
-	policy *policy.Engine
-	orch  *orchestrator.Orchestrator
+	store   store.Store
+	policy  *policy.Engine
+	orch    *orchestrator.Orchestrator
+	circuit *webhookCircuit
+	wsHub   *ws.Hub
 }
 
-func New(store store.Store, policy *policy.Engine, orch *orchestrator.Orchestrator) *Server {
-	return &Server{store: store, policy: policy, orch: orch}
+func New(store store.Store, policy *policy.Engine, orch *orchestrator.Orchestrator, wsHub *ws.Hub) *Server {
+	return &Server{
+		store:  store,
+		policy: policy,
+		orch:   orch,
+		wsHub:  wsHub,
+		circuit: &webhookCircuit{
+			failures:     make(map[string]int),
+			cooldownUntil: make(map[string]time.Time),
+		},
+	}
 }
 
 func (s *Server) RegisterAgent(ctx context.Context, reg *pb.AgentRegistration) (*pb.AgentRegistrationAck, error) {
@@ -79,7 +124,20 @@ func (s *Server) StreamTelemetry(stream pb.JanusTelemetry_StreamTelemetryServer)
 			go s.dispatchWebhooks(payload)
 		}
 
-		log.Printf("telemetry host=%s components=%d findings=%d network=%d", payload.HostUuid, len(payload.Components), len(payload.Findings), len(payload.NetworkObservations))
+		slog.Info("telemetry received",
+			"host_uuid", payload.HostUuid,
+			"components", len(payload.Components),
+			"findings", len(payload.Findings),
+			"network_obs", len(payload.NetworkObservations),
+		)
+		// Broadcast telemetry update to WebSocket clients
+		s.wsHub.Broadcast("telemetry_update", map[string]interface{}{
+			"host_uuid":   payload.HostUuid,
+			"components":  len(payload.Components),
+			"findings":    len(payload.Findings),
+			"network_obs": len(payload.NetworkObservations),
+			"critical":    hasCriticalFindings(payload),
+		})
 
 		for _, cmd := range s.orch.Drain(hostUUID) {
 			if err := s.store.InsertMigrationCommand(stream.Context(), cmd); err != nil {
@@ -110,15 +168,25 @@ func (s *Server) ReportMigrationStatus(stream pb.JanusTelemetry_ReportMigrationS
 		if err := s.store.UpdateMigrationStatus(stream.Context(), report); err != nil {
 			return err
 		}
-		log.Printf("migration status command=%s host=%s state=%d success=%t", report.CommandId, report.HostUuid, report.State, report.Success)
+			slog.Info("migration status",
+				"command_id", report.CommandId,
+				"host_uuid", report.HostUuid,
+				"state", report.State,
+				"success", report.Success,
+			)
+			s.wsHub.Broadcast("migration_status", map[string]interface{}{
+				"command_id": report.CommandId,
+				"host_uuid":  report.HostUuid,
+				"state":      report.State,
+				"success":    report.Success,
+			})
 	}
 }
 
 func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
-	ctx := context.Background()
-	webhooks, err := s.store.GetWebhooks(ctx)
+	webhooks, err := s.store.GetWebhooks(context.Background())
 	if err != nil {
-		log.Printf("failed to load webhooks for alerts: %v", err)
+		slog.Error("failed to load webhooks for alerts", "error", err)
 		return
 	}
 	if len(webhooks) == 0 {
@@ -139,25 +207,68 @@ func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 		return
 	}
 
+	client := &http.Client{Timeout: 10 * time.Second}
+
 	for _, wh := range webhooks {
 		if !wh.Active {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, "POST", wh.URL, bytes.NewReader(body))
-		if err != nil {
+		// Circuit breaker check
+		if s.circuit.isOpen(wh.URL) {
+			slog.Warn("webhook circuit open, skipping dispatch", "url", wh.URL)
 			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if wh.SecretToken != "" {
-			req.Header.Set("X-Janus-Token", wh.SecretToken)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Printf("failed to send webhook alert to %s: %v", wh.URL, err)
-			continue
+		// Retry up to 3 times with exponential backoff
+		var lastErr error
+		success := false
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+				time.Sleep(backoff)
+			}
+
+			req, reqErr := http.NewRequestWithContext(context.Background(), "POST", wh.URL, bytes.NewReader(body))
+			if reqErr != nil {
+				lastErr = reqErr
+				continue
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if wh.SecretToken != "" {
+				req.Header.Set("X-Janus-Token", wh.SecretToken)
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			// Drain body for connection reuse
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				success = true
+				break
+			}
+			lastErr = fmt.Errorf("webhook returned status %d", resp.StatusCode)
 		}
-		resp.Body.Close()
+
+		if success {
+			s.circuit.recordSuccess(wh.URL)
+		} else {
+			slog.Error("failed to send webhook after 3 attempts", "url", wh.URL, "error", lastErr)
+			s.circuit.recordFailure(wh.URL)
+		}
 	}
 }
 
+// hasCriticalFindings checks if a payload contains any critical-severity findings.
+func hasCriticalFindings(payload *pb.CbomTelemetryPayload) bool {
+	for _, f := range payload.Findings {
+		if f.Severity >= 5 {
+			return true
+		}
+	}
+	return false
+}
