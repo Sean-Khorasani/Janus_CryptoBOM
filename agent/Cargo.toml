@@ -23,6 +23,7 @@ subtle = "2.6"
 hostname = "0.4"
 prost = "0.13"
 regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 object = { version = "0.32", default-features = false, features = ["read_core", "elf", "pe", "macho"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -43,6 +44,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_Debug",
-    "Win32_System_LibraryLoader"
+    "Win32_System_LibraryLoader",
+    "Win32_System_JobObjects",
 ] }
 
