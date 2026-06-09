@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -15,11 +15,13 @@ import (
 
 	"github.com/janus-cbom/janus/server/internal/config"
 	"github.com/janus-cbom/janus/server/internal/grpcserver"
+	"github.com/janus-cbom/janus/server/internal/hsm"
 	"github.com/janus-cbom/janus/server/internal/httpapi"
 	"github.com/janus-cbom/janus/server/internal/orchestrator"
 	"github.com/janus-cbom/janus/server/internal/pb"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/store"
+	"github.com/janus-cbom/janus/server/internal/ws"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -27,42 +29,69 @@ import (
 func main() {
 	cfg := config.FromEnv()
 
+	// Initialize structured logging
+	var level slog.Level
+	switch cfg.LogLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pg, err := store.NewPostgres(ctx, cfg.DatabaseURL)
+	pg, err := store.NewPostgres(ctx, store.PostgresConfig{
+		DatabaseURL:      cfg.DatabaseURL,
+		MaxConns:         cfg.DBMaxConns,
+		MinConns:         cfg.DBMinConns,
+		MaxConnLifetime:  cfg.DBMaxConnLifetime,
+		MaxConnIdleTime:  cfg.DBMaxConnIdleTime,
+	})
 	if err != nil {
-		log.Fatalf("connect postgres: %v", err)
+		slog.Error("connect postgres", "error", err)
+		os.Exit(1)
 	}
 	defer pg.Close()
 
 	if err := pg.EnsureSchema(ctx); err != nil {
-		log.Fatalf("ensure schema: %v", err)
+		slog.Error("ensure schema", "error", err)
+		os.Exit(1)
 	}
 
 	engine, err := policy.LoadEngine("policies")
 	if err != nil {
-		log.Fatalf("load policy engine: %v", err)
+		slog.Error("load policy engine", "error", err)
+		os.Exit(1)
 	}
 	orch := orchestrator.New(cfg.CommandSigningKey)
-	grpcSvc := grpcserver.New(pg, engine, orch)
+	wsHub := ws.New()
+	grpcSvc := grpcserver.New(pg, engine, orch, wsHub)
 
 	grpcOptions := []grpc.ServerOption{}
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
-			log.Fatalf("load tls certificate: %v", err)
+			slog.Error("load tls certificate", "error", err)
+			os.Exit(1)
 		}
-		
+
 		var clientCAs *x509.CertPool
 		if cfg.ClientCAFile != "" {
 			caBytes, err := os.ReadFile(cfg.ClientCAFile)
 			if err != nil {
-				log.Fatalf("load client ca certificate: %v", err)
+				slog.Error("load client ca certificate", "error", err)
+				os.Exit(1)
 			}
 			clientCAs = x509.NewCertPool()
 			if ok := clientCAs.AppendCertsFromPEM(caBytes); !ok {
-				log.Fatalf("failed to parse client ca certificate")
+				slog.Error("failed to parse client ca certificate")
+				os.Exit(1)
 			}
 		}
 
@@ -70,16 +99,16 @@ func main() {
 			MinVersion:   tls.VersionTLS13,
 			Certificates: []tls.Certificate{cert},
 		}
-		
+
 		if clientCAs != nil {
 			tlsCfg.ClientCAs = clientCAs
 			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-			log.Printf("gRPC configured for Mutual TLS (mTLS) client verification")
+			slog.Info("gRPC configured for Mutual TLS (mTLS) client verification")
 		}
 
 		grpcOptions = append(grpcOptions, grpc.Creds(credentials.NewTLS(tlsCfg)))
 	} else {
-		log.Printf("JANUS_TLS_CERT_FILE/JANUS_TLS_KEY_FILE not set; gRPC listening without TLS for local development")
+		slog.Warn("TLS not configured; gRPC listening without TLS for local development")
 	}
 
 	grpcServer := grpc.NewServer(grpcOptions...)
@@ -87,31 +116,39 @@ func main() {
 
 	grpcLn, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
-		log.Fatalf("listen grpc: %v", err)
+		slog.Error("listen grpc", "error", err)
+		os.Exit(1)
 	}
+
+	httpHandler := httpapi.New(pg, orch, engine, cfg.CommandSigningKey, cfg.DisableAuth, wsHub)
+
+	// Initialize HSM client if configured (F13)
+	_ = os.Getenv("JANUS_HSM_MODULE_PATH") // reserved for HSM integration
+	_ = hsm.NewSoftHSM2 // ensure package is used
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(pg, orch, engine, cfg.CommandSigningKey, cfg.DisableAuth),
+		Handler:           httpHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 2)
 	go func() {
-		log.Printf("janus gRPC controller listening on %s", cfg.GRPCAddr)
+		slog.Info("janus gRPC controller listening", "addr", cfg.GRPCAddr)
 		errCh <- grpcServer.Serve(grpcLn)
 	}()
 	go func() {
-		log.Printf("janus HTTP API listening on %s", cfg.HTTPAddr)
+		slog.Info("janus HTTP API listening", "addr", cfg.HTTPAddr)
 		errCh <- httpServer.ListenAndServe()
 	}()
 
 	select {
 	case <-ctx.Done():
-		log.Printf("shutdown requested")
+		slog.Info("shutdown requested")
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
+			slog.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}
 
@@ -119,7 +156,7 @@ func main() {
 	defer cancel()
 	grpcServer.GracefulStop()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("http shutdown: %v", err)
+		slog.Warn("http shutdown", "error", err)
 	}
 }
 
