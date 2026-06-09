@@ -7,6 +7,8 @@ sarif_path = "janus-agent.sarif"
 scan_interval_seconds = 900
 max_file_bytes = 2097152
 max_binary_bytes = 16777216
+# Required: 32-byte random key shared with the Janus controller for HMAC command signing.
+# Generate: openssl rand -hex 32
 command_signing_key = "local-development-command-signing-key"
 
 scan_roots = ["."]
