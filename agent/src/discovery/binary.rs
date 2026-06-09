@@ -179,8 +179,10 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
 }
 
 fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
-    let s = path.to_string_lossy();
-    !cfg.exclude_dirs.iter().any(|d| s.contains(d))
+    !path.components().any(|comp| {
+        let comp_str = comp.as_os_str().to_string_lossy();
+        cfg.exclude_dirs.iter().any(|d| comp_str == d.as_str())
+    })
 }
 
 fn is_binary_candidate(path: &Path, raw: &[u8]) -> bool {
