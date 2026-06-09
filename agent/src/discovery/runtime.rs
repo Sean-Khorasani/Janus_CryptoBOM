@@ -355,7 +355,105 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn scrape_process_memory_keys(out: &mut ScanResult) {
+    use std::fs;
+    use std::io::Read;
+    use sysinfo::{ProcessesToUpdate, System, PidExt};
+
+    let mut sys = System::new_all();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+    // PEM private key header patterns to search for
+    let key_headers: &[&[u8]] = &[
+        b"-----BEGIN PRIVATE KEY-----",
+        b"-----BEGIN RSA PRIVATE KEY-----",
+        b"-----BEGIN EC PRIVATE KEY-----",
+        b"-----BEGIN DSA PRIVATE KEY-----",
+        b"-----BEGIN OPENSSH PRIVATE KEY-----",
+    ];
+
+    for (pid, process) in sys.processes() {
+        // Only scan processes with crypto libraries loaded
+        let name = process.name().to_string_lossy().to_ascii_lowercase();
+        let exe = process.exe().map(|p| p.display().to_string()).unwrap_or_default().to_ascii_lowercase();
+        let is_crypto_relevant = ["openssl", "nginx", "apache", "sshd", "java", "node", "python"]
+            .iter().any(|n| name.contains(n) || exe.contains(n));
+        if !is_crypto_relevant {
+            continue;
+        }
+
+        // Read /proc/<pid>/maps to find readable memory regions
+        let maps_path = format!("/proc/{}/maps", pid.as_u32());
+        let maps_content = match fs::read_to_string(&maps_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let mem_path = format!("/proc/{}/mem", pid.as_u32());
+        let mut mem_file = match fs::File::open(&mem_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+
+        for line in maps_content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 { continue; }
+            let perms = parts[1];
+            // Only scan readable, private regions (skip shared libraries for performance)
+            if !perms.starts_with('r') || perms.contains('x') { continue; }
+
+            // Parse address range
+            let addr_range: Vec<&str> = parts[0].split('-').collect();
+            if addr_range.len() != 2 { continue; }
+            let start = match usize::from_str_radix(addr_range[0], 16) { Ok(a) => a, Err(_) => continue };
+            let end = match usize::from_str_radix(addr_range[1], 16) { Ok(a) => a, Err(_) => continue };
+            let region_size = end.saturating_sub(start);
+            if region_size == 0 || region_size > 50 * 1024 * 1024 { continue; } // Skip empty/huge regions
+
+            // Use pread to read from the specific offset
+            let mut buf = vec![0u8; region_size.min(2 * 1024 * 1024)]; // Max 2MB per region
+            use std::os::unix::fs::FileExt;
+            if mem_file.read_at(&mut buf, start as u64).is_err() { continue; }
+
+            for header in key_headers {
+                if buf.windows(header.len()).any(|w| w == *header) {
+                    let name = process.name().to_string_lossy().to_string();
+                    out.components.push(CbomComponent {
+                        bom_ref: format!("pid:{}:memory-key:{}", pid.as_u32(), name),
+                        name: format!("Unencrypted private key in {} memory", name),
+                        version: String::new(),
+                        component_type: "process-memory-key".to_string(),
+                        purl: String::new(),
+                        file_path: exe.clone(),
+                        language: "runtime".to_string(),
+                        algorithms: vec![CryptoAlgorithm {
+                            name: "Unencrypted-Private-Key".to_string(),
+                            family: "process-memory-key".to_string(),
+                            role: CryptoRole::Unspecified as i32,
+                            status: "scraped-from-memory".to_string(),
+                            key_bits: 0,
+                            curve: String::new(),
+                            implementation_library: "process-memory".to_string(),
+                            source_file: format!("/proc/{}/mem", pid.as_u32()),
+                            source_line: 0,
+                            source_column: 0,
+                            symbol: "private-key-header".to_string(),
+                            confidence: 0.95,
+                            quantum_vulnerable: false,
+                            context_snippet: String::new(),
+                        }],
+                        dependencies: Vec::new(),
+                        reachable: true,
+                    });
+                    break; // Found key in this region, move to next region
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 #[allow(dead_code)]
 fn scrape_process_memory_keys(_out: &mut ScanResult) {}
 
