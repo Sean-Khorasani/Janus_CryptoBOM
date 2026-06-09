@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -194,14 +195,37 @@ func mapEcosystem(ecosystem string) string {
 func OSVSeverityToJanus(vulnSeverity []OSVSeverity) int32 {
 	for _, s := range vulnSeverity {
 		if s.Type == "CVSS_V3" {
-			// Parse CVSS vector to get base score
-			// Format: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
-			// For simplicity, look at the score if it's a plain number
-			// Otherwise default to High
-			return 4 // High
+			// Parse CVSS score — the Score field contains the base score as a string
+			if s.Score != "" {
+				if score, err := strconv.ParseFloat(s.Score, 64); err == nil {
+					return cvssScoreToJanus(score)
+				}
+			}
+			// Try CVSS_V4
+		}
+		if s.Type == "CVSS_V4" {
+			if s.Score != "" {
+				if score, err := strconv.ParseFloat(s.Score, 64); err == nil {
+					return cvssScoreToJanus(score)
+				}
+			}
 		}
 	}
-	return 3 // Medium default
+	return 3 // Medium default when no parseable severity found
+}
+
+// cvssScoreToJanus maps a CVSS base score (0.0-10.0) to Janus severity.
+func cvssScoreToJanus(score float64) int32 {
+	switch {
+	case score >= 9.0:
+		return 5 // Critical
+	case score >= 7.0:
+		return 4 // High
+	case score >= 4.0:
+		return 3 // Medium
+	default:
+		return 2 // Low
+	}
 }
 
 // GetFixedVersion extracts the fixed version from an OSV vulnerability's affected ranges.
@@ -217,3 +241,6 @@ func GetFixedVersion(vuln OSVVulnerability) string {
 	}
 	return "unknown"
 }
+
+// ---------------------------------------------------------------------------
+// NVD Client (NIST NVD API)
