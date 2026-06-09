@@ -491,6 +491,14 @@ fn patterns() -> Result<Vec<Pattern>> {
         (r"\bSHA384\b|\bSHA-384\b", "SHA-384", "hash", CryptoRole::Hash),
         (r"\bSHA512\b|\bSHA-512\b", "SHA-512", "hash", CryptoRole::Hash),
         (r"\bSecureRandom\b|\brand\.Reader\b|\bgetrandom\b|\bBCryptGenRandom\b", "secure-random", "random", CryptoRole::Random),
+        // FHE (Fully Homomorphic Encryption) pattern families
+        (r"\bFHE\b", "FHE", "homomorphic-encryption", CryptoRole::Unspecified),
+        (r"\bHomomorphicEncrypt(ion)?\b", "HomomorphicEncryption", "homomorphic-encryption", CryptoRole::Unspecified),
+        (r"\bCKKS\b", "CKKS", "homomorphic-encryption", CryptoRole::Unspecified),
+        (r"\bBGV\b", "BGV", "homomorphic-encryption", CryptoRole::Unspecified),
+        (r"\bBFV\b", "BFV", "homomorphic-encryption", CryptoRole::Unspecified),
+        (r"\bTFHE\b", "TFHE", "homomorphic-encryption", CryptoRole::Unspecified),
+        (r"\bGSW\b", "GSW", "homomorphic-encryption", CryptoRole::Unspecified),
     ];
     defs.iter()
         .map(|(re, name, family, role)| {
@@ -505,11 +513,12 @@ fn patterns() -> Result<Vec<Pattern>> {
 }
 
 fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
-    let s = path.to_string_lossy();
-    if cfg.exclude_dirs.iter().any(|d| s.contains(d)) {
-        return false;
-    }
-    if super::status::get_exclusions().iter().any(|d| s.contains(d)) {
+    // Use path-component matching so excluding "target" only matches the directory, not "custom-target"
+    if path.components().any(|comp| {
+        let comp_str = comp.as_os_str().to_string_lossy();
+        cfg.exclude_dirs.iter().any(|d| comp_str == d.as_str()) ||
+            super::status::get_exclusions().iter().any(|d| comp_str == d.as_str())
+    }) {
         return false;
     }
     true
