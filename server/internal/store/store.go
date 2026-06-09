@@ -48,6 +48,8 @@ type Store interface {
 	GetConfigForAgent(ctx context.Context, hostUUID string) (*FleetConfig, error)
 }
 
+
+
 type Postgres struct {
 	pool *pgxpool.Pool
 }
@@ -59,6 +61,9 @@ type Overview struct {
 	CriticalFindings   int64            `json:"critical_findings"`
 	HighFindings       int64            `json:"high_findings"`
 	OpenMigrations     int64            `json:"open_migrations"`
+	StalledAgents      int64            `json:"stalled_agents"`
+	ReadinessScore     int              `json:"readiness_score"`
+	ReadinessBreakdown map[string]int  `json:"readiness_breakdown"`
 	AlgorithmHistogram map[string]int64 `json:"algorithm_histogram"`
 }
 
@@ -162,11 +167,41 @@ type RetentionPolicy struct {
 }
 
 
-func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
-	if databaseURL == "" {
+// PostgresConfig holds database connection and pool settings.
+type PostgresConfig struct {
+	DatabaseURL      string
+	MaxConns         int
+	MinConns         int
+	MaxConnLifetime  time.Duration
+	MaxConnIdleTime  time.Duration
+}
+
+func NewPostgres(ctx context.Context, cfg PostgresConfig) (*Postgres, error) {
+	if cfg.DatabaseURL == "" {
 		return nil, errors.New("database URL is required")
 	}
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.MaxConns > 0 {
+		poolCfg.MaxConns = int32(cfg.MaxConns)
+	} else {
+		poolCfg.MaxConns = 25
+	}
+	if cfg.MinConns > 0 {
+		poolCfg.MinConns = int32(cfg.MinConns)
+	} else {
+		poolCfg.MinConns = 5
+	}
+	if cfg.MaxConnLifetime > 0 {
+		poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
+	}
+	if cfg.MaxConnIdleTime > 0 {
+		poolCfg.MaxConnIdleTime = cfg.MaxConnIdleTime
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -185,26 +220,32 @@ func (p *Postgres) Ping(ctx context.Context) error {
 	return p.pool.Ping(ctx)
 }
 
-func (p *Postgres) EnsureSchema(ctx context.Context) error {
-	_, err := p.pool.Exec(ctx, schemaSQL)
-	if err != nil {
-		return err
-	}
-	// Idempotent column additions for upgrades from older schema versions
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open'`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS updated_by TEXT NOT NULL DEFAULT ''`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0.82`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE migration_transactions ADD COLUMN IF NOT EXISTS observed_tls JSONB`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS scan_progress INTEGER NOT NULL DEFAULT 0`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS current_scan_path TEXT NOT NULL DEFAULT ''`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS mem_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'offline'`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE assets ADD COLUMN IF NOT EXISTS total_files_scanned INTEGER NOT NULL DEFAULT 0`)
+// migration represents a versioned database schema migration.
+type migration struct {
+	Version     int
+	Description string
+	SQL         string
+}
 
-	// New advanced features tables
-	_, _ = p.pool.Exec(ctx, `
+// migrations defines all schema versions in order. New migrations are appended.
+var migrations = []migration{
+	{1, "Initial schema: assets, telemetry_payloads, crypto_findings, migration_transactions", schemaSQL},
+	{2, "Add finding status/metadata columns", `
+ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS updated_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0.82;
+ALTER TABLE migration_transactions ADD COLUMN IF NOT EXISTS observed_tls JSONB;
+`},
+	{3, "Add asset telemetry columns", `
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS scan_progress INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS current_scan_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS mem_usage DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'offline';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS total_files_scanned INTEGER NOT NULL DEFAULT 0;
+`},
+	{4, "Fleet management tables", `
 CREATE TABLE IF NOT EXISTS fleet_configs (
   config_id TEXT PRIMARY KEY,
   exclude_dirs TEXT NOT NULL DEFAULT '',
@@ -213,8 +254,7 @@ CREATE TABLE IF NOT EXISTS fleet_configs (
   llm_api_key TEXT NOT NULL DEFAULT '',
   llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
-	_, _ = p.pool.Exec(ctx, `
+);
 CREATE TABLE IF NOT EXISTS config_profiles (
   profile_id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -224,45 +264,73 @@ CREATE TABLE IF NOT EXISTS config_profiles (
   llm_api_key TEXT NOT NULL DEFAULT '',
   llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
-	_, _ = p.pool.Exec(ctx, `
+);
 CREATE TABLE IF NOT EXISTS agent_profile_mappings (
   host_uuid TEXT PRIMARY KEY REFERENCES assets(host_uuid) ON DELETE CASCADE,
   profile_id TEXT NOT NULL REFERENCES config_profiles(profile_id) ON DELETE CASCADE,
   mapped_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE fleet_configs ADD COLUMN IF NOT EXISTS llm_api_key TEXT NOT NULL DEFAULT ''`)
-	_, _ = p.pool.Exec(ctx, `ALTER TABLE fleet_configs ADD COLUMN IF NOT EXISTS llm_api_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1'`)
-	_, _ = p.pool.Exec(ctx, `
+);
+`},
+	{5, "Audit, diagnostics, webhooks, retention tables", `
 CREATE TABLE IF NOT EXISTS audit_logs (
   log_id TEXT PRIMARY KEY,
   username TEXT NOT NULL,
   action TEXT NOT NULL,
   details TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
-	_, _ = p.pool.Exec(ctx, `
+);
 CREATE TABLE IF NOT EXISTS agent_diagnostics (
   host_uuid TEXT PRIMARY KEY REFERENCES assets(host_uuid) ON DELETE CASCADE,
   logs TEXT NOT NULL DEFAULT '',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
-	_, _ = p.pool.Exec(ctx, `
+);
 CREATE TABLE IF NOT EXISTS fleet_webhooks (
   webhook_id TEXT PRIMARY KEY,
   url TEXT NOT NULL,
   secret_token TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
-	_, _ = p.pool.Exec(ctx, `
+);
 CREATE TABLE IF NOT EXISTS fleet_retention_policies (
   policy_key TEXT PRIMARY KEY,
   retention_days INTEGER NOT NULL DEFAULT 90,
   auto_purge INTEGER NOT NULL DEFAULT 1,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
-	return nil
+);
+`},
+	{6, "Advanced settings table", `
+CREATE TABLE IF NOT EXISTS advanced_settings (
+  setting_key TEXT PRIMARY KEY,
+  setting_value JSONB NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`},
+	{7, "Webhook failure tracking", `
+	ALTER TABLE fleet_webhooks ADD COLUMN IF NOT EXISTS failure_count INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE fleet_webhooks ADD COLUMN IF NOT EXISTS last_failure TIMESTAMPTZ;
+`},
+	{8, "Finding outcomes for confidence analysis", `
+CREATE TABLE IF NOT EXISTS finding_outcomes (
+  outcome_id TEXT PRIMARY KEY,
+  finding_id TEXT NOT NULL,
+  was_real_finding BOOLEAN NOT NULL,
+  operator_feedback TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`},
+	{9, "Advisory cache for third-party vulnerability lookups", `
+CREATE TABLE IF NOT EXISTS advisory_cache (
+  cve_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  package_name TEXT NOT NULL,
+  package_version TEXT NOT NULL,
+  ecosystem TEXT NOT NULL,
+  advisory_data JSONB NOT NULL DEFAULT '{}',
+  cached_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (cve_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_advisory_cache_lookup ON advisory_cache(package_name, package_version, ecosystem);
+`},
 }
 
 func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration) error {
@@ -453,6 +521,31 @@ func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
 	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM migration_transactions WHERE state NOT IN ($1, $2)`, pb.MigrationStateSucceeded, pb.MigrationStateFailed).Scan(&out.OpenMigrations); err != nil {
 		return nil, err
 	}
+	// Count stalled agents (last_seen > 5 minutes ago)
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE last_seen < now() - interval '5 minutes'`).Scan(&out.StalledAgents); err != nil {
+		out.StalledAgents = 0
+	}
+
+	// Compute Fleet Quantum-Readiness Score (0-100)
+	// Formula: 100 - penalty, where penalty comes from critical/high findings and stalled agents
+	out.ReadinessBreakdown = make(map[string]int)
+	var totalFindings int64
+	var remediatedFindings int64
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings`).Scan(&totalFindings)
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE status IN ('remediated','accepted_risk')`).Scan(&remediatedFindings)
+
+	penalty := int(out.CriticalFindings)*18 + int(out.HighFindings)*8 + int(out.StalledAgents)*15
+	// Bonus for remediation progress
+	remediationBonus := 0
+	if totalFindings > 0 {
+		remediationRate := float64(remediatedFindings) / float64(totalFindings)
+		remediationBonus = int(remediationRate * 20)
+	}
+	out.ReadinessScore = max(0, min(100, 100-penalty+remediationBonus))
+	out.ReadinessBreakdown["penalty_from_findings"] = int(out.CriticalFindings)*18 + int(out.HighFindings)*8
+	out.ReadinessBreakdown["penalty_from_stalled"] = int(out.StalledAgents) * 15
+	out.ReadinessBreakdown["remediation_bonus"] = remediationBonus
+	out.ReadinessBreakdown["total_score"] = out.ReadinessScore
 
 	rows, err := p.pool.Query(ctx, `SELECT algorithm, count(*) FROM crypto_findings GROUP BY algorithm ORDER BY count(*) DESC LIMIT 12`)
 	if err != nil {
@@ -790,7 +883,7 @@ func (p *Postgres) GetFleetConfig(ctx context.Context) (*FleetConfig, error) {
 	var fc FleetConfig
 	err := row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.LLMApiKey, &fc.LLMApiUrl, &fc.UpdatedAt)
 	if err != nil {
-		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url) VALUES ('default', '.git, target, node_modules, dist, .venv, temp', 2048, 'daily', '', 'https://api.openai.com/v1') ON CONFLICT DO NOTHING`)
+	_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url) VALUES ('default', '.git, target, node_modules, dist, .venv, temp', 2048, 'daily', '', 'https://api.openai.com/v1') ON CONFLICT DO NOTHING`)
 		row = p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url, updated_at FROM fleet_configs LIMIT 1`)
 		err = row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.LLMApiKey, &fc.LLMApiUrl, &fc.UpdatedAt)
 		if err != nil {
@@ -899,7 +992,7 @@ func (p *Postgres) GetRetentionPolicy(ctx context.Context) (*RetentionPolicy, er
 	var autoPurgeInt int
 	err := p.pool.QueryRow(ctx, `SELECT policy_key, retention_days, auto_purge, updated_at FROM fleet_retention_policies LIMIT 1`).Scan(&rp.PolicyKey, &rp.RetentionDays, &autoPurgeInt, &rp.UpdatedAt)
 	if err != nil {
-		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_retention_policies (policy_key, retention_days, auto_purge) VALUES ('default', 90, 1) ON CONFLICT DO NOTHING`)
+	_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_retention_policies (policy_key, retention_days, auto_purge) VALUES ('default', 90, 1) ON CONFLICT DO NOTHING`)
 		err = p.pool.QueryRow(ctx, `SELECT policy_key, retention_days, auto_purge, updated_at FROM fleet_retention_policies LIMIT 1`).Scan(&rp.PolicyKey, &rp.RetentionDays, &autoPurgeInt, &rp.UpdatedAt)
 		if err != nil {
 			return nil, err
