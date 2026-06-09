@@ -6,12 +6,12 @@ import { CryptoGraph } from "./CryptoGraph";
 
 export function Metric({ icon, label, value, accent }: { icon: React.ReactNode; label: string; value: string; accent: string }) {
   return (
-    <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
+    <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
       <div className="mb-3 flex items-center justify-between">
-        <div className={`flex h-9 w-9 items-center justify-center rounded ${accent} text-white`}>{icon}</div>
+        <div className={`flex h-9 w-9 items-center justify-center rounded ${accent} text-white`} aria-hidden="true">{icon}</div>
       </div>
-      <div className="text-2xl font-semibold">{value}</div>
-      <div className="mt-1 text-sm text-[#697469]">{label}</div>
+      <div className="text-2xl font-semibold dark:text-[#e8ede9]">{value}</div>
+      <div className="mt-1 text-sm text-[#697469] dark:text-[#8fa991]">{label}</div>
     </section>
   );
 }
@@ -72,16 +72,16 @@ export function OverviewView({ overview, score, findings, components, assets, st
     <div className="space-y-5">
       {/* Active Scan Banners */}
       {activeScans.map((asset) => (
-        <div key={asset.host_uuid} className="rounded-md border border-[#f59e0b] bg-[#fffbeb] p-4 text-[#78350f] active-scan-banner">
+        <div key={asset.host_uuid} className="rounded-md border border-[#f59e0b] bg-[#fffbeb] p-4 text-[#78350f] active-scan-banner dark:bg-[#2d2010] dark:text-[#fbbf24]" role="status">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-bold text-sm md:text-base">Active Scan: {asset.hostname}</span>
-                <span className="px-2 py-0.5 rounded text-xs font-semibold bg-[#fef3c7] border border-[#f59e0b]">
+                <span className="px-2 py-0.5 rounded text-xs font-semibold bg-[#fef3c7] border border-[#f59e0b] dark:bg-[#2d2010] dark:text-[#fbbf24]">
                   {asset.status}
                 </span>
               </div>
-              <div className="mt-1 text-xs md:text-sm text-[#92400e]">
+              <div className="mt-1 text-xs md:text-sm text-[#92400e] dark:text-[#f59e0b]">
                 <span className="font-medium">Path:</span> <span className="font-mono">{asset.current_scan_path || "N/A"}</span>
                 <span className="mx-2">|</span>
                 <span className="font-medium">Files Scanned:</span> <span>{asset.total_files_scanned?.toLocaleString() ?? 0}</span>
@@ -92,7 +92,7 @@ export function OverviewView({ overview, score, findings, components, assets, st
                 <span>Progress</span>
                 <span>{asset.scan_progress}%</span>
               </div>
-              <div className="h-2 w-full rounded-full bg-[#fef3c7] overflow-hidden border border-[#f59e0b]/30">
+              <div className="h-2 w-full rounded-full bg-[#fef3c7] overflow-hidden border border-[#f59e0b]/30 dark:bg-[#2d2010]">
                 <div
                   className="h-full rounded-full bg-[#f59e0b] transition-all duration-500"
                   style={{ width: `${asset.scan_progress}%` }}
@@ -104,10 +104,13 @@ export function OverviewView({ overview, score, findings, components, assets, st
       ))}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric icon={<Gauge />} label="Safety Score" value={`${score}/100`} accent="bg-[#11845b]" />
-        <Metric icon={<Database />} label="Tracked Assets" value={overview.assets.toLocaleString()} accent="bg-[#2f6fed]" />
-        <Metric icon={<Layers3 />} label="CBOM Components" value={overview.components.toLocaleString()} accent="bg-[#8b5cf6]" />
-        <Metric icon={<AlertTriangle />} label="Critical Warnings" value={overview.critical_findings.toLocaleString()} accent="bg-[#d33f49]" />
+        <Metric icon={<Gauge aria-hidden="true" />} label="Safety Score" value={`${score}/100`} accent="bg-[#11845b]" />
+        <Metric icon={<Database aria-hidden="true" />} label="Tracked Assets" value={overview.assets.toLocaleString()} accent="bg-[#2f6fed]" />
+        <Metric icon={<Layers3 aria-hidden="true" />} label="CBOM Components" value={overview.components.toLocaleString()} accent="bg-[#8b5cf6]" />
+        <Metric icon={<AlertTriangle aria-hidden="true" />} label="Critical Warnings" value={overview.critical_findings.toLocaleString()} accent="bg-[#d33f49]" />
+        {(overview as any).stalled_agents > 0 && (
+          <Metric icon={<AlertTriangle aria-hidden="true" />} label="Stalled Agents" value={(overview as any).stalled_agents.toLocaleString()} accent="bg-[#b42318]" />
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -115,14 +118,14 @@ export function OverviewView({ overview, score, findings, components, assets, st
         <div className="space-y-4">
           <CryptoGraph assets={assets} components={components} findings={findings} statuses={statuses} />
 
-          <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
+          <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-base font-semibold">Algorithm Exposure Distribution</h2>
-              <GitBranch size={18} className="text-[#8b5cf6]" />
+              <h2 className="text-base font-semibold dark:text-[#e8ede9]">Algorithm Exposure Distribution</h2>
+              <GitBranch size={18} className="text-[#8b5cf6]" aria-hidden="true" />
             </div>
             <div className="space-y-3">
               {histogram.length === 0 ? (
-                <div className="text-xs text-[#697469] text-center py-8">
+                <div className="text-xs text-[#697469] text-center py-8 dark:text-[#8fa991]">
                   No algorithms cataloged in the CBOM index yet.
                 </div>
               ) : (
@@ -132,10 +135,10 @@ export function OverviewView({ overview, score, findings, components, assets, st
                   return (
                     <div key={alg} className="space-y-1">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold font-mono text-[#17211c]">{alg}</span>
-                        <span className="text-[#697469] font-medium">{count} instances</span>
+                        <span className="font-semibold font-mono text-[#17211c] dark:text-[#e8ede9]">{alg}</span>
+                        <span className="text-[#697469] font-medium dark:text-[#8fa991]">{count} instances</span>
                       </div>
-                      <div className="h-2 w-full rounded-full bg-[#f7f8f5] overflow-hidden">
+                      <div className="h-2 w-full rounded-full bg-[#f7f8f5] overflow-hidden dark:bg-[#0d1210]">
                         <div
                           className={`h-full rounded-full transition-all duration-500 ${
                             isPQC ? "bg-[#11845b]" : "bg-[#8b5cf6]"
@@ -153,19 +156,19 @@ export function OverviewView({ overview, score, findings, components, assets, st
 
         {/* Right Column: Highest Priority Findings & Asset Remediation Status */}
         <div className="space-y-4">
-          <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
+          <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-base font-semibold">Highest Priority Findings</h2>
-              <AlertTriangle size={18} className="text-[#d33f49]" />
+              <h2 className="text-base font-semibold dark:text-[#e8ede9]">Highest Priority Findings</h2>
+              <AlertTriangle size={18} className="text-[#d33f49]" aria-hidden="true" />
             </div>
             <FindingTable findings={findings} components={components} statuses={statuses} updateStatus={updateStatus} />
           </section>
 
-          <section className="rounded-md border border-[#dfe5dc] bg-white p-4">
-            <h2 className="text-base font-semibold mb-3">Asset Remediation Status</h2>
+          <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
+            <h2 className="text-base font-semibold mb-3 dark:text-[#e8ede9]">Asset Remediation Status</h2>
             <div className="flex flex-wrap gap-4">
               {assets.length === 0 ? (
-                <span className="remediation-progress text-sm font-medium text-[#4d594f]" data-testid="remediation-progress">
+                <span className="remediation-progress text-sm font-medium text-[#4d594f] dark:text-[#6b7e6f]" data-testid="remediation-progress">
                   {findings.filter(f => statuses[f.finding_id] === "remediated" || statuses[f.finding_id] === "false-positive").length}/{findings.length} findings remediated
                 </span>
               ) : (
@@ -182,9 +185,9 @@ export function OverviewView({ overview, score, findings, components, assets, st
                       return s === "remediated" || s === "false-positive";
                     }).length;
                     return (
-                      <div key={asset.host_uuid} className="rounded border border-[#edf1ea] p-3 bg-[#f7f8f5] flex-1 min-w-[200px]">
-                        <div className="text-xs font-semibold text-[#697469] mb-1">Asset Status ({asset.hostname})</div>
-                        <span className="remediation-progress font-medium text-sm text-[#17211c]" data-testid="remediation-progress">
+                      <div key={asset.host_uuid} className="rounded border border-[#edf1ea] p-3 bg-[#f7f8f5] flex-1 min-w-[200px] dark:border-[#2a3a30] dark:bg-[#0d1210]">
+                        <div className="text-xs font-semibold text-[#697469] mb-1 dark:text-[#8fa991]">Asset Status ({asset.hostname})</div>
+                        <span className="remediation-progress font-medium text-sm text-[#17211c] dark:text-[#e8ede9]" data-testid="remediation-progress">
                           {remediated}/{total} findings remediated
                         </span>
                       </div>
