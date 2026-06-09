@@ -12,7 +12,6 @@ use walkdir::WalkDir;
 
 const CRYPTO_PACKAGES: &[(&str, &str, f64)] = &[
     // Rust
-    ("openssl", "OpenSSL", 0.90),
     ("ring", "ring", 0.95),
     ("rustls", "rustls", 0.95),
     ("boring", "BoringSSL", 0.90),
@@ -39,7 +38,7 @@ const CRYPTO_PACKAGES: &[(&str, &str, f64)] = &[
     ("jwks-rsa", "jwks-rsa", 0.80),
     ("bcrypt", "bcrypt", 0.85),
     ("argon2", "argon2", 0.85),
-    // C/C++
+    // C/C++ and Rust (OpenSSL is shared across ecosystems)
     ("openssl", "OpenSSL", 0.90),
     ("libsodium", "libsodium", 0.90),
     ("wolfssl", "wolfSSL", 0.90),
@@ -51,10 +50,24 @@ const CRYPTO_PACKAGES: &[(&str, &str, f64)] = &[
     ("golang.org/x/crypto", "Go x/crypto", 0.90),
     ("github.com/square/go-jose", "go-jose", 0.85),
     ("github.com/golang-jwt", "golang-jwt", 0.85),
+    // FHE (Fully Homomorphic Encryption) libraries
+    ("tfhe-rs", "TFHE-rs", 0.95),
+    ("concrete", "Concrete (Zama)", 0.95),
+    ("openfhe", "OpenFHE", 0.90),
+    ("seal", "Microsoft SEAL", 0.90),
+    ("lattigo", "Lattigo", 0.95),
+    ("helib", "HElib", 0.90),
+    ("palisade", "PALISADE", 0.85),
+    ("tfhe", "TFHE", 0.90),
     // General
     ("age", "age encryption", 0.80),
     ("gpgme", "GPGME", 0.85),
     ("gnupg", "GnuPG", 0.85),
+];
+
+/// Dependency needles that identify FHE (Fully Homomorphic Encryption) libraries.
+const FHE_NEEDLES: &[&str] = &[
+    "tfhe-rs", "concrete", "openfhe", "seal", "lattigo", "helib", "palisade", "tfhe",
 ];
 
 pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
@@ -79,15 +92,30 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
             let text = String::from_utf8_lossy(&raw);
             let deps = parse_dependencies(entry.path(), &text);
             let mut algorithms = Vec::new();
+            let mut has_fhe = false;
             for dep in deps.keys() {
                 let dep_l = dep.to_ascii_lowercase();
                 for (needle, lib, confidence) in CRYPTO_PACKAGES {
                     if dep_l.contains(needle) {
+                        let is_fhe = FHE_NEEDLES.iter().any(|fhe| dep_l.contains(fhe));
+                        if is_fhe {
+                            has_fhe = true;
+                        }
+                        let algo_status = if is_fhe {
+                            "fhe-capability-detected".to_string()
+                        } else {
+                            "declared-dependency".to_string()
+                        };
+                        let algo_family = if is_fhe {
+                            "homomorphic-encryption".to_string()
+                        } else {
+                            "dependency".to_string()
+                        };
                         algorithms.push(CryptoAlgorithm {
                             name: "library-crypto-capability".to_string(),
-                            family: "dependency".to_string(),
+                            family: algo_family,
                             role: CryptoRole::Unspecified as i32,
-                            status: "declared-dependency".to_string(),
+                            status: algo_status,
                             key_bits: 0,
                             curve: String::new(),
                             implementation_library: lib.to_string(),
@@ -117,11 +145,12 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 confidence: 0.76,
                 sensitivity_class: "metadata-only".to_string(),
             });
+            let component_type = if has_fhe { "fhe-library" } else { "manifest" };
             out.components.push(CbomComponent {
                 bom_ref: format!("manifest:{}", path.replace('\\', "/")),
                 name: entry.path().file_name().unwrap_or_default().to_string_lossy().to_string(),
                 version: String::new(),
-                component_type: "manifest".to_string(),
+                component_type: component_type.to_string(),
                 purl: String::new(),
                 file_path: path,
                 language: manifest_type(entry.path()).to_string(),
@@ -137,9 +166,13 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
     Ok(out)
 }
 
+/// Check whether a path should be included in scanning, using path-component matching
+/// so that excluding "target" only matches the directory "target/", not "custom-target/".
 fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
-    let s = path.to_string_lossy();
-    !cfg.exclude_dirs.iter().any(|d| s.contains(d))
+    !path.components().any(|comp| {
+        let comp_str = comp.as_os_str().to_string_lossy();
+        cfg.exclude_dirs.iter().any(|d| comp_str == d.as_str())
+    })
 }
 
 fn is_lockfile(path: &Path) -> bool {
