@@ -1,0 +1,25 @@
+# Offline fallback remediation rules used when no LLM API key is configured.
+# These provide static replacement suggestions for common vulnerable algorithms.
+# The patch format is a unified diff: "--- file\n+++ file\n@@ ... @@\n-old\n+new"
+fallback_rules:
+  - algorithm: MD5
+    replacement: SHA256
+    description: "Replace MD5 with SHA-256 (minimal migration; CNSA requires SHA-384+)"
+  - algorithm: SHA-1
+    replacement: SHA256
+    description: "Replace SHA-1 with SHA-256 (minimal migration; CNSA requires SHA-384+)"
+  - algorithm: RSA
+    replacement: MLKEM768
+    description: "Replace RSA key exchange with ML-KEM-768 (NIST profile) or ML-KEM-1024 (CNSA)"
+  - algorithm: ECDSA
+    replacement: MLDSA65
+    description: "Replace ECDSA signatures with ML-DSA-65 (NIST profile) or ML-DSA-87 (CNSA)"
+  - algorithm: ECDHE
+    replacement: MLKEM768
+    description: "Replace ECDHE key exchange with ML-KEM-768 (NIST profile) or ML-KEM-1024 (CNSA)"
+  - algorithm: DH
+    replacement: MLKEM768
+    description: "Replace DH key exchange with ML-KEM-768"
+  - algorithm: DSA
+    replacement: MLDSA65
+    description: "Replace DSA signatures with ML-DSA-65"

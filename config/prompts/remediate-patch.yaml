@@ -1,0 +1,18 @@
+# Prompt template for LLM-based remediation patch generation.
+# Variables: {{algorithm}}, {{source_file}}, {{snippet}}
+# The LLM must return ONLY a unified diff patch (no markdown code blocks).
+prompt: |
+  You are a cryptography security expert. Rewrite the following code snippet from
+  '{{source_file}}' to migrate from the quantum-vulnerable algorithm '{{algorithm}}'
+  to a secure post-quantum or modern standard (e.g., ML-KEM-1024, ML-DSA-87, SHA-384,
+  AES-256 for CNSA 2.0; or X25519MLKEM768, ML-DSA-65, SHA-256 for NIST).
+
+  The response must return ONLY a unified diff patch.
+  Do not include markdown code block formatting (like ```diff), just the raw diff text.
+
+  Remediation patch target file: {{source_file}}
+
+  Code Snippet:
+  {{snippet}}
+model: gpt-4o-mini
+temperature: 0.0
