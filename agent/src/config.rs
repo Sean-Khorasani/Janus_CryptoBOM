@@ -27,6 +27,8 @@ pub struct AgentConfig {
     pub plugin_dirs: Vec<String>,
     #[serde(default)]
     pub plugin_commands: Vec<PluginCommandConfig>,
+    #[serde(default = "default_intercept_mode")]
+    pub intercept_mode: String,
     pub active: ActiveConfig,
 }
 
@@ -38,6 +40,10 @@ pub struct PluginCommandConfig {
     pub args: Vec<String>,
     #[serde(default = "default_plugin_timeout")]
     pub timeout_seconds: u64,
+    #[serde(default = "default_plugin_max_memory")]
+    pub max_memory_mb: u64,
+    #[serde(default = "default_plugin_max_cpu")]
+    pub max_cpu_percent: u8,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -55,8 +61,20 @@ fn default_sarif_path() -> String {
     "janus-agent.sarif".to_string()
 }
 
+fn default_intercept_mode() -> String {
+    "passive".to_string()
+}
+
 fn default_plugin_timeout() -> u64 {
     30
+}
+
+fn default_plugin_max_memory() -> u64 {
+    512
+}
+
+fn default_plugin_max_cpu() -> u8 {
+    50
 }
 
 impl Default for AgentConfig {
@@ -75,12 +93,13 @@ impl Default for AgentConfig {
             scan_interval_seconds: 60,
             max_file_bytes: 10 * 1024 * 1024,
             max_binary_bytes: 10 * 1024 * 1024,
-            command_signing_key: "default_signing_key_at_least_16_bytes".to_string(),
+            command_signing_key: String::new(), // must be set explicitly — no insecure default
             scan_roots: vec![".".to_string()],
             exclude_dirs: vec![],
             network_targets: vec![],
             plugin_dirs: vec![],
             plugin_commands: vec![],
+            intercept_mode: "passive".to_string(),
             active: ActiveConfig {
                 allowed_services: vec![],
                 allowed_config_roots: vec![],
@@ -121,8 +140,11 @@ impl AgentConfig {
         if self.scan_interval_seconds == 0 {
             anyhow::bail!("scan_interval_seconds must be non-zero");
         }
+        if self.command_signing_key.is_empty() {
+            anyhow::bail!("command_signing_key is required — generate a 32-byte random key and set it in agent config");
+        }
         if self.command_signing_key.len() < 16 {
-            anyhow::bail!("command_signing_key must be at least 16 bytes");
+            anyhow::bail!("command_signing_key must be at least 16 bytes (recommended: 32 bytes)");
         }
         Ok(())
     }
