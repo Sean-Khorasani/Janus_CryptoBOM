@@ -47,10 +47,10 @@ export function ComplianceMatrix({ assets, findings, statuses }: ComplianceMatri
   })();
 
   return (
-    <div className="rounded-md border border-[#dfe5dc] bg-white p-4">
+    <div className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
       <div className="mb-4">
-        <h2 className="text-base font-semibold">Compliance Posture Matrix</h2>
-        <p className="text-xs text-[#697469] mt-0.5">
+        <h2 className="text-base font-semibold dark:text-[#e8ede9]">Compliance Posture Matrix</h2>
+        <p className="text-xs text-[#697469] mt-0.5 dark:text-[#8fa991]">
           Real-time compliance validation per policy category across registered assets.
         </p>
       </div>
@@ -58,8 +58,9 @@ export function ComplianceMatrix({ assets, findings, statuses }: ComplianceMatri
         <table
           className="compliance compliance-matrix w-full min-w-[720px] text-left text-sm"
           data-testid="compliance-matrix"
+          role="table"
         >
-          <thead className="border-b border-[#dfe5dc] text-xs uppercase text-[#697469]">
+          <thead className="border-b border-[#dfe5dc] text-xs uppercase text-[#697469] dark:border-[#2a3a30] dark:text-[#8fa991]">
             <tr>
               <th className="py-2 pr-3">Host</th>
               {categories.map((cat) => (
@@ -74,18 +75,18 @@ export function ComplianceMatrix({ assets, findings, statuses }: ComplianceMatri
               return (
                 <tr
                   key={asset.host_uuid}
-                  className="border-b border-[#edf1ea] hover:bg-[#edf1ea]/40 transition-colors"
+                  className="border-b border-[#edf1ea] hover:bg-[#edf1ea]/40 transition-colors dark:border-[#2a3a30] dark:hover:bg-[#22302a]/40"
                 >
-                  <td className="py-2 pr-3 font-medium">{asset.hostname}</td>
+                  <td className="py-2 pr-3 font-medium dark:text-[#e8ede9]">{asset.hostname}</td>
                   {categories.map((cat) => {
                     const st = getCellStatus(asset, cat);
                     return (
                       <td
                         key={cat}
                         className={`py-2 pr-3 font-bold ${
-                          st === "pass" ? "cell-pass text-green-600" :
-                          st === "fail" ? "cell-fail text-red-600" :
-                          "cell-unknown text-[#697469]"
+                          st === "pass" ? "cell-pass text-green-600 dark:text-green-400" :
+                          st === "fail" ? "cell-fail text-red-600 dark:text-red-400" :
+                          "cell-unknown text-[#697469] dark:text-[#8fa991]"
                         }`}
                         data-status={st}
                       >
@@ -94,7 +95,7 @@ export function ComplianceMatrix({ assets, findings, statuses }: ComplianceMatri
                     );
                   })}
                   <td
-                    className="asset-compliance-score py-2 pr-3 font-semibold"
+                    className="asset-compliance-score py-2 pr-3 font-semibold dark:text-[#e8ede9]"
                     data-testid="compliance-score"
                   >
                     {score !== null ? `${score}%` : "—"}
@@ -102,16 +103,16 @@ export function ComplianceMatrix({ assets, findings, statuses }: ComplianceMatri
                 </tr>
               );
             })}
-            
+
             {assets.length > 0 && (
-              <tr className="font-semibold bg-[#f7f8f5]">
-                <td className="py-2 pr-3">Fleet Summary</td>
+              <tr className="font-semibold bg-[#f7f8f5] dark:bg-[#0d1210]">
+                <td className="py-2 pr-3 dark:text-[#e8ede9]">Fleet Summary</td>
                 {fleetRates.map((rate, idx) => (
-                  <td key={idx} className="py-2 pr-3 text-xs uppercase tracking-wider text-[#4d594f]">
+                  <td key={idx} className="py-2 pr-3 text-xs uppercase tracking-wider text-[#4d594f] dark:text-[#6b7e6f]">
                     {rate}%
                   </td>
                 ))}
-                <td className="py-2 pr-3 text-xs uppercase tracking-wider text-[#4d594f]">
+                <td className="py-2 pr-3 text-xs uppercase tracking-wider text-[#4d594f] dark:text-[#6b7e6f]">
                   {fleetOverall}%
                 </td>
               </tr>
@@ -119,7 +120,7 @@ export function ComplianceMatrix({ assets, findings, statuses }: ComplianceMatri
           </tbody>
         </table>
         {assets.length === 0 && (
-          <div className="py-8 text-center text-sm text-[#697469]">No assets found</div>
+          <div className="py-8 text-center text-sm text-[#697469] dark:text-[#8fa991]">No assets found</div>
         )}
       </div>
     </div>
