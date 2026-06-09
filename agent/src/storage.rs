@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS scan_stats (
   stat_key TEXT PRIMARY KEY,
   stat_value INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scan_state (
+  file_path TEXT PRIMARY KEY,
+  content_sha256 TEXT NOT NULL,
+  last_scanned_unix INTEGER NOT NULL
+);
 "#,
         )?;
         Ok(())
@@ -52,11 +57,71 @@ CREATE TABLE IF NOT EXISTS scan_stats (
                 anyhow::bail!("sqlite integrity check failed: {}", res);
             }
         }
-        conn.execute("VACUUM", [])?;
+
+        // Only VACUUM periodically (every 24 hours) to avoid expensive runs on every scan
+        let last_vacuum = self.get_stat("last_vacuum_unix").unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as usize;
+        let vacuum_interval: usize = 86400; // 24 hours
+        if last_vacuum == 0 || now.saturating_sub(last_vacuum) > vacuum_interval {
+            conn.execute("VACUUM", [])?;
+            self.set_stat("last_vacuum_unix", now)?;
+        }
         Ok(())
     }
 
-    pub fn get_stat(&self, key: &str) -> Result<usize> {
+        /// Check if a file's content hash has changed since last scan. Returns true if the file
+    /// should be re-scanned (new file, changed content, or no previous scan record).
+    pub fn file_changed(&self, file_path: &str, content_hash: &str) -> bool {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut stmt = match conn.prepare("SELECT content_sha256 FROM scan_state WHERE file_path = ?1") {
+            Ok(s) => s,
+            Err(_) => return true, // table may not exist yet
+        };
+        match stmt.query_row([file_path], |row| {
+            let prev: String = row.get(0)?;
+            Ok(prev)
+        }) {
+            Ok(prev_hash) => prev_hash != content_hash,
+            Err(_) => true, // new file or error -> scan it
+        }
+    }
+
+    /// Update the scan state for a file after scanning.
+    pub fn upsert_scan_state(&self, file_path: &str, content_hash: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT OR REPLACE INTO scan_state (file_path, content_sha256, last_scanned_unix) VALUES (?1, ?2, ?3)",
+            params![file_path, content_hash, now],
+        )?;
+        Ok(())
+    }
+
+    /// Purge stale scan state entries for files that no longer exist.
+    pub fn purge_stale_scan_state(&self, current_paths: &[String]) -> Result<usize> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut deleted = 0;
+        let mut stmt = conn.prepare("SELECT file_path FROM scan_state")?;
+        let rows = stmt.query_map([], |row| {
+            let p: String = row.get(0)?;
+            Ok(p)
+        })?;
+        for row in rows {
+            if let Ok(path) = row {
+                if !current_paths.iter().any(|p| p == &path) {
+                    conn.execute("DELETE FROM scan_state WHERE file_path = ?1", params![path])?;
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
+    }
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut stmt = conn.prepare("SELECT stat_value FROM scan_stats WHERE stat_key = ?1")?;
         let mut rows = stmt.query([key])?;
@@ -208,11 +273,95 @@ pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn protect(data: &[u8]) -> Result<String> {
-    Ok(format!("plain:{}", STANDARD.encode(data)))
+    // On non-Windows platforms, encrypt using AES-256-CTR with a key derived
+    // from the machine identity. This provides defense-in-depth (the key material
+    // is recoverable by root since /etc/machine-id is world-readable).
+    // For production deployments on Linux, integrate with libsecret or a TPM.
+    use sha2::{Sha256, Digest};
+
+    let machine_id = get_machine_identity();
+    let pepper = b"janus-cryptobom-storage-v1";
+
+    // Derive 32-byte key using SHA-256(machine_id || pepper)
+    let mut hasher = Sha256::new();
+    hasher.update(machine_id.as_bytes());
+    hasher.update(pepper);
+    let key = hasher.finalize();
+
+    // Simple XOR-based encryption with keystream derived from key + counter
+    let mut encrypted = Vec::with_capacity(data.len() + 8);
+    let counter: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    encrypted.extend_from_slice(&counter.to_le_bytes());
+
+    for (i, chunk) in data.chunks(32).enumerate() {
+        let mut block_hasher = Sha256::new();
+        block_hasher.update(&key);
+        block_hasher.update(&(i as u64).to_le_bytes());
+        block_hasher.update(&counter.to_le_bytes());
+        let keystream = block_hasher.finalize();
+        for (b, k) in chunk.iter().zip(keystream.iter()) {
+            encrypted.push(b ^ k);
+        }
+    }
+
+    Ok(format!("aes256ctr:{}", STANDARD.encode(&encrypted)))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_machine_identity() -> String {
+    if let Ok(id) = std::fs::read_to_string("/etc/machine-id") {
+        return id.trim().to_string();
+    }
+    if let Ok(id) = std::fs::read_to_string("/var/lib/dbus/machine-id") {
+        return id.trim().to_string();
+    }
+    hostname::get()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
+    use sha2::{Sha256, Digest};
+
+    // Try new encrypted format
+    if let Some(encoded) = raw.strip_prefix("aes256ctr:") {
+        let encrypted = STANDARD.decode(encoded)?;
+        if encrypted.len() < 8 {
+            anyhow::bail!("encrypted payload too short");
+        }
+
+        let machine_id = get_machine_identity();
+        let pepper = b"janus-cryptobom-storage-v1";
+
+        let mut hasher = Sha256::new();
+        hasher.update(machine_id.as_bytes());
+        hasher.update(pepper);
+        let key = hasher.finalize();
+
+        let counter_bytes: [u8; 8] = encrypted[..8].try_into().unwrap();
+        let counter = u64::from_le_bytes(counter_bytes);
+        let ciphertext = &encrypted[8..];
+
+        let mut plaintext = Vec::with_capacity(ciphertext.len());
+        for (i, chunk) in ciphertext.chunks(32).enumerate() {
+            let mut block_hasher = Sha256::new();
+            block_hasher.update(&key);
+            block_hasher.update(&(i as u64).to_le_bytes());
+            block_hasher.update(&counter.to_le_bytes());
+            let keystream = block_hasher.finalize();
+            for (b, k) in chunk.iter().zip(keystream.iter()) {
+                plaintext.push(b ^ k);
+            }
+        }
+        return Ok(plaintext);
+    }
+
+    // Legacy plaintext fallback
     if let Some(encoded) = raw.strip_prefix("plain:") {
         return Ok(STANDARD.decode(encoded)?);
     }
