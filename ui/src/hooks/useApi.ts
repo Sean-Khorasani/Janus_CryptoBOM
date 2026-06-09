@@ -286,6 +286,16 @@ export function useApi() {
     return await res.json();
   };
 
+  const updateFindingStatus = async (findingId: string, status: string) => {
+    const res = await authedFetch(`/api/findings/${findingId}/status`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status, updated_by: localStorage.getItem("janus_user") || "admin" })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return await res.json();
+  };
+
   return {
     overview,
     assets,
@@ -303,6 +313,7 @@ export function useApi() {
     saveFleetConfig,
     fetchAuditLogs,
     fetchAgentDiagnostics,
-    saveAgentDiagnostics
+    saveAgentDiagnostics,
+    updateFindingStatus,
   };
 }
