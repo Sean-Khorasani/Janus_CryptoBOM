@@ -29,7 +29,7 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
   const hostNodes = useMemo(() => {
     return assets.map((a) => ({
       id: `host-${a.host_uuid}`,
-      type: "host",
+      type: "host" as const,
       label: a.hostname,
       data: a
     }));
@@ -39,7 +39,7 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
     const limitedComponents = components.slice(0, 8);
     return limitedComponents.map((c) => ({
       id: `comp-${c.telemetry_id}-${c.bom_ref}`,
-      type: "component",
+      type: "component" as const,
       label: c.name,
       data: c
     }));
@@ -50,7 +50,7 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
     const uniqueAlgos = Array.from(new Set(limitedComponents.flatMap((c) => c.algorithms || [])));
     return uniqueAlgos.map((a) => ({
       id: `algo-${a}`,
-      type: "algorithm",
+      type: "algorithm" as const,
       label: a,
       data: a
     }));
@@ -66,7 +66,7 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
     const limitedComponents = components.slice(0, 8);
     limitedComponents.forEach((c) => {
       const compId = `comp-${c.telemetry_id}-${c.bom_ref}`;
-      
+
       // Connection from host to component
       list.push({
         source: `host-${c.host_uuid}`,
@@ -191,36 +191,40 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
   };
 
   return (
-    <div className={`crypto-graph-container relative z-10 rounded-md border border-[#dfe5dc] p-4 transition-colors duration-200 ${isDark ? "bg-[#17211c] text-white dark" : "bg-white text-[#17211c]"}`} id="crypto-graph">
+    <div className={`crypto-graph-container relative z-10 rounded-md border border-[#dfe5dc] p-4 transition-colors duration-200 dark:border-[#2a3a30] ${isDark ? "bg-[#17211c] text-white dark" : "bg-white text-[#17211c]"}`} id="crypto-graph" role="img" aria-label="Interactive cryptographic exposure graph showing connections between hosts, components, and algorithms. Nodes can be dragged to customize layout.">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h2 className="text-base font-semibold">Interactive Crypto Exposure Graph</h2>
-          <p className="text-xs text-[#697469] mt-0.5">
+          <p className="text-xs text-[#697469] mt-0.5 dark:text-[#8fa991]">
             Click to highlight connections. Drag nodes to customize layout.
           </p>
         </div>
         {selectedNode && (
           <button
             onClick={() => setSelectedNode(null)}
-            className="text-xs text-[#2f6fed] hover:underline"
+            className="text-xs text-[#2f6fed] hover:underline dark:text-[#60a5fa]"
+            type="button"
+            aria-label="Clear graph highlight"
           >
             Clear Highlight
           </button>
         )}
       </div>
 
-      <div 
-        className="relative overflow-hidden bg-[#f7f8f5] rounded border border-[#edf1ea]"
+      <div
+        className="relative overflow-hidden bg-[#f7f8f5] rounded border border-[#edf1ea] dark:bg-[#0d1210] dark:border-[#2a3a30]"
         style={{ height: "450px" }}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
       >
-        <svg 
+        <svg
           className="crypto-graph h-full w-full select-none"
           width="100%"
           height="100%"
           onClick={() => setSelectedNode(null)}
+          role="graphics-document"
+          aria-label="Graph visualization"
         >
           {/* Defs for arrow markers if needed */}
           <defs>
@@ -248,8 +252,8 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
             }
 
             const edgeClass = `graph-edge transition-all ${
-              isHighlighted ? "edge-highlighted stroke-[#2f6fed] stroke-[3px]" : 
-              isDimmed ? "edge-dimmed stroke-gray-200 stroke-[1px] opacity-40" : 
+              isHighlighted ? "edge-highlighted stroke-[#2f6fed] stroke-[3px]" :
+              isDimmed ? "edge-dimmed stroke-gray-200 stroke-[1px] opacity-40" :
               "stroke-[#cbd5c7] stroke-[1.5px]"
             }`;
 
@@ -275,7 +279,7 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
 
             const { fill, status, severity } = getNodeColorAndSeverity(node);
             const isSelected = selectedNode === node.id;
-            
+
             // Check dimming
             const isDimmed = selectedNode && !isSelected && !edges.some(
               (e) => (e.source === selectedNode && e.target === node.id) || (e.target === selectedNode && e.source === node.id)
@@ -296,6 +300,8 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
                   setSelectedNode(node.id);
                 }}
                 onMouseDown={(e) => handleMouseDown(e, node.id)}
+                role="graphics-symbol"
+                aria-label={`${node.type}: ${node.label}`}
               >
                 {node.type === "host" && (
                   <rect
@@ -360,18 +366,18 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
         </svg>
 
         {/* Legend */}
-        <div className="absolute bottom-2 left-2 flex gap-3 bg-white/90 px-2 py-1 rounded border text-[10px] font-medium shadow-sm">
+        <div className="absolute bottom-2 left-2 flex gap-3 bg-white/90 px-2 py-1 rounded border text-[10px] font-medium shadow-sm dark:bg-[#1a2620]/90 dark:border-[#2a3a30]">
           <div className="flex items-center gap-1">
-            <span className="h-2.5 w-2.5 rounded bg-[#d33f49]" /> Critical
+            <span className="h-2.5 w-2.5 rounded bg-[#d33f49]" aria-hidden="true" /> Critical
           </div>
           <div className="flex items-center gap-1">
-            <span className="h-2.5 w-2.5 rounded bg-[#e07a2f]" /> High
+            <span className="h-2.5 w-2.5 rounded bg-[#e07a2f]" aria-hidden="true" /> High
           </div>
           <div className="flex items-center gap-1">
-            <span className="h-2.5 w-2.5 rounded bg-[#ffd166]" /> Medium
+            <span className="h-2.5 w-2.5 rounded bg-[#ffd166]" aria-hidden="true" /> Medium
           </div>
           <div className="flex items-center gap-1">
-            <span className="h-2.5 w-2.5 rounded bg-[#11845b]" /> Compliant
+            <span className="h-2.5 w-2.5 rounded bg-[#11845b]" aria-hidden="true" /> Compliant
           </div>
         </div>
       </div>
