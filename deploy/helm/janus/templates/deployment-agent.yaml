@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "janus-cryptobom.fullname" . }}-agent
+  labels:
+    app.kubernetes.io/name: {{ include "janus-cryptobom.name" . }}-agent
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "janus-cryptobom.name" . }}-agent
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "janus-cryptobom.name" . }}-agent
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ include "janus-cryptobom.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      hostPID: true
+      containers:
+        - name: agent
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+            privileged: false
+          image: "{{ .Values.image.registry }}/{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag }}"
+          imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
+          env:
+            - name: JANUS_SERVER_ADDR
+              value: "{{ include "janus-cryptobom.fullname" . }}-server:{{ .Values.service.grpcPort }}"
+            - name: JANUS_SCAN_SCHEDULE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-config
+                  key: JANUS_SCAN_SCHEDULE
+            - name: JANUS_MIN_KEY_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-config
+                  key: JANUS_MIN_KEY_SIZE
+            - name: JANUS_EXCLUDE_DIRS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-config
+                  key: JANUS_EXCLUDE_DIRS
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          volumeMounts:
+            - name: host-fs
+              mountPath: /host
+              readOnly: true
+      volumes:
+        - name: host-fs
+          hostPath:
+            path: /
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

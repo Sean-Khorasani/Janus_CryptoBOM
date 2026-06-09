@@ -1,0 +1,176 @@
+# Janus CryptoBOM Helm values
+# This file defines defaults for the Janus CryptoBOM deployment.
+# Override these values in a custom values.yaml file or via --set flags.
+
+# Number of server replicas
+replicaCount: 1
+
+image:
+  registry: docker.io
+  repository: janus-cbom/server
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+  # Override for agent image if different from server
+  agent:
+    repository: janus-cbom/agent
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Service account configuration
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Server configuration
+server:
+  port: 8080
+  grpcPort: 9443
+  logLevel: info
+  disableAuth: false
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 30
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+# Agent configuration (DaemonSet)
+agent:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  affinity: {}
+  # Scan configuration
+  scan:
+    schedule: daily
+    minKeySize: 2048
+    excludeDirs: ".git, target, node_modules, dist, .venv, temp"
+
+# PostgreSQL configuration
+postgresql:
+  # Set to true to deploy a bundled PostgreSQL (for development only)
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  auth:
+    database: janus
+    username: janus
+    password: janus
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# External PostgreSQL configuration (used when postgresql.enabled is false)
+externalDatabase:
+  host: ""
+  port: 5432
+  database: janus
+  username: janus
+  password: janus
+  sslmode: disable
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: janus.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: janus-tls
+  #    hosts:
+  #      - janus.local
+
+# Service configuration
+service:
+  type: ClusterIP
+  httpPort: 8080
+  grpcPort: 9443
+
+# Secrets configuration
+# Set commandSigningKey to a 32-byte hex string for production deployments
+secrets:
+  commandSigningKey: "dev-only-change-in-production-0123456789ab"
+  jwtSecret: "dev-only-jwt-secret-change-in-production"
+  llmApiKey: ""
+  hsmModulePath: ""
+  hsmPin: ""
+  hsmSlotId: "0"
+
+# LLM proxy configuration
+llm:
+  apiUrl: "https://api.openai.com/v1"
+
+# TLS configuration
+tls:
+  enabled: false
+  certFile: ""
+  keyFile: ""
+  caFile: ""
+
+# Retention policy
+retention:
+  days: 90
+  autoPurge: true

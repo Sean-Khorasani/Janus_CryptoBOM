@@ -1,0 +1,75 @@
+Janus CryptoBOM
+===============
+
+This Helm chart deploys Janus CryptoBOM on Kubernetes.
+
+## Getting Started
+
+1. Install the chart:
+   ```
+   helm install janus .
+   ```
+
+2. Access the API:
+   ```
+   kubectl port-forward svc/janus-cryptobom-server 8080:8080
+   curl http://localhost:8080/api/health
+   ```
+
+## Configuration
+
+See values.yaml for all configurable options.
+
+### Database
+
+By default, PostgreSQL is deployed as a StatefulSet. For production, use an external
+database by setting postgresql.enabled=false and configuring externalDatabase values.
+
+### Secrets
+
+Required secrets must be provided for production:
+- commandSigningKey: 32-byte hex string for migration command signing
+
+### Agent DaemonSet
+
+The agent runs on all nodes via a DaemonSet. It scans the host filesystem mounted
+at /host. Configure scan directories, exclusions, and schedule via values.yaml.
+
+## Container Images
+
+| Component | Image |
+|-----------|-------|
+| Server | janus-cbom/server:0.1.0 |
+| Agent | janus-cbom/agent:0.1.0 |
+| PostgreSQL | postgres:16-alpine |
+
+## Network Policies
+
+The server exposes two ports:
+- 8080 (HTTP API)
+- 9443 (gRPC telemetry ingestion)
+
+The gRPC port should only be accessible to agent pods.
+
+## Persistence
+
+PostgreSQL data is stored in a PersistentVolumeClaim. Ensure your cluster has a
+default StorageClass or configure one via postgresql.persistence.storageClass.
+
+## Troubleshooting
+
+Check pod status:
+```
+kubectl get pods -l app.kubernetes.io/instance=janus
+```
+
+View server logs:
+```
+kubectl logs deployment/janus-cryptobom-server
+```
+
+Check database connectivity:
+```
+kubectl exec -it deployment/janus-cryptobom-server -- /bin/sh
+wget -qO- http://localhost:8080/api/health
+```

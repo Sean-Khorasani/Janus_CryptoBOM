@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "janus-cryptobom.fullname" . }}-server
+  labels:
+    app.kubernetes.io/name: {{ include "janus-cryptobom.name" . }}-server
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "janus-cryptobom.name" . }}-server
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "janus-cryptobom.name" . }}-server
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ include "janus-cryptobom.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: server
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.server.grpcPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "janus-cryptobom.fullname" . }}-config
+          env:
+            - name: JANUS_COMMAND_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-secrets
+                  key: commandSigningKey
+            - name: JANUS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-secrets
+                  key: databaseUrl
+            - name: JANUS_HSM_MODULE_PATH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-secrets
+                  key: hsmModulePath
+                  optional: true
+            - name: JANUS_HSM_PIN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-secrets
+                  key: hsmPin
+                  optional: true
+            - name: JANUS_HSM_SLOT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "janus-cryptobom.fullname" . }}-secrets
+                  key: hsmSlotId
+                  optional: true
+          livenessProbe:
+            {{- toYaml .Values.server.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.server.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
