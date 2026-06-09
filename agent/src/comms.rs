@@ -96,7 +96,7 @@ pub async fn sync_once(
     })
 }
 
-pub async fn start_heartbeat_loop(http_endpoint: String, host_uuid: String) {
+pub async fn start_heartbeat_loop(http_endpoint: String, host_uuid: String, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
     tokio::spawn(async move {
         use crate::discovery::status::SharedScanState;
         use std::sync::atomic::Ordering;
@@ -107,6 +107,10 @@ pub async fn start_heartbeat_loop(http_endpoint: String, host_uuid: String) {
         let pid_opt = sysinfo::get_current_pid().ok();
 
         loop {
+            // Check for shutdown signal (--once mode completes)
+            if shutdown_rx.has_changed().unwrap_or(false) && *shutdown_rx.borrow() {
+                break;
+            }
             let mut cpu_usage = 0.0;
             let mut mem_usage = 0.0;
 
@@ -145,7 +149,18 @@ pub async fn start_heartbeat_loop(http_endpoint: String, host_uuid: String) {
             };
 
             if !diag_logs.is_empty() {
-                let _ = post_diagnostics(&http_endpoint, &host_uuid, &diag_logs).await;
+                match post_diagnostics(&http_endpoint, &host_uuid, &diag_logs).await {
+                    Ok(_) => {
+                        // Clear buffer after successful delivery to prevent retransmission
+                        if let Ok(mut logs) = state.logs_buffer.lock() {
+                            logs.clear();
+                        }
+                    }
+                    Err(e) => {
+                        // Keep logs for retry on next heartbeat
+                        crate::discovery::status::log_event(&format!("Diagnostics upload failed: {}", e));
+                    }
+                }
             }
 
             // Dynamically fetch and update global scan exclusions
@@ -155,7 +170,15 @@ pub async fn start_heartbeat_loop(http_endpoint: String, host_uuid: String) {
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            // Check shutdown more frequently (every 1s) for responsive --once termination
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            }
         }
     });
 }
