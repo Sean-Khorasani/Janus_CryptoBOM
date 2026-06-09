@@ -382,16 +382,20 @@ async fn read_registry_dword(change: &RegistryDwordChange) -> Result<RegistryDwo
         ],
     )
     .await?;
-    let value = output
-        .lines()
-        .find(|line| line.contains("REG_DWORD"))
-        .and_then(|line| line.split_whitespace().last())
-        .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+
+    // Use regex for robust parsing across Windows versions and locales
+    // Output format: "    Name    REG_DWORD    0x1"
+    let re = regex::Regex::new(r"REG_DWORD\s+0x([0-9a-fA-F]+)").expect("valid regex");
+    let value = re.captures(&output)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| u32::from_str_radix(m.as_str(), 16).ok())
         .unwrap_or(0);
+
+    let existed = output.contains("REG_DWORD");
     Ok(RegistryDwordRollback {
         path: change.path.clone(),
         name: change.name.clone(),
-        existed: true,
+        existed,
         value,
     })
 }
