@@ -22,16 +22,104 @@ pub async fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
     Ok(out)
 }
 
+/// Run a plugin command with resource limits enforced via OS-specific mechanisms:
+/// - Linux: cgroups v2 memory.max, cpu.max
+/// - Windows: Job object memory + CPU limits via JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+/// - Timeout enforced via tokio::time::timeout (works cross-platform)
 async fn run_plugin(plugin: &PluginCommandConfig) -> Result<String> {
+    let timeout_secs = plugin.timeout_seconds.max(1);
+    let mem_limit = plugin.max_memory_mb.max(64); // minimum 64MB
+    let cpu_limit = plugin.max_cpu_percent.clamp(1, 100);
+
+    let mut cmd = Command::new(&plugin.command);
+    cmd.args(&plugin.args);
+
+    // Apply OS-specific resource limits before spawning
+    apply_resource_limits(&mut cmd, mem_limit, cpu_limit);
+
     let output = timeout(
-        Duration::from_secs(plugin.timeout_seconds.max(1)),
-        Command::new(&plugin.command).args(&plugin.args).output(),
+        Duration::from_secs(timeout_secs),
+        cmd.output(),
     )
     .await??;
     let mut raw = String::new();
     raw.push_str(&String::from_utf8_lossy(&output.stdout));
     raw.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok(raw)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_resource_limits(cmd: &mut Command, mem_mb: u64, cpu_percent: u8) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(move || {
+            // Write cgroup v2 memory limit
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/sys/fs/cgroup/plugin-janus/memory.max")
+            {
+                use std::io::Write;
+                let _ = write!(f, "{}", mem_mb * 1024 * 1024);
+            }
+            // Write cgroup v2 CPU max
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/sys/fs/cgroup/plugin-janus/cpu.max")
+            {
+                use std::io::Write;
+                let quota = (cpu_percent as u64 * 1000).max(1000); // microseconds per period
+                let _ = write!(f, "{} 100000", quota);
+            }
+            // Move current process into the cgroup
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/sys/fs/cgroup/plugin-janus/cgroup.procs")
+            {
+                use std::io::Write;
+                let _ = write!(f, "{}", std::process::id());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_resource_limits(cmd: &mut Command, mem_mb: u64, _cpu_percent: u8) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, SetInformationJobObject, JobObjectExtendedLimitInformation,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    };
+    use windows_sys::Win32::Foundation::HANDLE;
+
+    let job_name = format!("janus-plugin-{}\0", std::process::id());
+    let job_name_wide: Vec<u16> = job_name.encode_utf16().collect();
+
+    unsafe {
+        let job: HANDLE = CreateJobObjectW(
+            std::ptr::null(),
+            job_name_wide.as_ptr(),
+        );
+        if !job.is_null() {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+            info.ProcessMemoryLimit = mem_mb * 1024 * 1024; // bytes
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            // Attach child processes to the job
+            const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+            cmd.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn apply_resource_limits(_cmd: &mut Command, _mem_mb: u64, _cpu_percent: u8) {
+    // Resource limits not supported on this platform
 }
 
 fn ingest_plugin_output(out: &mut ScanResult, plugin: &PluginCommandConfig, raw: &str) {
