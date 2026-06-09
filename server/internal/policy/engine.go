@@ -13,13 +13,14 @@ import (
 )
 
 type Profile struct {
-	Version                string `yaml:"version" json:"version"`
-	MinimumRSAKeyBits      uint32 `yaml:"minimum_rsa_key_bits" json:"minimum_rsa_key_bits"`
-	MinimumDHSafePrimeBits uint32 `yaml:"minimum_dh_safe_prime_bits" json:"minimum_dh_safe_prime_bits"`
-	RequireTLS13           bool   `yaml:"require_tls_13" json:"require_tls_13"`
-	RequireHybridPQTLS13   bool   `yaml:"require_hybrid_pq_tls_13" json:"require_hybrid_pq_tls_13"`
-	PreferredKEM           string `yaml:"preferred_kem" json:"preferred_kem"`
-	PreferredSignature     string `yaml:"preferred_signature" json:"preferred_signature"`
+	Version                string  `yaml:"version" json:"version"`
+	MinimumRSAKeyBits      uint32  `yaml:"minimum_rsa_key_bits" json:"minimum_rsa_key_bits"`
+	MinimumDHSafePrimeBits uint32  `yaml:"minimum_dh_safe_prime_bits" json:"minimum_dh_safe_prime_bits"`
+	RequireTLS13           bool    `yaml:"require_tls_13" json:"require_tls_13"`
+	RequireHybridPQTLS13   bool    `yaml:"require_hybrid_pq_tls_13" json:"require_hybrid_pq_tls_13"`
+	PreferredKEM           string  `yaml:"preferred_kem" json:"preferred_kem"`
+	PreferredSignature     string  `yaml:"preferred_signature" json:"preferred_signature"`
+	MinimumConfidence      float64 `yaml:"minimum_confidence" json:"minimum_confidence"`
 }
 
 type Engine struct {
@@ -94,6 +95,10 @@ func (e *Engine) GetActiveProfile() Profile {
 	return e.profiles[e.active]
 }
 
+func (e *Engine) GetOSVClient() *OSVClient {
+	return e.osv
+}
+
 func (e *Engine) SetActiveProfile(version string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -131,6 +136,53 @@ func (e *Engine) Assess(payload *pb.CbomTelemetryPayload) {
 	for _, obs := range payload.NetworkObservations {
 		e.assessNetwork(payload, obs, profile)
 	}
+	// Apply CNSA-specific rules when the CNSA profile is active
+	if strings.Contains(strings.ToLower(profile.Version), "cnsa") {
+		e.assessCNSA(payload, profile)
+	}
+}
+
+// assessCNSA applies CNSA 2.0 specific compliance rules beyond the standard PQC checks.
+func (e *Engine) assessCNSA(payload *pb.CbomTelemetryPayload, profile Profile) {
+	for _, component := range payload.Components {
+		for _, alg := range component.Algorithms {
+			name := strings.ToUpper(alg.Name)
+			// CNSA-2.0 requires ECDSA with P-384 minimum (P-256 is disallowed)
+			if strings.Contains(name, "ECDSA") || strings.Contains(name, "ECC") {
+				if alg.Curve != "" {
+					curve := strings.ToLower(strings.ReplaceAll(alg.Curve, "-", ""))
+					if strings.Contains(curve, "p256") || strings.Contains(curve, "secp256r1") || strings.Contains(curve, "prime256v1") {
+						evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+						appendFinding(payload, pb.RiskSeverityHigh,
+							"CNSA 2.0 requires ECDSA with P-384 or stronger",
+							fmt.Sprintf("%s uses %s curve which is below CNSA 2.0 minimum (P-384). Migrate to ECDSA-P384 or ML-DSA-87.",
+								component.BomRef, alg.Curve),
+							component.BomRef, alg.Name, "JANUS-CNSA-001", "cnsa-curve-upgrade", evidenceIDs)
+					}
+				}
+			}
+			// CNSA-2.0 requires SHA-384 minimum for hashing (SHA-256 is insufficient)
+			if strings.Contains(name, "SHA-256") || strings.Contains(name, "SHA256") {
+				if alg.Role == pb.CryptoRoleHash {
+					evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+					appendFinding(payload, pb.RiskSeverityMedium,
+						"CNSA 2.0 requires SHA-384 or SHA-512 for hash operations",
+						fmt.Sprintf("%s uses SHA-256 which is below CNSA 2.0 minimum for hashing. Upgrade to SHA-384 or SHA-512.",
+							component.BomRef),
+						component.BomRef, alg.Name, "JANUS-CNSA-002", "cnsa-hash-upgrade", evidenceIDs)
+				}
+			}
+			// CNSA-2.0 requires AES-256 everywhere (AES-128 is insufficient)
+			if strings.Contains(name, "AES-128") && alg.Role == pb.CryptoRoleSymmetric {
+				evidenceIDs := findEvidenceIDs(payload, component.BomRef)
+				appendFinding(payload, pb.RiskSeverityHigh,
+					"CNSA 2.0 requires AES-256 for all symmetric encryption",
+					fmt.Sprintf("%s uses AES-128 which is prohibited under CNSA 2.0. Upgrade to AES-256.",
+						component.BomRef),
+					component.BomRef, alg.Name, "JANUS-CNSA-003", "cnsa-symmetric-upgrade", evidenceIDs)
+			}
+		}
+	}
 }
 
 func findEvidenceIDs(payload *pb.CbomTelemetryPayload, assetRef string) []string {
@@ -151,8 +203,12 @@ func findEvidenceIDs(payload *pb.CbomTelemetryPayload, assetRef string) []string
 }
 
 func (e *Engine) assessAlgorithm(payload *pb.CbomTelemetryPayload, component *pb.CbomComponent, alg *pb.CryptoAlgorithm, profile Profile) {
-	// Skip low-confidence findings (test code, comment/string matches)
-	if alg.Confidence > 0 && alg.Confidence < 0.4 {
+	// Skip findings below the profile's MinimumConfidence threshold
+	minConf := profile.MinimumConfidence
+	if minConf <= 0 {
+		minConf = 0.4 // backward compatible default
+	}
+	if alg.Confidence > 0 && alg.Confidence < minConf {
 		return
 	}
 	// Skip test-only code entirely
