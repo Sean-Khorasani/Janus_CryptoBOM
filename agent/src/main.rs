@@ -48,8 +48,48 @@ async fn main() -> Result<()> {
         cfg.report_path = String::new();
         cfg.sarif_path = String::new();
 
-        let mut payload = discovery::collect_static(&cfg)
-            .context("collect telemetry")?;
+        // Run comprehensive offline scan: source + binary + dependency analysis
+        let started = discovery::now_fn();
+        let mut components = Vec::new();
+        let mut evidence = Vec::new();
+
+        // Static source analysis
+        let source_result = discovery::source::scan(&cfg, false).context("source scan")?;
+        components.extend(source_result.components);
+        evidence.extend(source_result.evidence);
+
+        // Binary PE/ELF/Mach-O inspection
+        match discovery::binary::scan(&cfg) {
+            Ok(result) => {
+                components.extend(result.components);
+                evidence.extend(result.evidence);
+            }
+            Err(e) => eprintln!("Binary scan skipped: {e}"),
+        }
+
+        // Dependency manifest analysis
+        match discovery::dependency::scan(&cfg) {
+            Ok(result) => {
+                components.extend(result.components);
+                evidence.extend(result.evidence);
+            }
+            Err(e) => eprintln!("Dependency scan skipped: {e}"),
+        }
+
+        let finished = discovery::now_fn();
+        let cyclone_dx = discovery::cbom::render_cyclonedx(&components, &evidence, started, finished).unwrap_or_default();
+
+        let mut payload = CbomTelemetryPayload {
+            telemetry_id: uuid::Uuid::new_v4().to_string(),
+            host_uuid: "ci-cd-runner".to_string(),
+            scan_started_unix: started,
+            scan_finished_unix: finished,
+            components,
+            findings: Vec::new(),
+            network_observations: Vec::new(),
+            evidence,
+            cyclone_dx_json: cyclone_dx,
+        };
         policy::assess(&mut payload);
 
         if !payload.findings.is_empty() {
@@ -92,23 +132,30 @@ async fn main() -> Result<()> {
     let reg = host::registration(&cfg).context("build registration")?;
     let active = mutation::MutationEngine::new(cfg.clone());
 
-    comms::start_heartbeat_loop(cfg.http_endpoint(), reg.host_uuid.clone()).await;
+    // Heartbeat loop with cancellation support for --once mode
+    let (hb_shutdown_tx, mut hb_shutdown_rx) = tokio::sync::watch::channel(false);
+    comms::start_heartbeat_loop(cfg.http_endpoint(), reg.host_uuid.clone(), hb_shutdown_rx).await;
 
     loop {
         discovery::status::SharedScanState::global().total_files_scanned.store(0, std::sync::atomic::Ordering::SeqCst);
         discovery::status::SharedScanState::global().scan_progress.store(0, std::sync::atomic::Ordering::SeqCst);
 
         let mut payload = discovery::collect(&cfg, &reg.host_uuid).await.context("collect telemetry")?;
-        
+
         let total_scanned = discovery::status::SharedScanState::global().total_files_scanned.load(std::sync::atomic::Ordering::SeqCst);
         db.set_stat("total_files_scanned", total_scanned).ok();
         discovery::status::set_phase("Idle");
 
-        policy::assess(&mut payload);
+        // Policy assessment is server-side during upload; only assess locally for check/offline
+        // (assessment runs server-side in StreamTelemetry to avoid duplication)
         if !cfg.report_path.is_empty() {
+            policy::assess(&mut payload);
             report::write_html_report(&cfg.report_path, &payload).context("write local report")?;
         }
         if !cfg.sarif_path.is_empty() {
+            if payload.findings.is_empty() {
+                policy::assess(&mut payload);
+            }
             report::write_sarif_report(&cfg.sarif_path, &payload).context("write SARIF report")?;
         }
         db.enqueue_payload(&payload).context("queue telemetry")?;
@@ -126,6 +173,8 @@ async fn main() -> Result<()> {
         }
 
         if args.once {
+            // Signal heartbeat loop to stop gracefully
+            let _ = hb_shutdown_tx.send(true);
             break;
         }
         tokio::time::sleep(Duration::from_secs(cfg.scan_interval_seconds)).await;
