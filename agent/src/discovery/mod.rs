@@ -1,14 +1,20 @@
-mod binary;
-mod cbom;
-mod dependency;
+pub mod binary;
+pub mod cbom;
+pub mod dependency;
 pub(crate) mod network;
 mod plugin;
 mod runtime;
-mod source;
+pub mod sidechannel;
+pub mod source;
 pub(crate) mod status;
 mod windows;
 
-use crate::{config::AgentConfig, proto::CbomTelemetryPayload};
+pub use crate::proto::CbomTelemetryPayload;
+
+use crate::{
+    config::AgentConfig,
+    proto::{CbomTelemetryPayload, CryptoFinding},
+};
 use anyhow::Result;
 use uuid::Uuid;
 
@@ -41,6 +47,7 @@ pub async fn collect(cfg: &AgentConfig, host_uuid: &str) -> Result<CbomTelemetry
     let started = now();
     let mut components = Vec::new();
     let mut evidence = Vec::new();
+    let mut findings = Vec::new();
 
     status::log_event("Starting full cryptographic compliance sweep...");
 
@@ -61,6 +68,12 @@ pub async fn collect(cfg: &AgentConfig, host_uuid: &str) -> Result<CbomTelemetry
     status::log_event(&format!("Package dependencies scan completed, cataloged {} components", dependency_result.components.len()));
     components.extend(dependency_result.components);
     evidence.extend(dependency_result.evidence);
+
+    status::set_phase("Side-Channel Analysis");
+    let sidechannel_result = sidechannel::scan(cfg)?;
+    status::log_event(&format!("Side-channel analysis completed, generated {} findings", sidechannel_result.findings.len()));
+    evidence.extend(sidechannel_result.evidence);
+    findings.extend(sidechannel_result.findings);
 
     let mut network_obs = Vec::new();
     if host_uuid != "ci-cd-runner" {
@@ -100,7 +113,7 @@ pub async fn collect(cfg: &AgentConfig, host_uuid: &str) -> Result<CbomTelemetry
         scan_started_unix: started,
         scan_finished_unix: finished,
         components,
-        findings: Vec::new(),
+        findings,
         network_observations: network_obs,
         evidence,
         cyclone_dx_json,
@@ -111,9 +124,10 @@ pub async fn collect(cfg: &AgentConfig, host_uuid: &str) -> Result<CbomTelemetry
 struct ScanResult {
     components: Vec<crate::proto::CbomComponent>,
     evidence: Vec<crate::proto::Evidence>,
+    findings: Vec<CryptoFinding>,
 }
 
-fn now() -> i64 {
+pub fn now_fn() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
