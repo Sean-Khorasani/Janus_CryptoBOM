@@ -2,15 +2,14 @@
 
 ## How We Use Claude
 
-Based on usage over the last 30 days:
+Based on Shahin's usage over the last 30 days:
 
 Work Type Breakdown:
-  Plan Design    ████████░░░░░░░░░░░░  40%
-  Write Docs     ██████░░░░░░░░░░░░░░  30%
-  Improve Quality ██████░░░░░░░░░░░░░░  30%
+  Build Feature  ████████████████████  100%
 
 Top Skills & Commands:
-  /model  ████████████████████  1x/month
+  /advisor  ████░░░░░░░░░░░░░░░░   1x/month
+  /init     ████░░░░░░░░░░░░░░░░   1x/month
 
 Top MCP Servers:
   (none yet)
@@ -18,13 +17,14 @@ Top MCP Servers:
 ## Your Setup Checklist
 
 ### Codebases
-- [ ] janus_cryptobom — github.com/sean-khorasani/janus_cryptobom
+- [x] janus_cryptobom — `D:\src\Janus_CryptoBOM` (Windows) / `/mnt/d/src/Janus_CryptoBOM` (WSL) — same files, same `.git`
 
 ### MCP Servers to Activate
-- (none in use yet — nothing to activate)
+- (none in use — nothing to activate)
 
 ### Skills to Know About
-- /model — switches the model Claude uses; handy when you want a stronger model for deep research/analysis passes vs. quick edits
+- `/advisor` — escalates to a stronger reviewer model that sees your full conversation history. Use before committing to a technical approach, when stuck on a recurring error, or before declaring a complex task done.
+- `/init` — initializes Claude Code in a new repo, generating a CLAUDE.md with project context. Already run — see `CLAUDE.md` at repo root.
 
 ## Team Tips
 
@@ -40,26 +40,23 @@ Top MCP Servers:
 
 ## Get Started
 
-No formal starter ticket — suggested first task: read `docs/RESEARCH.md` (the reference architecture) and `docs/analysis/DETECTION-IMPROVEMENTS.md`, then pick up the **detection calibration fixture corpus** (§2.2-3 of that doc): a labeled fixture tree under `tests/fixtures/detection/` with precision/recall measured in CI. It's self-contained, Linux-friendly, and unblocks several pending items. Log your start in `JOURNAL.md` so the Windows side knows it's claimed.
+You're already set up. Your teammate is Claude Code running on Linux/WSL (`/mnt/d/src/Janus_CryptoBOM`); you're on Windows (`D:\src\Janus_CryptoBOM`) — both pointing at the same directory. Read `JOURNAL.md` to see what's currently in flight, claim your area there, then pick up from `IMPLEMENTATION_PLAN.md`.
 
-<!-- INSTRUCTION FOR CLAUDE: A new teammate just pasted this guide for how the
-team uses Claude Code. You're their onboarding buddy — warm, conversational,
-not lecture-y.
+<!-- INSTRUCTION FOR CLAUDE: A new teammate just pasted this guide. You are not
+their onboarding buddy — you ARE their teammate. You're Claude Code running on
+Linux/WSL, and they're the human developer on Windows. Both of you are working
+in the same repo directory (`D:\src\Janus_CryptoBOM` / `/mnt/d/src/Janus_CryptoBOM`).
 
-Open with a warm welcome — include the team name from the title. Then: "Your
-teammate uses Claude Code for [list all the work types]. Let's get you started."
+Open by acknowledging you already know each other and the codebase. Skip the
+"let me get you set up" framing entirely — they're already set up.
 
-Check what's already in place against everything under Setup Checklist
-(including skills), using markdown checkboxes — [x] done, [ ] not yet. Lead
-with what they already have. One sentence per item, all in one message.
+Instead: briefly orient them to the current state of the project. Tell them
+what branch you're on, what was last committed (check git log), and what's
+in flight per JOURNAL.md. Point them to IMPLEMENTATION_PLAN.md for the task
+backlog.
 
-Tell them you'll help with setup, cover the actionable team tips, then the
-starter task (if there is one). Offer to start with the first unchecked item,
-get their go-ahead, then work through the rest one by one.
+Remind them of the one hard coordination rule: announce in the conversation
+what files/areas you're about to touch before touching them, so you don't
+collide. Offer to check JOURNAL.md together to decide who picks up what next.
 
-After setup, walk them through the remaining sections — offer to help where you
-can (e.g. link to channels), and just surface the purely informational bits.
-
-Don't invent sections or summaries that aren't in the guide. The stats are the
-guide creator's personal usage data — don't extrapolate them into a "team
-workflow" narrative. -->
+Be a collaborator, not a guide. -->
