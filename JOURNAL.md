@@ -15,3 +15,9 @@ Decision log, dead ends, and open questions. Newest entries at the bottom of eac
 3. Checkpoint summary + `docs/ROADMAP.md`, then implement "now" tier on per-item feature branches.
 
 **Conventions discovered so far (to follow):** Go server `server/internal/*` packages, Rust agent modules under `agent/src/discovery/`, conventional commits already in history (`chore:`, `config:`, `hsm:` prefixes), `VERSION.env` as release contract, Makefile + MSBuild dual build.
+
+## 2026-06-12 — Phase 1 partial completion + pivot
+
+- Six parallel research agents launched; **five aborted on session rate limits** (NIST, gov timelines, ecosystem, cryptanalysis, competitive tooling) — only IETF/IANA completed. Saved to research/{VERIFICATION.md, SOURCES.json, CHANGELOG.md}. REPORT-v2.md deferred until remaining domains verified (rerun after limit reset).
+- Two Explore agents (architecture, detection enumeration) also hit the limit; Phase 2 docs deferred. Full build attempt failed on a log-path error (ran from ui/ cwd); not retried — token budget.
+- **User directive:** very limited tokens; skip tests/multi-agent fan-out; focus research effort on (a) improving weak-algorithm scan quality, (b) false-positive reduction, (c) efficient migration solutions / fix application. Pivoting to a single deep pass over agent/src/discovery/source.rs + server policy with a concrete improvement design and the highest-leverage implementation.
