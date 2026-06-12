@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/janus-cbom/janus/server/internal/certmanager"
+	"github.com/janus-cbom/janus/server/internal/config"
 	"github.com/janus-cbom/janus/server/internal/hsm"
+	"github.com/janus-cbom/janus/server/internal/llm"
 	"github.com/janus-cbom/janus/server/internal/orchestrator"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/sandbox"
@@ -19,16 +21,18 @@ import (
 )
 
 type API struct {
-	store       store.Store
-	orch        *orchestrator.Orchestrator
-	engine      *policy.Engine
-	wsHub       *ws.Hub
-	simulator   *sandbox.Simulator
-	confidence  *policy.ConfidenceAnalyzer
-	hsmClient   hsm.HSM
+	store      store.Store
+	orch       *orchestrator.Orchestrator
+	engine     *policy.Engine
+	wsHub      *ws.Hub
+	simulator  *sandbox.Simulator
+	confidence *policy.ConfidenceAnalyzer
+	hsmClient  hsm.HSM
+	cfg        config.Config
+	llmSvc     *llm.Service // set lazily in llmService()
 }
 
-func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine, jwtSecret []byte, disableAuth bool, wsHub *ws.Hub) http.Handler {
+func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine, jwtSecret []byte, disableAuth bool, wsHub *ws.Hub, cfg config.Config) http.Handler {
 	api := &API{
 		store:      store,
 		orch:       orch,
@@ -36,6 +40,7 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 		wsHub:      wsHub,
 		simulator:  sandbox.NewSimulator(store, orch, engine),
 		confidence: policy.NewConfidenceAnalyzer(store),
+		cfg:        cfg,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", api.health)
@@ -68,6 +73,19 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/retention", api.retention)
 	mux.HandleFunc("/api/export/siem", api.exportSIEM)
 	mux.HandleFunc("/api/llm/proxy", api.llmProxy)
+	mux.Handle("/api/llm/test-connection", RequireRole([]string{"admin"})(http.HandlerFunc(api.llmTestConnection)))
+	// LLM analysis pipeline (LLM-08/09/10/11/16)
+	mux.Handle("/api/llm/analyze", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.llmAnalyze)))
+	mux.HandleFunc("/api/llm/jobs", api.llmJobs)
+	mux.HandleFunc("/api/llm/jobs/", api.llmJobs)
+	mux.HandleFunc("/api/llm/verdicts/", api.llmVerdict)
+	mux.HandleFunc("/api/llm/provenance/", api.llmProvenance)
+	mux.HandleFunc("/api/llm/status", api.llmStatus)
+	// Crypto-agility scorecard (AGILE-01/WP-023)
+	mux.HandleFunc("/api/agility/scorecard", api.agilityScorecard)
+	// Migration wave planning (WAVE-01/WP-022)
+	mux.Handle("/api/waves", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.wavePlans)))
+	mux.Handle("/api/waves/", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.wavePlanByID)))
 	mux.HandleFunc("/api/ws", api.wsHub.ServeWS)
 	mux.HandleFunc("/api/report/compliance", api.complianceReport)
 	mux.HandleFunc("/api/lab/simulate", api.pqcLabSimulate)
@@ -84,6 +102,28 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 
 	authWrapper := AuthMiddleware(jwtSecret, disableAuth)
 	return cors(authWrapper(mux))
+}
+
+// spaHandler serves a React SPA from root. Static assets in root are served
+// directly; all other GET requests receive index.html for client-side routing.
+func spaHandler(root string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		fi, err := os.Stat(root)
+		if err != nil || !fi.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		candidate := root + r.URL.Path
+		if _, err := os.Stat(candidate); err == nil {
+			http.ServeFile(w, r, candidate)
+			return
+		}
+		http.ServeFile(w, r, root+"/index.html")
+	})
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
@@ -969,102 +1009,26 @@ func (a *API) llmProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Get LLM config from DB
-	fc, err := a.store.GetFleetConfig(r.Context())
-	if err != nil {
-		writeError(w, err)
+	if a.cfg.LLM.APIKey() == "" {
+		http.Error(w, `{"error":{"message":"LLM provider not configured. Set JANUS_LLM_API_KEY_FILE or JANUS_LLM_API_KEY_ENV on the server."}}`, http.StatusServiceUnavailable)
 		return
 	}
 
-	if fc.LLMApiKey == "" {
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		var reqBody struct {
-			Messages []struct {
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
-			var prompt string
-			for _, m := range reqBody.Messages {
-				prompt += " " + m.Content
-			}
-			lowerPrompt := strings.ToLower(prompt)
-			if strings.Contains(lowerPrompt, "diff") || strings.Contains(lowerPrompt, "patch") || strings.Contains(lowerPrompt, "migrate") || strings.Contains(lowerPrompt, "remediation") {
-				// Tailor patch to the file/algorithm in the prompt
-				algorithm := "RSA"
-				if strings.Contains(lowerPrompt, "md5") {
-					algorithm = "MD5"
-				} else if strings.Contains(lowerPrompt, "sha-1") || strings.Contains(lowerPrompt, "sha1") {
-					algorithm = "SHA-1"
-				} else if strings.Contains(lowerPrompt, "ecdsa") {
-					algorithm = "ECDSA"
-				} else if strings.Contains(lowerPrompt, "ecdh") || strings.Contains(lowerPrompt, "ecdhe") {
-					algorithm = "ECDHE"
-				} else if strings.Contains(lowerPrompt, "dh") {
-					algorithm = "DH"
-				} else if strings.Contains(lowerPrompt, "dsa") {
-					algorithm = "DSA"
-				}
-
-				filename := "main.rs"
-				if idx := strings.Index(lowerPrompt, "from "); idx != -1 {
-					sub := prompt[idx+5:]
-					if endIdx := strings.IndexAny(sub, " \r\n\t:)"); endIdx != -1 {
-						filename = sub[:endIdx]
-					} else {
-						filename = sub
-					}
-					filename = strings.Trim(filename, "'\"`")
-				}
-
-				var diff string
-				if algorithm == "MD5" {
-					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let hasher = MD5::new();\n+let hasher = SHA256::new();\n", filename, filename)
-				} else if algorithm == "SHA-1" {
-					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let hasher = Sha1::new();\n+let hasher = Sha256::new();\n", filename, filename)
-				} else if algorithm == "ECDHE" {
-					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let exchange = ECDHE::new();\n+let exchange = MLKEM768::new();\n", filename, filename)
-				} else {
-					diff = fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-let signer = %s::new();\n+let signer = MLDSA65::new();\n", filename, filename, algorithm)
-				}
-
-				respObj := map[string]interface{}{
-					"choices": []map[string]interface{}{
-						{
-							"message": map[string]interface{}{
-								"role":    "assistant",
-								"content": diff,
-							},
-						},
-					},
-				}
-				writeJSON(w, http.StatusOK, respObj)
-				return
-			}
-		}
-		writeError(w, fmt.Errorf("LLM API key not configured on server"))
-		return
-	}
-
-	url := fc.LLMApiUrl
-	if url == "" {
-		url = "https://api.openai.com/v1"
-	}
-
-	// 2. Forward request to OpenAI
-	req, err := http.NewRequest("POST", url+"/chat/completions", r.Body)
+	// Forward request to the validated LLM provider base URL (SSRF-safe: set at startup via env, not from DB)
+	targetURL := a.cfg.LLM.BaseURL + "/chat/completions"
+	req, err := http.NewRequest(http.MethodPost, targetURL, r.Body)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+fc.LLMApiKey)
+	req.Header.Set("Authorization", "Bearer "+a.cfg.LLM.APIKey())
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	timeout := time.Duration(a.cfg.LLM.TimeoutSeconds) * time.Second
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		writeError(w, err)
@@ -1078,11 +1042,61 @@ func (a *API) llmProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Forward response back to Agent
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
+}
+
+func (a *API) llmTestConnection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	type testResult struct {
+		OK               bool   `json:"ok"`
+		BaseURL          string `json:"base_url,omitempty"`
+		ModelAnalysis    string `json:"model_analysis,omitempty"`
+		ModelRemediation string `json:"model_remediation,omitempty"`
+		Error            string `json:"error,omitempty"`
+	}
+
+	if a.cfg.LLM.APIKey() == "" {
+		writeJSON(w, http.StatusOK, testResult{OK: false, Error: "LLM API key not configured"})
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, a.cfg.LLM.BaseURL+"/models", nil)
+	if err != nil {
+		writeJSON(w, http.StatusOK, testResult{OK: false, Error: err.Error()})
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.LLM.APIKey())
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusOK, testResult{OK: false, Error: err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		writeJSON(w, http.StatusOK, testResult{
+			OK:               true,
+			BaseURL:          a.cfg.LLM.BaseURL,
+			ModelAnalysis:    a.cfg.LLM.ModelAnalysis,
+			ModelRemediation: a.cfg.LLM.ModelRemediation,
+		})
+		return
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	writeJSON(w, http.StatusOK, testResult{
+		OK:    false,
+		Error: fmt.Sprintf("provider returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+	})
 }
 
 func (a *API) fleetProfiles(w http.ResponseWriter, r *http.Request) {

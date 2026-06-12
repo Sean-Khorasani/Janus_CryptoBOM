@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, FileSearch, Gauge, TerminalSquare, Shield, Sliders, Globe, Activity } from "lucide-react";
+import { AlertTriangle, FileSearch, Gauge, TerminalSquare, Shield, Sliders, Globe, Activity, Brain, TrendingUp, Layers } from "lucide-react";
 import { useApi } from "./hooks/useApi";
 import { Header } from "./components/Header";
 import { OverviewView } from "./components/OverviewView";
@@ -8,9 +8,53 @@ import { MigrationConsole } from "./components/MigrationConsole";
 import { ComplianceMatrix } from "./components/ComplianceMatrix";
 import { PolicyStudio } from "./components/PolicyStudio";
 import { FleetManagement } from "./components/FleetManagement";
+import { LLMAnalysis } from "./components/LLMAnalysis";
+import { AgilityDashboard } from "./components/AgilityDashboard";
+import { WavePlanning } from "./components/WavePlanning";
 import { SkipLink } from "./a11y/SkipLink";
 import { useI18n } from "./i18n";
 import type { Locale } from "./i18n/types";
+import { authChangedEvent, hasSession } from "./auth";
+
+const findingStatusesStorageKey = "janus_finding_statuses";
+const lifecycleStatuses = new Set(["accepted", "false-positive", "remediated"]);
+
+function readPersistedFindingStatuses(): Record<string, string> {
+  const statuses: Record<string, string> = {};
+
+  try {
+    const value = localStorage.getItem(findingStatusesStorageKey);
+    if (value) {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        Object.entries(parsed).forEach(([findingId, status]) => {
+          if (findingId.length > 0 && typeof status === "string" && lifecycleStatuses.has(status)) {
+            statuses[findingId] = status;
+          }
+        });
+      }
+    }
+  } catch {
+    // Continue with legacy per-finding entries when the aggregate value is invalid.
+  }
+
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const findingId = localStorage.key(index);
+    if (!findingId || findingId === findingStatusesStorageKey || statuses[findingId]) continue;
+
+    const status = localStorage.getItem(findingId);
+    if (status && lifecycleStatuses.has(status)) statuses[findingId] = status;
+  }
+
+  return statuses;
+}
+
+function persistFindingStatuses(statuses: Record<string, string>) {
+  localStorage.setItem(findingStatusesStorageKey, JSON.stringify(statuses));
+  Object.entries(statuses).forEach(([findingId, status]) => {
+    localStorage.setItem(findingId, status);
+  });
+}
 
 function TabButton({ active, onClick, icon, label, id }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; id: string }) {
   return (
@@ -34,6 +78,7 @@ function TabButton({ active, onClick, icon, label, id }: { active: boolean; onCl
 }
 
 function App() {
+  const [authenticated, setAuthenticated] = useState(hasSession);
   const {
     overview,
     assets,
@@ -52,44 +97,51 @@ function App() {
     fetchAuditLogs,
     fetchAgentDiagnostics,
     updateFindingStatus,
-  } = useApi();
-  const [tab, setTab] = useState<"overview" | "cbom" | "compliance" | "policy" | "migrations" | "fleet">("overview");
+  } = useApi(authenticated);
+  const [tab, setTab] = useState<"overview" | "cbom" | "compliance" | "policy" | "migrations" | "fleet" | "llm" | "agility" | "waves">("overview");
   const { t, locale, setLocale, locales } = useI18n();
 
-  // Initialize statuses from server-side findings data on each load
-  const [statuses, setStatuses] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const updateAuthentication = () => setAuthenticated(hasSession());
+    window.addEventListener(authChangedEvent, updateAuthentication);
+    window.addEventListener("storage", updateAuthentication);
+    return () => {
+      window.removeEventListener(authChangedEvent, updateAuthentication);
+      window.removeEventListener("storage", updateAuthentication);
+    };
+  }, []);
 
-  // Keep statuses in sync with findings from the API
+  const [statuses, setStatuses] = useState<Record<string, string>>(readPersistedFindingStatuses);
+
+  // Server lifecycle state takes precedence when present; persisted state keeps the
+  // dashboard useful while a status write or later refresh is unavailable.
   useEffect(() => {
     const serverStatuses: Record<string, string> = {};
     findings.forEach(f => {
-      if (f.status && f.status !== "open") {
+      if (f.status && lifecycleStatuses.has(f.status)) {
         serverStatuses[f.finding_id] = f.status;
       }
     });
-    // Merge with any pending local changes (optimistic updates)
     setStatuses(prev => {
-      const merged = { ...serverStatuses };
-      // Preserve optimistic updates that haven't been confirmed yet
-      Object.entries(prev).forEach(([id, s]) => {
-        if (!serverStatuses[id] && s) merged[id] = s;
-      });
+      const merged = { ...prev, ...serverStatuses };
+      persistFindingStatuses(merged);
       return merged;
     });
   }, [findings]);
 
   const updateStatus = async (findingId: string, status: string) => {
-    // Optimistic local update
-    setStatuses(prev => ({ ...prev, [findingId]: status }));
+    if (!lifecycleStatuses.has(status)) return;
+
+    setStatuses(prev => {
+      const updated = { ...prev, [findingId]: status };
+      persistFindingStatuses(updated);
+      return updated;
+    });
+
     try {
       await updateFindingStatus(findingId, status);
-    } catch (err) {
-      // Revert on failure
-      setStatuses(prev => {
-        const reverted = { ...prev };
-        delete reverted[findingId];
-        return reverted;
-      });
+    } catch {
+      // The persisted optimistic state remains available for retry/reconciliation.
     }
   };
 
@@ -111,14 +163,17 @@ function App() {
     { id: "policy" as const, label: t("nav.policy_studio"), icon: <Sliders size={16} /> },
     { id: "migrations" as const, label: t("nav.migrations"), icon: <TerminalSquare size={16} /> },
     { id: "fleet" as const, label: t("nav.fleet_command"), icon: <Activity size={16} /> },
+    { id: "agility" as const, label: "Agility", icon: <TrendingUp size={16} /> },
+    { id: "waves" as const, label: "Wave Plans", icon: <Layers size={16} /> },
+    { id: "llm" as const, label: "LLM Analysis", icon: <Brain size={16} /> },
   ];
 
   return (
     <main className="min-h-screen bg-[#f7f8f5] text-[#17211c] dark:bg-[#0d1210] dark:text-[#e8ede9]">
       <SkipLink targetId="main-content" />
-      <Header error={error} />
+      <Header error={error} authenticated={authenticated} />
 
-      <section id="main-content" className="mx-auto max-w-7xl px-5 py-5">
+      {authenticated && <section id="main-content" className="mx-auto max-w-7xl px-5 py-5">
         {error && (
           <div className="mb-4 flex items-center gap-2 rounded-md border border-[#efb7a5] bg-[#fff4ee] px-3 py-2 text-sm text-[#8b2d16]" role="alert">
             <AlertTriangle size={17} aria-hidden="true" />
@@ -181,7 +236,23 @@ function App() {
           <>
             {tab === "overview" && (
               <div role="tabpanel" id="tabpanel-overview" aria-labelledby="tab-overview">
-                <OverviewView overview={overview} score={score} findings={findings} components={components} assets={assets} statuses={statuses} updateStatus={updateStatus} />
+                <OverviewView
+                  overview={overview}
+                  score={score}
+                  findings={findings}
+                  components={components}
+                  assets={assets}
+                  statuses={statuses}
+                  updateStatus={updateStatus}
+                  onOpenFleet={(hostUuid) => {
+                    if (hostUuid) {
+                      const params = new URLSearchParams(window.location.search);
+                      params.set("agent", hostUuid);
+                      window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
+                    }
+                    setTab("fleet");
+                  }}
+                />
               </div>
             )}
             {tab === "cbom" && (
@@ -215,9 +286,24 @@ function App() {
                 />
               </div>
             )}
+            {tab === "agility" && (
+              <div role="tabpanel" id="tabpanel-agility" aria-labelledby="tab-agility">
+                <AgilityDashboard />
+              </div>
+            )}
+            {tab === "waves" && (
+              <div role="tabpanel" id="tabpanel-waves" aria-labelledby="tab-waves">
+                <WavePlanning />
+              </div>
+            )}
+            {tab === "llm" && (
+              <div role="tabpanel" id="tabpanel-llm" aria-labelledby="tab-llm">
+                <LLMAnalysis />
+              </div>
+            )}
           </>
         )}
-      </section>
+      </section>}
     </main>
   );
 }

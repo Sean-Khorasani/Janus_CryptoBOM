@@ -4,22 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/janus-cbom/janus/server/internal/pb"
+	"github.com/janus-cbom/janus/server/internal/scanconfig"
 )
 
 type Store interface {
 	EnsureSchema(context.Context) error
 	Ping(context.Context) error
-	UpsertAgent(context.Context, *pb.AgentRegistration) error
+	UpsertAgent(context.Context, *pb.AgentRegistration, string) error
 	InsertTelemetry(context.Context, *pb.CbomTelemetryPayload) error
 	InsertMigrationCommand(context.Context, *pb.MigrationCommand) error
 	UpdateMigrationStatus(context.Context, *pb.MigrationStatusReport) error
 	Overview(context.Context) (*Overview, error)
 	Assets(context.Context) ([]Asset, error)
+	AssetsPaginated(context.Context, FleetQueryParams) ([]Asset, int64, error)
+	AgentByID(context.Context, string) (*Asset, error)
+	ScanRuns(context.Context, ScanQueryParams) ([]ScanRun, int64, error)
+	ConnectionHistory(context.Context, string, QueryParams) ([]ConnectionSession, int64, error)
+	ReportFindings(context.Context, string, QueryParams) ([]Finding, int64, error)
+	EnqueueAgentCommand(context.Context, *pb.MigrationCommand) error
+	DrainAgentCommands(context.Context, string) ([]*pb.MigrationCommand, error)
+	MarkAgentCommandDelivered(context.Context, string) error
+	MarkAgentCommandExecuting(context.Context, string) error
+	AgentCommand(context.Context, string, string) (*AgentCommand, error)
+	GetAgentScanConfig(context.Context, string) (*AgentScanConfig, error)
+	UpdateAgentScanConfig(context.Context, *AgentScanConfig) error
 	Components(context.Context, int) ([]Component, error)
 	Findings(context.Context, int) ([]Finding, error)
 	FindingsPaginated(ctx context.Context, params QueryParams) ([]Finding, int64, error)
@@ -46,9 +61,23 @@ type Store interface {
 	GetAgentProfileMappings(ctx context.Context) ([]AgentProfileMapping, error)
 	MapAgentToProfile(ctx context.Context, hostUUID, profileID string) error
 	GetConfigForAgent(ctx context.Context, hostUUID string) (*FleetConfig, error)
+	CreateAnalysisJob(ctx context.Context, job *LLMAnalysisJob) error
+	GetAnalysisJob(ctx context.Context, jobID string) (*LLMAnalysisJob, error)
+	UpdateAnalysisJob(ctx context.Context, job *LLMAnalysisJob) error
+	ListAnalysisJobs(ctx context.Context, params QueryParams) ([]LLMAnalysisJob, int64, error)
+	CreateVerdict(ctx context.Context, verdict *LLMVerdict) error
+	GetVerdictByFinding(ctx context.Context, findingID string) (*LLMVerdict, error)
+	GetVerdictByJob(ctx context.Context, jobID string) (*LLMVerdict, error)
+	RecordProvenance(ctx context.Context, prov *LLMProvenance) error
+	ListProvenance(ctx context.Context, findingID string) ([]LLMProvenance, error)
+	UpsertAgilityMetrics(ctx context.Context, metrics *AgilityMetrics) error
+	GetAgilityMetrics(ctx context.Context, hostUUID string) (*AgilityMetrics, error)
+	GetFleetAgilityMetrics(ctx context.Context) ([]AgilityMetrics, error)
+	CreateWavePlan(ctx context.Context, plan *WavePlan) error
+	GetWavePlans(ctx context.Context) ([]WavePlan, error)
+	UpdateWavePlan(ctx context.Context, plan *WavePlan) error
+	DeleteWavePlan(ctx context.Context, planID string) error
 }
-
-
 
 type Postgres struct {
 	pool *pgxpool.Pool
@@ -63,24 +92,33 @@ type Overview struct {
 	OpenMigrations     int64            `json:"open_migrations"`
 	StalledAgents      int64            `json:"stalled_agents"`
 	ReadinessScore     int              `json:"readiness_score"`
-	ReadinessBreakdown map[string]int  `json:"readiness_breakdown"`
+	ReadinessBreakdown map[string]int   `json:"readiness_breakdown"`
 	AlgorithmHistogram map[string]int64 `json:"algorithm_histogram"`
 }
 
 type Asset struct {
-	HostUUID          string    `json:"host_uuid"`
-	Hostname          string    `json:"hostname"`
-	OSName            string    `json:"os_name"`
-	OSVersion         string    `json:"os_version"`
-	Arch              string    `json:"arch"`
-	ExecutionMode     int32     `json:"execution_mode"`
-	LastSeen          time.Time `json:"last_seen"`
-	ScanProgress      int       `json:"scan_progress"`
-	CurrentScanPath   string    `json:"current_scan_path"`
-	CPUUsage          float64   `json:"cpu_usage"`
-	MemUsage          float64   `json:"mem_usage"`
-	Status            string    `json:"status"`
-	TotalFilesScanned int       `json:"total_files_scanned"`
+	HostUUID          string     `json:"host_uuid"`
+	Hostname          string     `json:"hostname"`
+	OSName            string     `json:"os_name"`
+	OSVersion         string     `json:"os_version"`
+	Arch              string     `json:"arch"`
+	ExecutionMode     int32      `json:"execution_mode"`
+	LastSeen          time.Time  `json:"last_seen"`
+	ScanProgress      int        `json:"scan_progress"`
+	CurrentScanPath   string     `json:"current_scan_path"`
+	CPUUsage          float64    `json:"cpu_usage"`
+	MemUsage          float64    `json:"mem_usage"`
+	Status            string     `json:"status"`
+	TotalFilesScanned int        `json:"total_files_scanned"`
+	AgentVersion      string     `json:"agent_version"`
+	ObservedIP        string     `json:"observed_ip"`
+	DNSName           string     `json:"dns_name"`
+	FirstRegisteredAt time.Time  `json:"first_registered_at"`
+	LastRegisteredAt  time.Time  `json:"last_registered_at"`
+	LastScanID        string     `json:"last_scan_id"`
+	LastScanFinished  *time.Time `json:"last_scan_finished,omitempty"`
+	LastScanSeverity  int        `json:"last_scan_severity"`
+	OpenFindings      int        `json:"open_findings"`
 }
 
 type AgentHeartbeat struct {
@@ -91,32 +129,118 @@ type AgentHeartbeat struct {
 	MemUsage          float64 `json:"mem_usage"`
 	Status            string  `json:"status"`
 	TotalFilesScanned int     `json:"total_files_scanned"`
+	MetricsPresent    *bool   `json:"metrics_present,omitempty"`
 }
 
 type Finding struct {
-	FindingID        string    `json:"finding_id"`
-	HostUUID         string    `json:"host_uuid"`
-	Severity         int32     `json:"severity"`
-	Title            string    `json:"title"`
-	Description      string    `json:"description"`
-	AssetRef         string    `json:"asset_ref"`
-	Algorithm        string    `json:"algorithm"`
-	PolicyRuleID     string    `json:"policy_rule_id"`
-	MigrationProfile string    `json:"migration_profile"`
-	Status           string    `json:"status"` // open | accepted_risk | false_positive | remediated
-	UpdatedBy        string    `json:"updated_by"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	CreatedAt        time.Time `json:"created_at"`
-	Confidence       float64   `json:"confidence"`
+	FindingID        string     `json:"finding_id"`
+	HostUUID         string     `json:"host_uuid"`
+	Severity         int32      `json:"severity"`
+	Title            string     `json:"title"`
+	Description      string     `json:"description"`
+	AssetRef         string     `json:"asset_ref"`
+	Algorithm        string     `json:"algorithm"`
+	PolicyRuleID     string     `json:"policy_rule_id"`
+	MigrationProfile string     `json:"migration_profile"`
+	Status           string     `json:"status"` // open | accepted_risk | false_positive | remediated
+	UpdatedBy        string     `json:"updated_by"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	CreatedAt        time.Time  `json:"created_at"`
+	Confidence       float64    `json:"confidence"`
+	TelemetryID      string     `json:"telemetry_id"`
+	Hostname         string     `json:"hostname"`
+	AgentVersion     string     `json:"agent_version"`
+	ScanFinished     *time.Time `json:"scan_finished,omitempty"`
 }
 
 // QueryParams is used for paginated, filtered, sorted queries.
 type QueryParams struct {
-	Limit  int
-	Offset int
-	Sort   string // column name
-	Order  string // asc | desc
-	Search string // keyword filter
+	Limit     int
+	Offset    int
+	Sort      string // column name
+	Order     string // asc | desc
+	Search    string // keyword filter
+	HostUUID  string
+	ScanID    string
+	Algorithm string
+	AssetRef  string
+	DateFrom  *time.Time
+	DateTo    *time.Time
+}
+
+type FleetQueryParams struct {
+	QueryParams
+	Status   string
+	OSName   string
+	Severity int
+	DateFrom *time.Time
+	DateTo   *time.Time
+}
+
+type ScanQueryParams struct {
+	QueryParams
+	HostUUID string
+	Severity int
+	DateFrom *time.Time
+	DateTo   *time.Time
+}
+
+type ScanRun struct {
+	ScanID                  string    `json:"scan_id"`
+	HostUUID                string    `json:"host_uuid"`
+	Hostname                string    `json:"hostname"`
+	AgentVersion            string    `json:"agent_version"`
+	OSName                  string    `json:"os_name"`
+	OSVersion               string    `json:"os_version"`
+	ObservedIP              string    `json:"observed_ip"`
+	ScanStarted             time.Time `json:"scan_started"`
+	ScanFinished            time.Time `json:"scan_finished"`
+	ReceivedAt              time.Time `json:"received_at"`
+	Status                  string    `json:"status"`
+	ComponentCount          int       `json:"component_count"`
+	FindingCount            int       `json:"finding_count"`
+	CriticalCount           int       `json:"critical_count"`
+	HighCount               int       `json:"high_count"`
+	MaxSeverity             int       `json:"max_severity"`
+	NetworkObservationCount int       `json:"network_observation_count"`
+}
+
+type ConnectionSession struct {
+	SessionID      string     `json:"session_id"`
+	HostUUID       string     `json:"host_uuid"`
+	ConnectedAt    time.Time  `json:"connected_at"`
+	DisconnectedAt *time.Time `json:"disconnected_at,omitempty"`
+	LastSeen       time.Time  `json:"last_seen"`
+	ObservedIP     string     `json:"observed_ip"`
+	AgentVersion   string     `json:"agent_version"`
+	Status         string     `json:"status"`
+}
+
+type AgentCommand struct {
+	CommandID   string     `json:"command_id"`
+	HostUUID    string     `json:"host_uuid"`
+	Command     string     `json:"command"`
+	Status      string     `json:"status"`
+	QueuedAt    time.Time  `json:"queued_at"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
+type AgentScanConfig struct {
+	HostUUID                    string   `json:"host_uuid"`
+	Configured                  bool     `json:"configured"`
+	PolicyVersion               string   `json:"policy_version"`
+	ScanRoots                   []string `json:"scan_roots"`
+	ExcludeDirs                 []string `json:"exclude_dirs"`
+	IncludeExtensions           []string `json:"include_extensions"`
+	ScanIntervalSeconds         uint64   `json:"scan_interval_seconds"`
+	MaxFileBytes                uint64   `json:"max_file_bytes"`
+	MaxBinaryBytes              uint64   `json:"max_binary_bytes"`
+	NetworkTargets              []string `json:"network_targets"`
+	EnableRuntimeDiscovery      bool     `json:"enable_runtime_discovery"`
+	EnableProcessMemoryScraping bool     `json:"enable_process_memory_scraping"`
+	EnablePluginDiscovery       bool     `json:"enable_plugin_discovery"`
+	EnableActiveTLSProbing      bool     `json:"enable_active_tls_probing"`
 }
 
 type Component struct {
@@ -135,19 +259,19 @@ type Component struct {
 }
 
 type Migration struct {
-	CommandID        string    `json:"command_id"`
-	HostUUID         string    `json:"host_uuid"`
-	TargetService    string    `json:"target_service"`
-	MigrationProfile string    `json:"migration_profile"`
-	TargetKEM        string    `json:"target_kem"`
-	TargetSignature  string    `json:"target_signature"`
-	ConfigPath       string    `json:"config_path"`
-	State            int32     `json:"state"`
-	DryRun           bool      `json:"dry_run"`
-	IssuedAt         time.Time `json:"issued_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	LastError        string                `json:"last_error"`
-	Output           string                `json:"output"`
+	CommandID        string                 `json:"command_id"`
+	HostUUID         string                 `json:"host_uuid"`
+	TargetService    string                 `json:"target_service"`
+	MigrationProfile string                 `json:"migration_profile"`
+	TargetKEM        string                 `json:"target_kem"`
+	TargetSignature  string                 `json:"target_signature"`
+	ConfigPath       string                 `json:"config_path"`
+	State            int32                  `json:"state"`
+	DryRun           bool                   `json:"dry_run"`
+	IssuedAt         time.Time              `json:"issued_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
+	LastError        string                 `json:"last_error"`
+	Output           string                 `json:"output"`
 	ObservedTLS      *pb.NetworkObservation `json:"observed_tls,omitempty"`
 }
 
@@ -166,14 +290,83 @@ type RetentionPolicy struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-
 // PostgresConfig holds database connection and pool settings.
 type PostgresConfig struct {
-	DatabaseURL      string
-	MaxConns         int
-	MinConns         int
-	MaxConnLifetime  time.Duration
-	MaxConnIdleTime  time.Duration
+	DatabaseURL     string
+	MaxConns        int
+	MinConns        int
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
+}
+
+type LLMAnalysisJob struct {
+	JobID       string     `json:"job_id"`
+	FindingID   string     `json:"finding_id"`
+	JobType     string     `json:"job_type"`
+	Status      string     `json:"status"`
+	ErrorMsg    string     `json:"error,omitempty"`
+	CreatedBy   string     `json:"created_by"`
+	CreatedAt   time.Time  `json:"created_at"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
+type LLMVerdict struct {
+	VerdictID         string    `json:"verdict_id"`
+	JobID             string    `json:"job_id"`
+	FindingID         string    `json:"finding_id"`
+	Verdict           string    `json:"verdict"`
+	AdjustedSeverity  *int      `json:"adjusted_severity,omitempty"`
+	Confidence        float64   `json:"confidence"`
+	Reasoning         string    `json:"reasoning"`
+	EvidenceCitations []string  `json:"evidence_citations"`
+	AbstentionReason  string    `json:"abstention_reason,omitempty"`
+	Model             string    `json:"model"`
+	PromptVersion     string    `json:"prompt_version"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+type LLMProvenance struct {
+	ProvenanceID  string    `json:"provenance_id"`
+	JobID         string    `json:"job_id"`
+	FindingID     string    `json:"finding_id"`
+	Provider      string    `json:"provider"`
+	Model         string    `json:"model"`
+	PromptName    string    `json:"prompt_name"`
+	PromptVersion string    `json:"prompt_version"`
+	InputHash     string    `json:"input_hash"`
+	OutputHash    string    `json:"output_hash"`
+	TokensIn      int       `json:"tokens_input"`
+	TokensOut     int       `json:"tokens_output"`
+	LatencyMS     int       `json:"latency_ms"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type AgilityMetrics struct {
+	MetricID                   string     `json:"metric_id"`
+	HostUUID                   string     `json:"host_uuid"`
+	MeasurementDate            time.Time  `json:"measurement_date"`
+	TTSADays                   *float64   `json:"ttsa_days,omitempty"`
+	HardcodeIndex              float64    `json:"hardcode_index"`
+	NegotiationCoverage        float64    `json:"negotiation_coverage"`
+	ProfileAdoptionLatencyDays *float64   `json:"profile_adoption_latency_days,omitempty"`
+	BlastRadiusScore           float64    `json:"blast_radius_score"`
+	MeasuredAt                 time.Time  `json:"measured_at"`
+}
+
+type WavePlan struct {
+	PlanID           string     `json:"plan_id"`
+	Name             string     `json:"name"`
+	Description      string     `json:"description"`
+	WaveNumber       int        `json:"wave_number"`
+	AssetIDs         []string   `json:"asset_ids"`
+	AlgorithmTargets []string   `json:"algorithm_targets"`
+	StartDate        *time.Time `json:"start_date,omitempty"`
+	TargetDate       *time.Time `json:"target_date,omitempty"`
+	Status           string     `json:"status"`
+	CreatedBy        string     `json:"created_by"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 func NewPostgres(ctx context.Context, cfg PostgresConfig) (*Postgres, error) {
@@ -331,16 +524,266 @@ CREATE TABLE IF NOT EXISTS advisory_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_advisory_cache_lookup ON advisory_cache(package_name, package_version, ecosystem);
 `},
+	{10, "Agent fleet identity and immutable scan history", `
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS agent_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS observed_ip TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS dns_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS first_registered_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS last_registered_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+CREATE TABLE IF NOT EXISTS agent_connection_sessions (
+  session_id TEXT PRIMARY KEY,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  connected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  disconnected_at TIMESTAMPTZ,
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+  observed_ip TEXT NOT NULL DEFAULT '',
+  agent_version TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'online'
+);
+CREATE TABLE IF NOT EXISTS scan_runs (
+  scan_id TEXT PRIMARY KEY,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  agent_version TEXT NOT NULL DEFAULT '',
+  os_name TEXT NOT NULL DEFAULT '',
+  os_version TEXT NOT NULL DEFAULT '',
+  observed_ip TEXT NOT NULL DEFAULT '',
+  scan_started TIMESTAMPTZ NOT NULL,
+  scan_finished TIMESTAMPTZ NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status TEXT NOT NULL DEFAULT 'completed',
+  component_count INTEGER NOT NULL DEFAULT 0,
+  finding_count INTEGER NOT NULL DEFAULT 0,
+  critical_count INTEGER NOT NULL DEFAULT 0,
+  high_count INTEGER NOT NULL DEFAULT 0,
+  max_severity INTEGER NOT NULL DEFAULT 0,
+  network_observation_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS finding_occurrences (
+  occurrence_id TEXT PRIMARY KEY,
+  scan_id TEXT NOT NULL REFERENCES scan_runs(scan_id) ON DELETE CASCADE,
+  finding_id TEXT NOT NULL,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  severity INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  asset_ref TEXT NOT NULL,
+  algorithm TEXT NOT NULL,
+  policy_rule_id TEXT NOT NULL,
+  migration_profile TEXT NOT NULL,
+  evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  confidence DOUBLE PRECISION NOT NULL DEFAULT 0.82,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS agent_progress_events (
+  event_id TEXT PRIMARY KEY,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  scan_id TEXT,
+  progress INTEGER NOT NULL DEFAULT 0,
+  current_path TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  files_processed INTEGER NOT NULL DEFAULT 0,
+  cpu_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
+  mem_usage DOUBLE PRECISION NOT NULL DEFAULT 0,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_assets_fleet_last_seen ON assets(last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_assets_fleet_status ON assets(status, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_assets_fleet_os ON assets(os_name, os_version);
+CREATE INDEX IF NOT EXISTS idx_connections_host_time ON agent_connection_sessions(host_uuid, connected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scan_runs_host_time ON scan_runs(host_uuid, scan_finished DESC);
+CREATE INDEX IF NOT EXISTS idx_scan_runs_severity_time ON scan_runs(max_severity DESC, scan_finished DESC);
+CREATE INDEX IF NOT EXISTS idx_occurrences_scan_severity ON finding_occurrences(scan_id, severity DESC);
+CREATE INDEX IF NOT EXISTS idx_occurrences_host_time ON finding_occurrences(host_uuid, created_at DESC);
+`},
+	{11, "Backfill historical scan summaries and current finding provenance", `
+INSERT INTO scan_runs (scan_id, host_uuid, agent_version, os_name, os_version, observed_ip, scan_started, scan_finished, received_at, status, component_count, finding_count, critical_count, high_count, max_severity, network_observation_count)
+SELECT tp.telemetry_id, tp.host_uuid, a.agent_version, a.os_name, a.os_version, a.observed_ip,
+       tp.scan_started, tp.scan_finished, tp.received_at, 'completed', tp.component_count, tp.finding_count,
+       COALESCE((SELECT count(*) FROM crypto_findings cf WHERE cf.telemetry_id=tp.telemetry_id AND cf.severity>=5),0),
+       COALESCE((SELECT count(*) FROM crypto_findings cf WHERE cf.telemetry_id=tp.telemetry_id AND cf.severity=4),0),
+       COALESCE((SELECT max(severity) FROM crypto_findings cf WHERE cf.telemetry_id=tp.telemetry_id),0),
+       tp.network_observation_count
+FROM telemetry_payloads tp JOIN assets a ON a.host_uuid=tp.host_uuid
+ON CONFLICT (scan_id) DO NOTHING;
+INSERT INTO finding_occurrences (occurrence_id, scan_id, finding_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id, migration_profile, evidence_ids, confidence, created_at)
+SELECT cf.telemetry_id || ':' || cf.finding_id, cf.telemetry_id, cf.finding_id, cf.host_uuid, cf.severity, cf.title, cf.description,
+       cf.asset_ref, cf.algorithm, cf.policy_rule_id, cf.migration_profile, cf.evidence_ids, cf.confidence, cf.created_at
+FROM crypto_findings cf
+ON CONFLICT (occurrence_id) DO NOTHING;
+`},
+	{12, "Normalize scan components for indexed contextual queries", `
+CREATE TABLE IF NOT EXISTS scan_components (
+  scan_id TEXT NOT NULL REFERENCES scan_runs(scan_id) ON DELETE CASCADE,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  bom_ref TEXT NOT NULL,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL DEFAULT '',
+  component_type TEXT NOT NULL DEFAULT '',
+  file_path TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT '',
+  algorithms JSONB NOT NULL DEFAULT '[]'::jsonb,
+  dependencies JSONB NOT NULL DEFAULT '[]'::jsonb,
+  reachable BOOLEAN NOT NULL DEFAULT false,
+  scan_finished TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (scan_id, bom_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_scan_components_host_time ON scan_components(host_uuid, scan_finished DESC);
+CREATE INDEX IF NOT EXISTS idx_scan_components_file ON scan_components(file_path);
+`},
+	{13, "Durable agent command queue", `
+CREATE TABLE IF NOT EXISTS agent_commands (
+  command_id TEXT PRIMARY KEY,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  command_payload JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  delivered_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_agent_commands_delivery ON agent_commands(host_uuid, status, queued_at);
+`},
+	{14, "Separate managed agents from synthetic scan identities", `
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS managed_agent BOOLEAN NOT NULL DEFAULT true;
+UPDATE assets SET managed_agent=false WHERE host_uuid='ci-cd-runner';
+CREATE INDEX IF NOT EXISTS idx_assets_managed_last_seen ON assets(managed_agent, last_seen DESC);
+`},
+	{15, "Track command completion and per-agent scan configuration", `
+ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS agent_scan_configs (
+  host_uuid TEXT PRIMARY KEY REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`},
+	{16, "Remove fabricated reconnect sessions", `
+DELETE FROM agent_connection_sessions WHERE status='reconnected';
+`},
+	{17, "Compact duplicate idle progress events", `
+DELETE FROM agent_progress_events older
+USING agent_progress_events newer
+WHERE older.host_uuid=newer.host_uuid
+  AND older.status='Idle' AND newer.status='Idle'
+  AND older.progress=newer.progress
+  AND older.current_path=newer.current_path
+  AND older.files_processed=newer.files_processed
+  AND older.recorded_at < newer.recorded_at;
+CREATE INDEX IF NOT EXISTS idx_agent_progress_host_time ON agent_progress_events(host_uuid, recorded_at DESC);
+`},
+	{18, "LLM analysis job queue", `
+CREATE TABLE IF NOT EXISTS llm_analysis_jobs (
+  job_id TEXT PRIMARY KEY,
+  finding_id TEXT NOT NULL,
+  job_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  error_msg TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_llm_jobs_finding ON llm_analysis_jobs(finding_id);
+CREATE INDEX IF NOT EXISTS idx_llm_jobs_status ON llm_analysis_jobs(status, created_at DESC);
+`},
+	{19, "LLM structured verdicts", `
+CREATE TABLE IF NOT EXISTS llm_verdicts (
+  verdict_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES llm_analysis_jobs(job_id) ON DELETE CASCADE,
+  finding_id TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  adjusted_severity INTEGER,
+  confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+  reasoning TEXT NOT NULL DEFAULT '',
+  evidence_citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+  abstention_reason TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_verdicts_job ON llm_verdicts(job_id);
+CREATE INDEX IF NOT EXISTS idx_llm_verdicts_finding ON llm_verdicts(finding_id, created_at DESC);
+`},
+	{20, "LLM call provenance audit trail", `
+CREATE TABLE IF NOT EXISTS llm_provenance (
+  provenance_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES llm_analysis_jobs(job_id) ON DELETE CASCADE,
+  finding_id TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  prompt_name TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  input_hash TEXT NOT NULL DEFAULT '',
+  output_hash TEXT NOT NULL DEFAULT '',
+  tokens_in INTEGER NOT NULL DEFAULT 0,
+  tokens_out INTEGER NOT NULL DEFAULT 0,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_llm_provenance_job ON llm_provenance(job_id);
+CREATE INDEX IF NOT EXISTS idx_llm_provenance_finding ON llm_provenance(finding_id);
+`},
+	{21, "Crypto agility metrics per host", `
+CREATE TABLE IF NOT EXISTS agility_metrics (
+  metric_id TEXT PRIMARY KEY,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  measurement_date DATE NOT NULL,
+  ttsa_days DOUBLE PRECISION,
+  hardcode_index DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+  negotiation_coverage DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+  profile_adoption_latency_days DOUBLE PRECISION,
+  blast_radius_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+  measured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (host_uuid, measurement_date)
+);
+CREATE INDEX IF NOT EXISTS idx_agility_metrics_host ON agility_metrics(host_uuid, measurement_date DESC);
+`},
+	{22, "Migration wave plans", `
+CREATE TABLE IF NOT EXISTS wave_plans (
+  plan_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  wave_number INTEGER NOT NULL DEFAULT 1,
+  asset_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  algorithm_targets JSONB NOT NULL DEFAULT '[]'::jsonb,
+  start_date DATE,
+  target_date DATE,
+  status TEXT NOT NULL DEFAULT 'planned',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_wave_plans_status ON wave_plans(status, wave_number);
+`},
+	{23, "Finding occurrence lifecycle tracking (WP-013)", `
+ALTER TABLE finding_occurrences
+  ADD COLUMN IF NOT EXISTS detection_method TEXT NOT NULL DEFAULT 'regex_match',
+  ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS reopened_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS reopen_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_occurrences_finding_time ON finding_occurrences(finding_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS finding_lifecycle_events (
+  event_id TEXT PRIMARY KEY,
+  finding_id TEXT NOT NULL,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  from_status TEXT NOT NULL DEFAULT '',
+  to_status TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT 'system',
+  reason TEXT NOT NULL DEFAULT '',
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_finding ON finding_lifecycle_events(finding_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_host ON finding_lifecycle_events(host_uuid, occurred_at DESC);
+`},
 }
 
-func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration) error {
+func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration, observedIP string) error {
 	caps, err := json.Marshal(reg.Capabilities)
 	if err != nil {
 		return err
 	}
 	_, err = p.pool.Exec(ctx, `
-INSERT INTO assets (host_uuid, hostname, os_name, os_version, arch, execution_mode, capabilities, last_seen)
-VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())
+INSERT INTO assets (host_uuid, hostname, os_name, os_version, arch, execution_mode, capabilities, last_seen, agent_version, observed_ip, dns_name, first_registered_at, last_registered_at, managed_agent)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), $8, $9, $2, now(), now(), true)
 ON CONFLICT (host_uuid) DO UPDATE SET
   hostname = EXCLUDED.hostname,
   os_name = EXCLUDED.os_name,
@@ -348,8 +791,37 @@ ON CONFLICT (host_uuid) DO UPDATE SET
   arch = EXCLUDED.arch,
   execution_mode = EXCLUDED.execution_mode,
   capabilities = EXCLUDED.capabilities,
+  agent_version = EXCLUDED.agent_version,
+  observed_ip = EXCLUDED.observed_ip,
+  dns_name = EXCLUDED.dns_name,
+  managed_agent = true,
+  last_registered_at = now(),
   last_seen = now()`,
-		reg.HostUuid, reg.Hostname, reg.OsName, reg.OsVersion, reg.Arch, reg.ExecutionMode, string(caps))
+		reg.HostUuid, reg.Hostname, reg.OsName, reg.OsVersion, reg.Arch, reg.ExecutionMode, string(caps), reg.AgentVersion, observedIP)
+	if err != nil {
+		return err
+	}
+	tag, err := p.pool.Exec(ctx, `UPDATE agent_connection_sessions
+SET last_seen=now(), observed_ip=$2, agent_version=$3
+WHERE session_id=(
+  SELECT session_id FROM agent_connection_sessions
+  WHERE host_uuid=$1 AND disconnected_at IS NULL AND last_seen >= now() - interval '30 seconds'
+  ORDER BY connected_at DESC LIMIT 1
+)`, reg.HostUuid, observedIP, reg.AgentVersion)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	_, err = p.pool.Exec(ctx, `UPDATE agent_connection_sessions
+SET disconnected_at=COALESCE(disconnected_at,last_seen), status='disconnected'
+WHERE host_uuid=$1 AND disconnected_at IS NULL`, reg.HostUuid)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx, `INSERT INTO agent_connection_sessions (session_id, host_uuid, observed_ip, agent_version)
+VALUES ($2, $1, $3, $4)`, reg.HostUuid, uuid.NewString(), observedIP, reg.AgentVersion)
 	return err
 }
 
@@ -385,6 +857,37 @@ ON CONFLICT (telemetry_id) DO NOTHING`,
 		cycloneDX,
 		string(payloadJSON),
 	)
+	if err != nil {
+		return err
+	}
+	_, _ = tx.Exec(ctx, `UPDATE agent_commands SET status='completed', completed_at=now()
+WHERE host_uuid=$1 AND status='executing'`, payload.HostUuid)
+
+	var criticalCount, highCount, maxSeverity int
+	for _, finding := range payload.Findings {
+		severity := int(finding.Severity)
+		if severity > maxSeverity {
+			maxSeverity = severity
+		}
+		if severity >= int(pb.RiskSeverityCritical) {
+			criticalCount++
+		} else if severity == int(pb.RiskSeverityHigh) {
+			highCount++
+		}
+	}
+	_, err = tx.Exec(ctx, `
+INSERT INTO scan_runs (
+  scan_id, host_uuid, agent_version, os_name, os_version, observed_ip,
+  scan_started, scan_finished, received_at, status, component_count, finding_count,
+  critical_count, high_count, max_severity, network_observation_count
+)
+SELECT $1, a.host_uuid, a.agent_version, a.os_name, a.os_version, a.observed_ip,
+       to_timestamp($2), to_timestamp($3), now(), 'completed', $4, $5, $6, $7, $8, $9
+FROM assets a WHERE a.host_uuid=$10
+ON CONFLICT (scan_id) DO NOTHING`,
+		payload.TelemetryId, payload.ScanStartedUnix, payload.ScanFinishedUnix,
+		len(payload.Components), len(payload.Findings), criticalCount, highCount, maxSeverity,
+		len(payload.NetworkObservations), payload.HostUuid)
 	if err != nil {
 		return err
 	}
@@ -436,6 +939,37 @@ WHERE crypto_findings.status = 'open'`,
 		if err != nil {
 			return err
 		}
+		_, err = tx.Exec(ctx, `
+INSERT INTO finding_occurrences (
+  occurrence_id, scan_id, finding_id, host_uuid, severity, title, description,
+  asset_ref, algorithm, policy_rule_id, migration_profile, evidence_ids, confidence
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
+ON CONFLICT (occurrence_id) DO NOTHING`,
+			payload.TelemetryId+":"+f.FindingId, payload.TelemetryId, f.FindingId, payload.HostUuid,
+			f.Severity, f.Title, f.Description, f.AssetRef, f.Algorithm, f.PolicyRuleId,
+			f.MigrationProfile, string(evidenceIDs), confidence)
+		if err != nil {
+			return err
+		}
+	}
+	for _, component := range payload.Components {
+		algorithms := make([]string, 0, len(component.Algorithms))
+		for _, algorithm := range component.Algorithms {
+			if algorithm.Name != "" {
+				algorithms = append(algorithms, algorithm.Name)
+			}
+		}
+		algorithmJSON, _ := json.Marshal(algorithms)
+		dependencyJSON, _ := json.Marshal(component.Dependencies)
+		_, err = tx.Exec(ctx, `INSERT INTO scan_components
+(scan_id,host_uuid,bom_ref,name,version,component_type,file_path,language,algorithms,dependencies,reachable,scan_finished)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,to_timestamp($12))
+ON CONFLICT (scan_id,bom_ref) DO NOTHING`,
+			payload.TelemetryId, payload.HostUuid, component.BomRef, component.Name, component.Version, component.ComponentType,
+			component.FilePath, component.Language, string(algorithmJSON), string(dependencyJSON), component.Reachable, payload.ScanFinishedUnix)
+		if err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit(ctx)
@@ -478,6 +1012,18 @@ WHERE command_id = $1`,
 		report.Output,
 		obsJSON,
 	)
+	status := ""
+	switch report.State {
+	case int32(pb.MigrationStateApplying):
+		status = "executing"
+	case int32(pb.MigrationStateSucceeded):
+		status = "completed"
+	case int32(pb.MigrationStateFailed):
+		status = "failed"
+	}
+	if status != "" {
+		_, _ = p.pool.Exec(ctx, `UPDATE agent_commands SET status=$2, completed_at=CASE WHEN $2 IN ('completed','failed') THEN now() ELSE completed_at END WHERE command_id=$1`, report.CommandId, status)
+	}
 	return err
 }
 
@@ -506,7 +1052,7 @@ LIMIT 1`, hostUUID).Scan(&raw)
 
 func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
 	out := &Overview{AlgorithmHistogram: map[string]int64{}}
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets`).Scan(&out.Assets); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE managed_agent`).Scan(&out.Assets); err != nil {
 		return nil, err
 	}
 	if err := p.pool.QueryRow(ctx, `SELECT COALESCE(sum(component_count),0), COALESCE(sum(finding_count),0) FROM telemetry_payloads`).Scan(&out.Components, &out.Findings); err != nil {
@@ -522,7 +1068,7 @@ func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
 		return nil, err
 	}
 	// Count stalled agents (last_seen > 5 minutes ago)
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE last_seen < now() - interval '5 minutes'`).Scan(&out.StalledAgents); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE managed_agent AND last_seen < now() - interval '5 minutes'`).Scan(&out.StalledAgents); err != nil {
 		out.StalledAgents = 0
 	}
 
@@ -564,20 +1110,367 @@ func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
 }
 
 func (p *Postgres) Assets(ctx context.Context) ([]Asset, error) {
-	rows, err := p.pool.Query(ctx, `SELECT host_uuid, hostname, os_name, os_version, arch, execution_mode, last_seen, scan_progress, current_scan_path, cpu_usage, mem_usage, status, total_files_scanned FROM assets ORDER BY last_seen DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	assets, _, err := p.AssetsPaginated(ctx, FleetQueryParams{QueryParams: QueryParams{Limit: 5000, Sort: "last_seen", Order: "desc"}})
+	return assets, err
+}
+
+const assetSelect = `
+SELECT a.host_uuid, a.hostname, a.os_name, a.os_version, a.arch, a.execution_mode,
+       a.last_seen, a.scan_progress, a.current_scan_path, a.cpu_usage, a.mem_usage,
+       CASE WHEN a.last_seen < now() - interval '5 minutes' THEN 'offline' ELSE a.status END,
+       a.total_files_scanned, a.agent_version, a.observed_ip, a.dns_name,
+       a.first_registered_at, a.last_registered_at,
+       COALESCE(sr.scan_id,''), sr.scan_finished, COALESCE(sr.max_severity,0),
+       COALESCE((SELECT count(*) FROM crypto_findings cf WHERE cf.host_uuid=a.host_uuid AND cf.status='open'),0)
+FROM assets a
+LEFT JOIN LATERAL (
+  SELECT scan_id, scan_finished, max_severity FROM scan_runs
+  WHERE host_uuid=a.host_uuid ORDER BY scan_finished DESC LIMIT 1
+) sr ON true`
+
+func scanAsset(rows pgx.Rows) ([]Asset, error) {
 	var assets []Asset
 	for rows.Next() {
 		var a Asset
-		if err := rows.Scan(&a.HostUUID, &a.Hostname, &a.OSName, &a.OSVersion, &a.Arch, &a.ExecutionMode, &a.LastSeen, &a.ScanProgress, &a.CurrentScanPath, &a.CPUUsage, &a.MemUsage, &a.Status, &a.TotalFilesScanned); err != nil {
+		if err := rows.Scan(
+			&a.HostUUID, &a.Hostname, &a.OSName, &a.OSVersion, &a.Arch, &a.ExecutionMode,
+			&a.LastSeen, &a.ScanProgress, &a.CurrentScanPath, &a.CPUUsage, &a.MemUsage,
+			&a.Status, &a.TotalFilesScanned, &a.AgentVersion, &a.ObservedIP, &a.DNSName,
+			&a.FirstRegisteredAt, &a.LastRegisteredAt, &a.LastScanID, &a.LastScanFinished,
+			&a.LastScanSeverity, &a.OpenFindings,
+		); err != nil {
 			return nil, err
 		}
 		assets = append(assets, a)
 	}
 	return assets, rows.Err()
+}
+
+func (p *Postgres) AssetsPaginated(ctx context.Context, params FleetQueryParams) ([]Asset, int64, error) {
+	if params.Limit <= 0 || params.Limit > 500 {
+		params.Limit = 50
+	}
+	if params.Offset < 0 {
+		params.Offset = 0
+	}
+	allowedSort := map[string]string{
+		"hostname": "a.hostname", "os_name": "a.os_name", "os_version": "a.os_version",
+		"agent_version": "a.agent_version", "observed_ip": "a.observed_ip", "status": "a.status",
+		"last_seen": "a.last_seen", "scan_progress": "a.scan_progress",
+		"last_scan_severity": "COALESCE(sr.max_severity,0)", "open_findings": "open_findings",
+	}
+	sortCol := allowedSort[params.Sort]
+	if sortCol == "" {
+		sortCol = "a.last_seen"
+	}
+	order := "DESC"
+	if params.Order == "asc" {
+		order = "ASC"
+	}
+	args := []any{}
+	where := " WHERE a.managed_agent"
+	add := func(clause string, value any) {
+		args = append(args, value)
+		where += clause + "$" + fmt.Sprint(len(args))
+	}
+	if params.Search != "" {
+		args = append(args, "%"+params.Search+"%")
+		n := fmt.Sprint(len(args))
+		where += " AND (a.hostname ILIKE $" + n + " OR a.host_uuid ILIKE $" + n + " OR a.os_name ILIKE $" + n + " OR a.os_version ILIKE $" + n + " OR a.agent_version ILIKE $" + n + " OR a.observed_ip ILIKE $" + n + " OR a.dns_name ILIKE $" + n + ")"
+	}
+	if params.Status != "" {
+		add(" AND a.status=", params.Status)
+	}
+	if params.OSName != "" {
+		add(" AND a.os_name=", params.OSName)
+	}
+	if params.Severity > 0 {
+		add(" AND COALESCE(sr.max_severity,0)>=", params.Severity)
+	}
+	if params.DateFrom != nil {
+		add(" AND a.last_seen>=", *params.DateFrom)
+	}
+	if params.DateTo != nil {
+		add(" AND a.last_seen<=", *params.DateTo)
+	}
+	countArgs := append([]any(nil), args...)
+	args = append(args, params.Limit, params.Offset)
+	limitPlaceholder, offsetPlaceholder := "$"+fmt.Sprint(len(args)-1), "$"+fmt.Sprint(len(args))
+	rows, err := p.pool.Query(ctx, assetSelect+where+" ORDER BY "+sortCol+" "+order+", a.host_uuid ASC LIMIT "+limitPlaceholder+" OFFSET "+offsetPlaceholder, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	assets, err := scanAsset(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	var total int64
+	if err := p.pool.QueryRow(ctx, "SELECT count(*) FROM ("+assetSelect+where+") fleet", countArgs...).Scan(&total); err != nil {
+		total = int64(len(assets))
+	}
+	return assets, total, nil
+}
+
+func (p *Postgres) AgentByID(ctx context.Context, hostUUID string) (*Asset, error) {
+	rows, err := p.pool.Query(ctx, assetSelect+" WHERE a.managed_agent AND a.host_uuid=$1", hostUUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	assets, err := scanAsset(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(assets) == 0 {
+		return nil, pgx.ErrNoRows
+	}
+	return &assets[0], nil
+}
+
+func (p *Postgres) ScanRuns(ctx context.Context, params ScanQueryParams) ([]ScanRun, int64, error) {
+	if params.Limit <= 0 || params.Limit > 500 {
+		params.Limit = 50
+	}
+	args := []any{}
+	where := " WHERE 1=1"
+	add := func(clause string, value any) {
+		args = append(args, value)
+		where += clause + "$" + fmt.Sprint(len(args))
+	}
+	if params.HostUUID != "" {
+		add(" AND sr.host_uuid=", params.HostUUID)
+	}
+	if params.Severity > 0 {
+		add(" AND sr.max_severity>=", params.Severity)
+	}
+	if params.DateFrom != nil {
+		add(" AND sr.scan_finished>=", *params.DateFrom)
+	}
+	if params.DateTo != nil {
+		add(" AND sr.scan_finished<=", *params.DateTo)
+	}
+	if params.Search != "" {
+		args = append(args, "%"+params.Search+"%")
+		n := fmt.Sprint(len(args))
+		where += " AND (a.hostname ILIKE $" + n + " OR sr.scan_id ILIKE $" + n + " OR sr.host_uuid ILIKE $" + n + ")"
+	}
+	allowedSort := map[string]string{"scan_finished": "sr.scan_finished", "hostname": "a.hostname", "max_severity": "sr.max_severity", "finding_count": "sr.finding_count", "status": "sr.status"}
+	sortCol := allowedSort[params.Sort]
+	if sortCol == "" {
+		sortCol = "sr.scan_finished"
+	}
+	order := "DESC"
+	if params.Order == "asc" {
+		order = "ASC"
+	}
+	base := ` FROM scan_runs sr JOIN assets a ON a.host_uuid=sr.host_uuid` + where
+	countArgs := append([]any(nil), args...)
+	args = append(args, params.Limit, max(params.Offset, 0))
+	limitPlaceholder, offsetPlaceholder := "$"+fmt.Sprint(len(args)-1), "$"+fmt.Sprint(len(args))
+	rows, err := p.pool.Query(ctx, `SELECT sr.scan_id, sr.host_uuid, a.hostname, sr.agent_version, sr.os_name, sr.os_version, sr.observed_ip,
+sr.scan_started, sr.scan_finished, sr.received_at, sr.status, sr.component_count, sr.finding_count, sr.critical_count, sr.high_count, sr.max_severity, sr.network_observation_count`+
+		base+" ORDER BY "+sortCol+" "+order+", sr.scan_id LIMIT "+limitPlaceholder+" OFFSET "+offsetPlaceholder, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	scans := []ScanRun{}
+	for rows.Next() {
+		var s ScanRun
+		if err := rows.Scan(&s.ScanID, &s.HostUUID, &s.Hostname, &s.AgentVersion, &s.OSName, &s.OSVersion, &s.ObservedIP,
+			&s.ScanStarted, &s.ScanFinished, &s.ReceivedAt, &s.Status, &s.ComponentCount, &s.FindingCount, &s.CriticalCount,
+			&s.HighCount, &s.MaxSeverity, &s.NetworkObservationCount); err != nil {
+			return nil, 0, err
+		}
+		scans = append(scans, s)
+	}
+	var total int64
+	if err := p.pool.QueryRow(ctx, "SELECT count(*)"+base, countArgs...).Scan(&total); err != nil {
+		total = int64(len(scans))
+	}
+	return scans, total, rows.Err()
+}
+
+func (p *Postgres) ConnectionHistory(ctx context.Context, hostUUID string, params QueryParams) ([]ConnectionSession, int64, error) {
+	if params.Limit <= 0 || params.Limit > 500 {
+		params.Limit = 50
+	}
+	offset := max(params.Offset, 0)
+	allowedSort := map[string]string{"connected_at": "connected_at", "disconnected_at": "disconnected_at", "last_seen": "last_seen", "observed_ip": "observed_ip", "agent_version": "agent_version", "status": "status"}
+	sortCol := allowedSort[params.Sort]
+	if sortCol == "" {
+		sortCol = "connected_at"
+	}
+	order := "DESC"
+	if params.Order == "asc" {
+		order = "ASC"
+	}
+	args := []any{hostUUID}
+	where := " WHERE host_uuid=$1"
+	if params.Search != "" {
+		args = append(args, "%"+params.Search+"%")
+		n := fmt.Sprint(len(args))
+		where += " AND (observed_ip ILIKE $" + n + " OR agent_version ILIKE $" + n + " OR status ILIKE $" + n + ")"
+	}
+	countArgs := append([]any(nil), args...)
+	args = append(args, params.Limit, offset)
+	rows, err := p.pool.Query(ctx, `SELECT session_id, host_uuid, connected_at, disconnected_at, last_seen, observed_ip, agent_version, status
+FROM agent_connection_sessions`+where+` ORDER BY `+sortCol+` `+order+`, session_id LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	sessions := []ConnectionSession{}
+	for rows.Next() {
+		var s ConnectionSession
+		if err := rows.Scan(&s.SessionID, &s.HostUUID, &s.ConnectedAt, &s.DisconnectedAt, &s.LastSeen, &s.ObservedIP, &s.AgentVersion, &s.Status); err != nil {
+			return nil, 0, err
+		}
+		sessions = append(sessions, s)
+	}
+	var total int64
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM agent_connection_sessions`+where, countArgs...).Scan(&total)
+	return sessions, total, rows.Err()
+}
+
+func (p *Postgres) ReportFindings(ctx context.Context, scanID string, params QueryParams) ([]Finding, int64, error) {
+	if params.Limit <= 0 || params.Limit > 500 {
+		params.Limit = 100
+	}
+	offset := max(params.Offset, 0)
+	args := []any{scanID}
+	where := " WHERE scan_id=$1"
+	add := func(clause string, value any) {
+		args = append(args, value)
+		where += clause + "$" + fmt.Sprint(len(args))
+	}
+	if params.Search != "" {
+		args = append(args, "%"+params.Search+"%")
+		n := fmt.Sprint(len(args))
+		where += " AND (title ILIKE $" + n + " OR description ILIKE $" + n + " OR asset_ref ILIKE $" + n + " OR algorithm ILIKE $" + n + " OR policy_rule_id ILIKE $" + n + ")"
+	}
+	if params.Algorithm != "" {
+		add(" AND algorithm=", params.Algorithm)
+	}
+	if params.AssetRef != "" {
+		add(" AND asset_ref=", params.AssetRef)
+	}
+	countArgs := append([]any(nil), args...)
+	args = append(args, params.Limit, offset)
+	rows, err := p.pool.Query(ctx, `SELECT occurrence_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id,
+migration_profile, 'historical', '', created_at, created_at, confidence
+FROM finding_occurrences`+where+` ORDER BY severity DESC, created_at DESC LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	findings := []Finding{}
+	for rows.Next() {
+		var f Finding
+		if err := rows.Scan(&f.FindingID, &f.HostUUID, &f.Severity, &f.Title, &f.Description, &f.AssetRef, &f.Algorithm,
+			&f.PolicyRuleID, &f.MigrationProfile, &f.Status, &f.UpdatedBy, &f.UpdatedAt, &f.CreatedAt, &f.Confidence); err != nil {
+			return nil, 0, err
+		}
+		findings = append(findings, f)
+	}
+	var total int64
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM finding_occurrences`+where, countArgs...).Scan(&total)
+	return findings, total, rows.Err()
+}
+
+func (p *Postgres) EnqueueAgentCommand(ctx context.Context, command *pb.MigrationCommand) error {
+	raw, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx, `INSERT INTO agent_commands (command_id,host_uuid,command_payload,status)
+VALUES ($1,$2,$3::jsonb,'queued') ON CONFLICT (command_id) DO NOTHING`, command.CommandId, command.HostUuid, string(raw))
+	return err
+}
+
+func (p *Postgres) DrainAgentCommands(ctx context.Context, hostUUID string) ([]*pb.MigrationCommand, error) {
+	rows, err := p.pool.Query(ctx, `SELECT command_id,command_payload FROM agent_commands
+WHERE host_uuid=$1 AND status='queued' ORDER BY queued_at`, hostUUID)
+	if err != nil {
+		return nil, err
+	}
+	var commands []*pb.MigrationCommand
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		var command pb.MigrationCommand
+		if err := json.Unmarshal(raw, &command); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		commands = append(commands, &command)
+	}
+	rows.Close()
+	return commands, rows.Err()
+}
+
+func (p *Postgres) MarkAgentCommandDelivered(ctx context.Context, commandID string) error {
+	_, err := p.pool.Exec(ctx, `UPDATE agent_commands SET status='delivered',delivered_at=now() WHERE command_id=$1`, commandID)
+	return err
+}
+
+func (p *Postgres) MarkAgentCommandExecuting(ctx context.Context, commandID string) error {
+	_, err := p.pool.Exec(ctx, `UPDATE agent_commands SET status='executing',delivered_at=COALESCE(delivered_at,now()) WHERE command_id=$1`, commandID)
+	return err
+}
+
+func (p *Postgres) AgentCommand(ctx context.Context, hostUUID, commandID string) (*AgentCommand, error) {
+	var command AgentCommand
+	var payload []byte
+	err := p.pool.QueryRow(ctx, `SELECT command_id,host_uuid,command_payload,status,queued_at,delivered_at,completed_at
+FROM agent_commands WHERE host_uuid=$1 AND command_id=$2`, hostUUID, commandID).Scan(
+		&command.CommandID, &command.HostUUID, &payload, &command.Status, &command.QueuedAt, &command.DeliveredAt, &command.CompletedAt)
+	if err != nil {
+		return nil, err
+	}
+	var directive pb.MigrationCommand
+	if json.Unmarshal(payload, &directive) == nil {
+		command.Command = directive.MigrationProfile
+	}
+	return &command, nil
+}
+
+func (p *Postgres) GetAgentScanConfig(ctx context.Context, hostUUID string) (*AgentScanConfig, error) {
+	config := AgentScanConfig{
+		HostUUID: hostUUID, ScanRoots: []string{}, ExcludeDirs: []string{},
+		IncludeExtensions: []string{}, ScanIntervalSeconds: scanconfig.DefaultScanIntervalSeconds,
+		MaxFileBytes: scanconfig.DefaultMaxFileBytes, MaxBinaryBytes: scanconfig.DefaultMaxBinaryBytes, NetworkTargets: []string{},
+	}
+	var raw []byte
+	err := p.pool.QueryRow(ctx, `SELECT config FROM agent_scan_configs WHERE host_uuid=$1`, hostUUID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &config, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, err
+	}
+	config.HostUUID = hostUUID
+	config.Configured = true
+	return &config, nil
+}
+
+func (p *Postgres) UpdateAgentScanConfig(ctx context.Context, config *AgentScanConfig) error {
+	config.Configured = true
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx, `INSERT INTO agent_scan_configs(host_uuid,config,updated_at) VALUES($1,$2::jsonb,now())
+ON CONFLICT(host_uuid) DO UPDATE SET config=EXCLUDED.config,updated_at=now()`, config.HostUUID, string(raw))
+	return err
 }
 
 func (p *Postgres) Components(ctx context.Context, limit int) ([]Component, error) {
@@ -638,9 +1531,10 @@ func (p *Postgres) Findings(ctx context.Context, limit int) ([]Finding, error) {
 		limit = 200
 	}
 	rows, err := p.pool.Query(ctx, `
-SELECT finding_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id, migration_profile,
-       COALESCE(status,'open'), COALESCE(updated_by,''), COALESCE(updated_at, created_at), created_at, confidence
-FROM crypto_findings
+SELECT cf.finding_id, cf.host_uuid, cf.severity, cf.title, cf.description, cf.asset_ref, cf.algorithm, cf.policy_rule_id, cf.migration_profile,
+       COALESCE(cf.status,'open'), COALESCE(cf.updated_by,''), COALESCE(cf.updated_at, cf.created_at), cf.created_at, cf.confidence,
+       cf.telemetry_id, a.hostname, a.agent_version, tp.scan_finished
+FROM crypto_findings cf JOIN assets a ON a.host_uuid=cf.host_uuid JOIN telemetry_payloads tp ON tp.telemetry_id=cf.telemetry_id
 ORDER BY severity DESC, created_at DESC
 LIMIT $1`, limit)
 	if err != nil {
@@ -653,6 +1547,7 @@ LIMIT $1`, limit)
 		if err := rows.Scan(
 			&f.FindingID, &f.HostUUID, &f.Severity, &f.Title, &f.Description, &f.AssetRef, &f.Algorithm, &f.PolicyRuleID, &f.MigrationProfile,
 			&f.Status, &f.UpdatedBy, &f.UpdatedAt, &f.CreatedAt, &f.Confidence,
+			&f.TelemetryID, &f.Hostname, &f.AgentVersion, &f.ScanFinished,
 		); err != nil {
 			return nil, err
 		}
@@ -680,16 +1575,43 @@ func (p *Postgres) FindingsPaginated(ctx context.Context, params QueryParams) ([
 	if params.Order == "asc" {
 		order = "ASC"
 	}
-	searchFilter := ""
-	args := []any{params.Limit, params.Offset}
-	if params.Search != "" {
-		searchFilter = ` AND (title ILIKE $3 OR description ILIKE $3 OR asset_ref ILIKE $3 OR algorithm ILIKE $3 OR policy_rule_id ILIKE $3)`
-		args = append(args, "%"+params.Search+"%")
+	where := " WHERE 1=1"
+	args := []any{}
+	add := func(clause string, value any) {
+		args = append(args, value)
+		where += clause + "$" + fmt.Sprint(len(args))
 	}
-	query := `SELECT finding_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id, migration_profile,
-				 COALESCE(status,'open'), COALESCE(updated_by,''), COALESCE(updated_at, created_at), created_at, confidence
-			  FROM crypto_findings WHERE 1=1` + searchFilter +
-		` ORDER BY ` + sortCol + ` ` + order + ` LIMIT $1 OFFSET $2`
+	if params.Search != "" {
+		args = append(args, "%"+params.Search+"%")
+		n := fmt.Sprint(len(args))
+		where += ` AND (cf.title ILIKE $` + n + ` OR cf.description ILIKE $` + n + ` OR cf.asset_ref ILIKE $` + n + ` OR cf.algorithm ILIKE $` + n + ` OR cf.policy_rule_id ILIKE $` + n + ` OR a.hostname ILIKE $` + n + `)`
+	}
+	if params.HostUUID != "" {
+		add(" AND cf.host_uuid=", params.HostUUID)
+	}
+	if params.ScanID != "" {
+		add(" AND cf.telemetry_id=", params.ScanID)
+	}
+	if params.Algorithm != "" {
+		add(" AND cf.algorithm=", params.Algorithm)
+	}
+	if params.AssetRef != "" {
+		add(" AND cf.asset_ref=", params.AssetRef)
+	}
+	if params.DateFrom != nil {
+		add(" AND tp.scan_finished>=", *params.DateFrom)
+	}
+	if params.DateTo != nil {
+		add(" AND tp.scan_finished<=", *params.DateTo)
+	}
+	countArgs := append([]any(nil), args...)
+	args = append(args, params.Limit, params.Offset)
+	lp, op := "$"+fmt.Sprint(len(args)-1), "$"+fmt.Sprint(len(args))
+	query := `SELECT cf.finding_id, cf.host_uuid, cf.severity, cf.title, cf.description, cf.asset_ref, cf.algorithm, cf.policy_rule_id, cf.migration_profile,
+				 COALESCE(cf.status,'open'), COALESCE(cf.updated_by,''), COALESCE(cf.updated_at, cf.created_at), cf.created_at, cf.confidence,
+				 cf.telemetry_id, a.hostname, a.agent_version, tp.scan_finished
+			  FROM crypto_findings cf JOIN assets a ON a.host_uuid=cf.host_uuid JOIN telemetry_payloads tp ON tp.telemetry_id=cf.telemetry_id` + where +
+		` ORDER BY cf.` + sortCol + ` ` + order + ` LIMIT ` + lp + ` OFFSET ` + op
 	rows, err := p.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
@@ -701,6 +1623,7 @@ func (p *Postgres) FindingsPaginated(ctx context.Context, params QueryParams) ([
 		if err := rows.Scan(
 			&f.FindingID, &f.HostUUID, &f.Severity, &f.Title, &f.Description, &f.AssetRef, &f.Algorithm, &f.PolicyRuleID, &f.MigrationProfile,
 			&f.Status, &f.UpdatedBy, &f.UpdatedAt, &f.CreatedAt, &f.Confidence,
+			&f.TelemetryID, &f.Hostname, &f.AgentVersion, &f.ScanFinished,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -709,32 +1632,62 @@ func (p *Postgres) FindingsPaginated(ctx context.Context, params QueryParams) ([
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	countQuery := `SELECT count(*) FROM crypto_findings WHERE 1=1` + searchFilter
+	countQuery := `SELECT count(*) FROM crypto_findings cf JOIN assets a ON a.host_uuid=cf.host_uuid JOIN telemetry_payloads tp ON tp.telemetry_id=cf.telemetry_id` + where
 	var total int64
-	if err := p.pool.QueryRow(ctx, countQuery, args[2:]...).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, countQuery, countArgs...).Scan(&total); err != nil {
 		total = int64(len(findings))
 	}
 	return findings, total, nil
 }
 
 func (p *Postgres) ComponentsPaginated(ctx context.Context, params QueryParams) ([]Component, int64, error) {
-	// Components are stored in telemetry_payloads JSON — delegate to existing Components() with limit
-	limit := params.Limit
-	if limit <= 0 || limit > 2000 {
-		limit = 100
+	if params.Limit <= 0 || params.Limit > 500 {
+		params.Limit = 100
 	}
-	comps, err := p.Components(ctx, limit+params.Offset)
+	args := []any{}
+	where := " WHERE 1=1"
+	add := func(clause string, value any) {
+		args = append(args, value)
+		where += clause + "$" + fmt.Sprint(len(args))
+	}
+	if params.HostUUID != "" {
+		add(" AND host_uuid=", params.HostUUID)
+	}
+	if params.ScanID != "" {
+		add(" AND scan_id=", params.ScanID)
+	}
+	if params.AssetRef != "" {
+		add(" AND (bom_ref=", params.AssetRef)
+		where += " OR file_path=$" + fmt.Sprint(len(args)) + ")"
+	}
+	if params.Search != "" {
+		args = append(args, "%"+params.Search+"%")
+		n := fmt.Sprint(len(args))
+		where += " AND (name ILIKE $" + n + " OR file_path ILIKE $" + n + " OR bom_ref ILIKE $" + n + ")"
+	}
+	countArgs := append([]any(nil), args...)
+	args = append(args, params.Limit, max(params.Offset, 0))
+	lp, op := "$"+fmt.Sprint(len(args)-1), "$"+fmt.Sprint(len(args))
+	rows, err := p.pool.Query(ctx, `SELECT host_uuid,scan_id,bom_ref,name,version,component_type,file_path,language,algorithms,dependencies,reachable,extract(epoch from scan_finished)::bigint
+FROM scan_components`+where+` ORDER BY scan_finished DESC LIMIT `+lp+` OFFSET `+op, args...)
 	if err != nil {
 		return nil, 0, err
 	}
-	if params.Offset >= len(comps) {
-		return nil, int64(len(comps)), nil
+	defer rows.Close()
+	var components []Component
+	for rows.Next() {
+		var c Component
+		var algorithms, dependencies []byte
+		if err := rows.Scan(&c.HostUUID, &c.TelemetryID, &c.BomRef, &c.Name, &c.Version, &c.ComponentType, &c.FilePath, &c.Language, &algorithms, &dependencies, &c.Reachable, &c.ScanFinishedAt); err != nil {
+			return nil, 0, err
+		}
+		_ = json.Unmarshal(algorithms, &c.Algorithms)
+		_ = json.Unmarshal(dependencies, &c.Dependencies)
+		components = append(components, c)
 	}
-	page := comps[params.Offset:]
-	if len(page) > limit {
-		page = page[:limit]
-	}
-	return page, int64(len(comps)), nil
+	var total int64
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM scan_components`+where, countArgs...).Scan(&total)
+	return components, total, rows.Err()
 }
 
 func (p *Postgres) UpdateFindingStatus(ctx context.Context, findingID, status, updatedBy string) error {
@@ -781,18 +1734,44 @@ LIMIT 200`)
 }
 
 func (p *Postgres) UpdateAgentHeartbeat(ctx context.Context, hb *AgentHeartbeat) error {
-	_, err := p.pool.Exec(ctx, `
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	metricsPresent := hb.MetricsPresent == nil || *hb.MetricsPresent
+	_, err = tx.Exec(ctx, `
 UPDATE assets
 SET scan_progress = $2,
     current_scan_path = $3,
-    cpu_usage = $4,
-    mem_usage = $5,
+    cpu_usage = CASE WHEN $8 THEN $4 ELSE cpu_usage END,
+    mem_usage = CASE WHEN $8 THEN $5 ELSE mem_usage END,
     status = $6,
     total_files_scanned = $7,
     last_seen = now()
 WHERE host_uuid = $1`,
-		hb.HostUUID, hb.ScanProgress, hb.CurrentScanPath, hb.CPUUsage, hb.MemUsage, hb.Status, hb.TotalFilesScanned)
-	return err
+		hb.HostUUID, hb.ScanProgress, hb.CurrentScanPath, hb.CPUUsage, hb.MemUsage, hb.Status, hb.TotalFilesScanned, metricsPresent)
+	if err != nil {
+		return err
+	}
+	_, _ = tx.Exec(ctx, `UPDATE agent_connection_sessions SET last_seen=now(), status=$2 WHERE session_id=(
+SELECT session_id FROM agent_connection_sessions WHERE host_uuid=$1 AND disconnected_at IS NULL ORDER BY connected_at DESC LIMIT 1)`, hb.HostUUID, hb.Status)
+	_, err = tx.Exec(ctx, `INSERT INTO agent_progress_events
+(event_id, host_uuid, progress, current_path, status, files_processed, cpu_usage, mem_usage)
+SELECT $1,$2,$3,$4,$5,$6,$7,$8
+WHERE NOT EXISTS (
+  SELECT 1 FROM (
+    SELECT progress, current_path, status, files_processed
+    FROM agent_progress_events WHERE host_uuid=$2
+    ORDER BY recorded_at DESC LIMIT 1
+  ) latest
+  WHERE latest.progress=$3 AND latest.current_path=$4 AND latest.status=$5 AND latest.files_processed=$6
+)`,
+		uuid.NewString(), hb.HostUUID, hb.ScanProgress, hb.CurrentScanPath, hb.Status, hb.TotalFilesScanned, hb.CPUUsage, hb.MemUsage)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 const schemaSQL = `
@@ -883,7 +1862,7 @@ func (p *Postgres) GetFleetConfig(ctx context.Context) (*FleetConfig, error) {
 	var fc FleetConfig
 	err := row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.LLMApiKey, &fc.LLMApiUrl, &fc.UpdatedAt)
 	if err != nil {
-	_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url) VALUES ('default', '.git, target, node_modules, dist, .venv, temp', 2048, 'daily', '', 'https://api.openai.com/v1') ON CONFLICT DO NOTHING`)
+		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_configs (config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url) VALUES ('default', '.git, target, node_modules, dist, .venv, temp', 2048, 'daily', '', 'https://api.openai.com/v1') ON CONFLICT DO NOTHING`)
 		row = p.pool.QueryRow(ctx, `SELECT config_id, exclude_dirs, min_key_size, scan_schedule, llm_api_key, llm_api_url, updated_at FROM fleet_configs LIMIT 1`)
 		err = row.Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKeySize, &fc.ScanSchedule, &fc.LLMApiKey, &fc.LLMApiUrl, &fc.UpdatedAt)
 		if err != nil {
@@ -992,7 +1971,7 @@ func (p *Postgres) GetRetentionPolicy(ctx context.Context) (*RetentionPolicy, er
 	var autoPurgeInt int
 	err := p.pool.QueryRow(ctx, `SELECT policy_key, retention_days, auto_purge, updated_at FROM fleet_retention_policies LIMIT 1`).Scan(&rp.PolicyKey, &rp.RetentionDays, &autoPurgeInt, &rp.UpdatedAt)
 	if err != nil {
-	_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_retention_policies (policy_key, retention_days, auto_purge) VALUES ('default', 90, 1) ON CONFLICT DO NOTHING`)
+		_, _ = p.pool.Exec(ctx, `INSERT INTO fleet_retention_policies (policy_key, retention_days, auto_purge) VALUES ('default', 90, 1) ON CONFLICT DO NOTHING`)
 		err = p.pool.QueryRow(ctx, `SELECT policy_key, retention_days, auto_purge, updated_at FROM fleet_retention_policies LIMIT 1`).Scan(&rp.PolicyKey, &rp.RetentionDays, &autoPurgeInt, &rp.UpdatedAt)
 		if err != nil {
 			return nil, err
@@ -1127,4 +2106,291 @@ WHERE m.host_uuid = $1`, hostUUID).Scan(&fc.ConfigID, &fc.ExcludeDirs, &fc.MinKe
 		return &fc, nil
 	}
 	return p.GetFleetConfig(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// LLM Analysis Jobs
+// ---------------------------------------------------------------------------
+
+func (p *Postgres) CreateAnalysisJob(ctx context.Context, job *LLMAnalysisJob) error {
+	if job.JobID == "" {
+		job.JobID = uuid.NewString()
+	}
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO llm_analysis_jobs (job_id, finding_id, job_type, status, error_msg, created_by, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, now())
+ON CONFLICT (job_id) DO NOTHING`,
+		job.JobID, job.FindingID, job.JobType, job.Status, job.ErrorMsg, job.CreatedBy)
+	return err
+}
+
+func (p *Postgres) GetAnalysisJob(ctx context.Context, jobID string) (*LLMAnalysisJob, error) {
+	var j LLMAnalysisJob
+	err := p.pool.QueryRow(ctx, `
+SELECT job_id, finding_id, job_type, status, error_msg, created_by, created_at, started_at, completed_at
+FROM llm_analysis_jobs WHERE job_id = $1`, jobID).Scan(
+		&j.JobID, &j.FindingID, &j.JobType, &j.Status, &j.ErrorMsg, &j.CreatedBy,
+		&j.CreatedAt, &j.StartedAt, &j.CompletedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
+func (p *Postgres) UpdateAnalysisJob(ctx context.Context, job *LLMAnalysisJob) error {
+	_, err := p.pool.Exec(ctx, `
+UPDATE llm_analysis_jobs SET status=$2, error_msg=$3, started_at=$4, completed_at=$5 WHERE job_id=$1`,
+		job.JobID, job.Status, job.ErrorMsg, job.StartedAt, job.CompletedAt)
+	return err
+}
+
+func (p *Postgres) ListAnalysisJobs(ctx context.Context, params QueryParams) ([]LLMAnalysisJob, int64, error) {
+	if params.Limit <= 0 || params.Limit > 200 {
+		params.Limit = 50
+	}
+	args := []any{}
+	where := " WHERE 1=1"
+	if params.Search != "" {
+		args = append(args, params.Search)
+		where += " AND (finding_id=$" + fmt.Sprint(len(args)) + " OR status=$" + fmt.Sprint(len(args)) + ")"
+	}
+	if params.HostUUID != "" {
+		args = append(args, params.HostUUID)
+		where += " AND finding_id IN (SELECT finding_id FROM crypto_findings WHERE host_uuid=$" + fmt.Sprint(len(args)) + ")"
+	}
+	countArgs := append([]any(nil), args...)
+	args = append(args, params.Limit, max(params.Offset, 0))
+	lp, op := "$"+fmt.Sprint(len(args)-1), "$"+fmt.Sprint(len(args))
+	rows, err := p.pool.Query(ctx, `SELECT job_id, finding_id, job_type, status, error_msg, created_by, created_at, started_at, completed_at
+FROM llm_analysis_jobs`+where+` ORDER BY created_at DESC LIMIT `+lp+` OFFSET `+op, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var jobs []LLMAnalysisJob
+	for rows.Next() {
+		var j LLMAnalysisJob
+		if err := rows.Scan(&j.JobID, &j.FindingID, &j.JobType, &j.Status, &j.ErrorMsg, &j.CreatedBy,
+			&j.CreatedAt, &j.StartedAt, &j.CompletedAt); err != nil {
+			return nil, 0, err
+		}
+		jobs = append(jobs, j)
+	}
+	var total int64
+	_ = p.pool.QueryRow(ctx, "SELECT count(*) FROM llm_analysis_jobs"+where, countArgs...).Scan(&total)
+	return jobs, total, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// LLM Verdicts
+// ---------------------------------------------------------------------------
+
+func (p *Postgres) CreateVerdict(ctx context.Context, v *LLMVerdict) error {
+	if v.VerdictID == "" {
+		v.VerdictID = uuid.NewString()
+	}
+	cites, _ := json.Marshal(v.EvidenceCitations)
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO llm_verdicts (verdict_id, job_id, finding_id, verdict, adjusted_severity, confidence, reasoning,
+  evidence_citations, abstention_reason, model, prompt_version, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,now())
+ON CONFLICT (verdict_id) DO NOTHING`,
+		v.VerdictID, v.JobID, v.FindingID, v.Verdict, v.AdjustedSeverity, v.Confidence,
+		v.Reasoning, string(cites), v.AbstentionReason, v.Model, v.PromptVersion)
+	return err
+}
+
+func (p *Postgres) GetVerdictByFinding(ctx context.Context, findingID string) (*LLMVerdict, error) {
+	var v LLMVerdict
+	var cites []byte
+	err := p.pool.QueryRow(ctx, `
+SELECT verdict_id, job_id, finding_id, verdict, adjusted_severity, confidence, reasoning,
+  evidence_citations, abstention_reason, model, prompt_version, created_at
+FROM llm_verdicts WHERE finding_id=$1 ORDER BY created_at DESC LIMIT 1`, findingID).Scan(
+		&v.VerdictID, &v.JobID, &v.FindingID, &v.Verdict, &v.AdjustedSeverity, &v.Confidence,
+		&v.Reasoning, &cites, &v.AbstentionReason, &v.Model, &v.PromptVersion, &v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(cites, &v.EvidenceCitations)
+	return &v, nil
+}
+
+func (p *Postgres) GetVerdictByJob(ctx context.Context, jobID string) (*LLMVerdict, error) {
+	var v LLMVerdict
+	var cites []byte
+	err := p.pool.QueryRow(ctx, `
+SELECT verdict_id, job_id, finding_id, verdict, adjusted_severity, confidence, reasoning,
+  evidence_citations, abstention_reason, model, prompt_version, created_at
+FROM llm_verdicts WHERE job_id=$1`, jobID).Scan(
+		&v.VerdictID, &v.JobID, &v.FindingID, &v.Verdict, &v.AdjustedSeverity, &v.Confidence,
+		&v.Reasoning, &cites, &v.AbstentionReason, &v.Model, &v.PromptVersion, &v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(cites, &v.EvidenceCitations)
+	return &v, nil
+}
+
+// ---------------------------------------------------------------------------
+// LLM Provenance
+// ---------------------------------------------------------------------------
+
+func (p *Postgres) RecordProvenance(ctx context.Context, prov *LLMProvenance) error {
+	if prov.ProvenanceID == "" {
+		prov.ProvenanceID = uuid.NewString()
+	}
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO llm_provenance (provenance_id, job_id, finding_id, provider, model, prompt_name, prompt_version,
+  input_hash, output_hash, tokens_in, tokens_out, latency_ms, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())`,
+		prov.ProvenanceID, prov.JobID, prov.FindingID, prov.Provider, prov.Model,
+		prov.PromptName, prov.PromptVersion, prov.InputHash, prov.OutputHash,
+		prov.TokensIn, prov.TokensOut, prov.LatencyMS)
+	return err
+}
+
+func (p *Postgres) ListProvenance(ctx context.Context, findingID string) ([]LLMProvenance, error) {
+	rows, err := p.pool.Query(ctx, `
+SELECT provenance_id, job_id, finding_id, provider, model, prompt_name, prompt_version,
+  input_hash, output_hash, tokens_in, tokens_out, latency_ms, created_at
+FROM llm_provenance WHERE finding_id=$1 ORDER BY created_at DESC`, findingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []LLMProvenance
+	for rows.Next() {
+		var pr LLMProvenance
+		if err := rows.Scan(&pr.ProvenanceID, &pr.JobID, &pr.FindingID, &pr.Provider, &pr.Model,
+			&pr.PromptName, &pr.PromptVersion, &pr.InputHash, &pr.OutputHash,
+			&pr.TokensIn, &pr.TokensOut, &pr.LatencyMS, &pr.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, pr)
+	}
+	return list, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Agility Metrics
+// ---------------------------------------------------------------------------
+
+func (p *Postgres) UpsertAgilityMetrics(ctx context.Context, m *AgilityMetrics) error {
+	if m.MetricID == "" {
+		m.MetricID = uuid.NewString()
+	}
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO agility_metrics (metric_id, host_uuid, measurement_date, ttsa_days, hardcode_index,
+  negotiation_coverage, profile_adoption_latency_days, blast_radius_score, measured_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+ON CONFLICT (host_uuid, measurement_date) DO UPDATE SET
+  ttsa_days = EXCLUDED.ttsa_days,
+  hardcode_index = EXCLUDED.hardcode_index,
+  negotiation_coverage = EXCLUDED.negotiation_coverage,
+  profile_adoption_latency_days = EXCLUDED.profile_adoption_latency_days,
+  blast_radius_score = EXCLUDED.blast_radius_score,
+  measured_at = now()`,
+		m.MetricID, m.HostUUID, m.MeasurementDate.Format("2006-01-02"),
+		m.TTSADays, m.HardcodeIndex, m.NegotiationCoverage,
+		m.ProfileAdoptionLatencyDays, m.BlastRadiusScore)
+	return err
+}
+
+func (p *Postgres) GetAgilityMetrics(ctx context.Context, hostUUID string) (*AgilityMetrics, error) {
+	var m AgilityMetrics
+	err := p.pool.QueryRow(ctx, `
+SELECT metric_id, host_uuid, measurement_date, ttsa_days, hardcode_index, negotiation_coverage,
+  profile_adoption_latency_days, blast_radius_score, measured_at
+FROM agility_metrics WHERE host_uuid=$1 ORDER BY measurement_date DESC LIMIT 1`, hostUUID).Scan(
+		&m.MetricID, &m.HostUUID, &m.MeasurementDate, &m.TTSADays, &m.HardcodeIndex,
+		&m.NegotiationCoverage, &m.ProfileAdoptionLatencyDays, &m.BlastRadiusScore, &m.MeasuredAt)
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (p *Postgres) GetFleetAgilityMetrics(ctx context.Context) ([]AgilityMetrics, error) {
+	rows, err := p.pool.Query(ctx, `
+SELECT DISTINCT ON (host_uuid) metric_id, host_uuid, measurement_date, ttsa_days, hardcode_index,
+  negotiation_coverage, profile_adoption_latency_days, blast_radius_score, measured_at
+FROM agility_metrics ORDER BY host_uuid, measurement_date DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []AgilityMetrics
+	for rows.Next() {
+		var m AgilityMetrics
+		if err := rows.Scan(&m.MetricID, &m.HostUUID, &m.MeasurementDate, &m.TTSADays, &m.HardcodeIndex,
+			&m.NegotiationCoverage, &m.ProfileAdoptionLatencyDays, &m.BlastRadiusScore, &m.MeasuredAt); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Wave Plans
+// ---------------------------------------------------------------------------
+
+func (p *Postgres) CreateWavePlan(ctx context.Context, plan *WavePlan) error {
+	if plan.PlanID == "" {
+		plan.PlanID = uuid.NewString()
+	}
+	assetIDs, _ := json.Marshal(plan.AssetIDs)
+	algTargets, _ := json.Marshal(plan.AlgorithmTargets)
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO wave_plans (plan_id, name, description, wave_number, asset_ids, algorithm_targets,
+  start_date, target_date, status, created_by, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,now(),now())
+ON CONFLICT (plan_id) DO NOTHING`,
+		plan.PlanID, plan.Name, plan.Description, plan.WaveNumber,
+		string(assetIDs), string(algTargets),
+		plan.StartDate, plan.TargetDate, plan.Status, plan.CreatedBy)
+	return err
+}
+
+func (p *Postgres) GetWavePlans(ctx context.Context) ([]WavePlan, error) {
+	rows, err := p.pool.Query(ctx, `
+SELECT plan_id, name, description, wave_number, asset_ids, algorithm_targets,
+  start_date, target_date, status, created_by, created_at, updated_at
+FROM wave_plans ORDER BY wave_number, created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var plans []WavePlan
+	for rows.Next() {
+		var wp WavePlan
+		var assetIDs, algTargets []byte
+		if err := rows.Scan(&wp.PlanID, &wp.Name, &wp.Description, &wp.WaveNumber,
+			&assetIDs, &algTargets, &wp.StartDate, &wp.TargetDate,
+			&wp.Status, &wp.CreatedBy, &wp.CreatedAt, &wp.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(assetIDs, &wp.AssetIDs)
+		_ = json.Unmarshal(algTargets, &wp.AlgorithmTargets)
+		plans = append(plans, wp)
+	}
+	return plans, rows.Err()
+}
+
+func (p *Postgres) UpdateWavePlan(ctx context.Context, plan *WavePlan) error {
+	assetIDs, _ := json.Marshal(plan.AssetIDs)
+	algTargets, _ := json.Marshal(plan.AlgorithmTargets)
+	_, err := p.pool.Exec(ctx, `
+UPDATE wave_plans SET name=$2, description=$3, wave_number=$4, asset_ids=$5::jsonb,
+  algorithm_targets=$6::jsonb, start_date=$7, target_date=$8, status=$9, updated_at=now()
+WHERE plan_id=$1`,
+		plan.PlanID, plan.Name, plan.Description, plan.WaveNumber,
+		string(assetIDs), string(algTargets), plan.StartDate, plan.TargetDate, plan.Status)
+	return err
+}
+
+func (p *Postgres) DeleteWavePlan(ctx context.Context, planID string) error {
+	_, err := p.pool.Exec(ctx, `DELETE FROM wave_plans WHERE plan_id=$1`, planID)
+	return err
 }

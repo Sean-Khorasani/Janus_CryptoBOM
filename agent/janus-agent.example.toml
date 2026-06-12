@@ -11,16 +11,38 @@ max_binary_bytes = 16777216
 # Generate: openssl rand -hex 32
 command_signing_key = "local-development-command-signing-key"
 
+# Directory containing prompt TOML templates for LLM-based classification and remediation.
+# Defaults to JANUS_PROMPTS_DIR env var, then "config/prompts" relative to CWD.
+# Example absolute path for Linux deployments: /etc/janus/prompts
+# prompts_dir = "config/prompts"
+
 scan_roots = ["."]
 exclude_dirs = [".git", "target", "node_modules", "dist", ".venv", "__pycache__"]
-network_targets = ["127.0.0.1:443"]
-plugin_dirs = ["plugins"]
+network_targets = []
+# Discovery stages with process, execution, or network side effects require explicit opt-in.
+enable_runtime_discovery = false
+enable_process_memory_scraping = false
+enable_plugin_discovery = false
+enable_active_tls_probing = false
+plugin_dirs = []
 
 [[plugin_commands]]
 name = "windows-cng-capabilities"
 command = "certutil"
 args = ["-csplist"]
 timeout_seconds = 20
+
+# LLM-07: Binary analysis LLM policy. Disabled by default.
+# Opt-in required — sending binary context to an LLM provider involves external data transfer.
+# Set enabled = true and configure the server's JANUS_LLM_BASE_URL/JANUS_LLM_API_KEY_FILE
+# before activating any binary analysis capability.
+[binary_llm_policy]
+enabled = false
+allow_string_extraction = false
+allow_import_table = true
+allow_hexdump_window = false
+max_context_bytes = 1024
+require_audit_consent = true
 
 [active]
 allowed_services = ["nginx", "apache", "ssh", "windows-trust-store", "windows-schannel-policy"]
