@@ -2,13 +2,77 @@ use super::ScanResult;
 use crate::{
     config::AgentConfig,
     proto::{CbomComponent, CryptoAlgorithm, CryptoRole, Evidence},
+    prompts::{PromptRegistry, PromptTemplate},
 };
 use anyhow::Result;
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::OnceLock};
 use uuid::Uuid;
 use walkdir::WalkDir;
+
+/// Describes how a crypto finding was detected, ordered from least to most confident.
+///
+/// The variant is stored in `Evidence.source_type` so downstream tools can weight
+/// findings appropriately without parsing free-form text.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum DetectionMethod {
+    /// Regex match inside a test file — pattern may be illustrative rather than production use.
+    RegexMatchTestFile,
+    /// Pure regex pattern match in non-test production code; intent not confirmed by context.
+    RegexMatch,
+    /// Algorithm name found inside a string literal passed to a known crypto API call
+    /// (e.g. `Cipher.getInstance("RSA")`, `createHash('md5')`) — the string IS the
+    /// algorithm selection, so this is stronger than a bare identifier match.
+    StringApiContext,
+    /// Regex match in non-test code where surrounding context (comment/string stripping +
+    /// intent classification) confirms active crypto use.
+    ContextConfirmed,
+    /// Two or more independent patterns flagged the same source line, corroborating each other.
+    MultiPatternCorroborated,
+}
+
+impl DetectionMethod {
+    /// Baseline confidence for this detection method.
+    ///
+    /// These are floor values; callers may lower the score for context such as
+    /// verify/parse intent but should not raise it above the next tier.
+    fn confidence_floor(self) -> f64 {
+        match self {
+            Self::RegexMatchTestFile => 0.20,
+            Self::RegexMatch => 0.60,
+            Self::StringApiContext => 0.78,
+            Self::ContextConfirmed => 0.80,
+            Self::MultiPatternCorroborated => 0.88,
+        }
+    }
+
+    /// Short label stored in `Evidence.source_type` so downstream tools can filter by method.
+    fn source_type_label(self) -> &'static str {
+        match self {
+            Self::RegexMatchTestFile => "regex-match-test",
+            Self::RegexMatch => "regex-match",
+            Self::StringApiContext => "string-api-context",
+            Self::ContextConfirmed => "context-confirmed",
+            Self::MultiPatternCorroborated => "multi-pattern",
+        }
+    }
+
+    /// Classify a single line's detection method given test-file status, intent, and match count.
+    fn classify(is_test_file: bool, intent: &str, match_count: usize) -> Self {
+        if is_test_file {
+            return Self::RegexMatchTestFile;
+        }
+        if match_count >= 2 {
+            return Self::MultiPatternCorroborated;
+        }
+        // A recognized, non-default intent means context validation confirmed the use.
+        match intent {
+            "protect" | "verify" | "negotiate" => Self::ContextConfirmed,
+            _ => Self::RegexMatch,
+        }
+    }
+}
 
 struct Pattern {
     regex: Regex,
@@ -36,6 +100,9 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
     let is_c_like = matches!(ext, "rs" | "go" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "cs" | "c" | "h" | "cpp" | "hpp" | "swift" | "m" | "mm" | "scala" | "php");
     let is_script = matches!(ext, "py" | "rb" | "sh" | "yaml" | "yml" | "toml" | "conf" | "cnf");
     let is_xml = matches!(ext, "xml");
+    // In config formats the quoted value IS the signal (`ciphers = "ECDHE-RSA-..."`);
+    // blanking strings there erases exactly what we scan for. Only strip comments.
+    let strip_strings = !matches!(ext, "yaml" | "yml" | "toml" | "conf" | "cnf" | "xml");
 
     while i < chars.len() {
         let c = chars[i];
@@ -167,7 +234,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
             }
         }
 
-        if c == '"' || c == '\'' || (is_c_like && c == '`') {
+        if strip_strings && (c == '"' || c == '\'' || (is_c_like && c == '`')) {
             in_string = true;
             string_char = c;
             out.push(' ');
@@ -182,7 +249,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
     out
 }
 
-fn analyze_snippet_llm_sync(http_endpoint: &str, name: &str, source_file: &str, snippet: &str) -> Result<String> {
+fn analyze_snippet_llm_sync(http_endpoint: &str, prompts_dir: &str, name: &str, source_file: &str, snippet: &str) -> Result<String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -193,20 +260,34 @@ fn analyze_snippet_llm_sync(http_endpoint: &str, name: &str, source_file: &str, 
         .next()
         .unwrap_or("127.0.0.1:8080");
 
-    let prompt = format!(
-        "You are a cryptography security expert. Analyze the following code snippet which contains a reference to the cryptographic algorithm '{}'. Classify the usage intent into exactly one of the following categories: 'protect', 'verify', 'negotiate', 'test'. Reply with a JSON object exactly matching this format: {{\"intent\": \"one-of-the-categories\", \"confidence\": 0.9}}\nCode Snippet (from {}):\n{}",
-        name, source_file, snippet
+    let tmpl = PromptRegistry::new(prompts_dir).load_or_default(
+        "classify-intent",
+        PromptTemplate {
+            prompt: concat!(
+                "You are a cryptography security expert. Analyze the following code snippet ",
+                "which contains a reference to the cryptographic algorithm '{{algorithm}}'. ",
+                "Classify the usage intent into exactly one of the following categories: ",
+                "'protect', 'verify', 'negotiate', 'test'. ",
+                "Reply with a JSON object exactly matching this format: ",
+                "{\"intent\": \"one-of-the-categories\", \"confidence\": 0.9}\n",
+                "Code Snippet (from {{source_file}}):\n{{snippet}}"
+            ).to_string(),
+            model: "gpt-4o-mini".to_string(),
+            temperature: 0.0,
+            version: None,
+        },
     );
+    let prompt = tmpl.render(&[("algorithm", name), ("source_file", source_file), ("snippet", snippet)]);
 
     let body_json = serde_json::json!({
-        "model": "gpt-4o-mini",
+        "model": tmpl.model,
         "messages": [
             {
                 "role": "user",
                 "content": prompt
             }
         ],
-        "temperature": 0.0
+        "temperature": tmpl.temperature
     }).to_string();
 
     let mut stream = TcpStream::connect(host_port)?;
@@ -246,6 +327,7 @@ fn analyze_snippet_llm_sync(http_endpoint: &str, name: &str, source_file: &str, 
 
 pub fn generate_remediation_patch_llm(
     http_endpoint: &str,
+    prompts_dir: &str,
     name: &str,
     source_file: &str,
     snippet: &str,
@@ -260,13 +342,26 @@ pub fn generate_remediation_patch_llm(
         .next()
         .unwrap_or("127.0.0.1:8080");
 
-    let prompt = format!(
-        "You are a cryptography security expert. Rewrite the following code snippet from '{}' to migrate from the quantum-vulnerable algorithm '{}' to a secure post-quantum or modern standard (e.g., ML-KEM, ML-DSA, SHA-256). The response must return ONLY a unified diff patch. Do not include markdown code block formatting (like ```diff), just the raw diff text. Remediation patch target file: {}\nCode Snippet:\n{}",
-        source_file, name, source_file, snippet
+    let tmpl = PromptRegistry::new(prompts_dir).load_or_default(
+        "remediate-patch",
+        PromptTemplate {
+            prompt: concat!(
+                "You are a cryptography security expert. Rewrite the following code snippet from ",
+                "'{{source_file}}' to migrate from the quantum-vulnerable algorithm '{{algorithm}}' ",
+                "to a secure post-quantum or modern standard (e.g., ML-KEM, ML-DSA, SHA-256). ",
+                "The response must return ONLY a unified diff patch. ",
+                "Do not include markdown code block formatting (like ```diff), just the raw diff text. ",
+                "Remediation patch target file: {{source_file}}\nCode Snippet:\n{{snippet}}"
+            ).to_string(),
+            model: "gpt-4o-mini".to_string(),
+            temperature: 0.0,
+            version: None,
+        },
     );
+    let prompt = tmpl.render(&[("algorithm", name), ("source_file", source_file), ("snippet", snippet)]);
 
     let body_json = serde_json::json!({
-        "model": "gpt-4o-mini",
+        "model": tmpl.model,
         "messages": [
             {
                 "role": "user",
@@ -315,6 +410,9 @@ pub fn generate_remediation_patch_llm(
 pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
     let patterns = patterns()?;
     let mut out = ScanResult::default();
+    // Candidate patches are collected and written once next to the report —
+    // a passive scan must never write into the scanned tree.
+    let mut pending_patches: Vec<String> = Vec::new();
     for root in &cfg.scan_roots {
         for entry in WalkDir::new(root).into_iter().filter_entry(|e| include_entry(e.path(), cfg)) {
             let entry = match entry {
@@ -344,96 +442,180 @@ pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
             let is_test_file = is_test_path(entry.path());
             let text_lines: Vec<&str> = text.lines().collect();
             let stripped_lines: Vec<&str> = stripped.lines().collect();
-            // Only match against comment/string-stripped lines to avoid false positives
+
+            // Track the strongest DetectionMethod seen and all pattern names matched in this
+            // file, for the single per-file Evidence record that summarises provenance.
+            let mut file_strongest_method = DetectionMethod::RegexMatchTestFile;
+            let mut file_pattern_names: Vec<&str> = Vec::new();
+
+            // Only match against comment/string-stripped lines to avoid false positives.
+            // We first count matches per line so MultiPatternCorroborated can be detected.
             for (line_idx, (line, stripped_line)) in text_lines.iter().zip(stripped_lines.iter()).enumerate() {
+                // Collect all pattern hits on this stripped line.
+                let mut line_hits: Vec<(&Pattern, regex::Match<'_>)> = Vec::new();
                 for pat in &patterns {
                     if let Some(m) = pat.regex.find(stripped_line) {
-                        let intent = infer_usage_intent(line);
-                        let base_confidence: f64 = if is_test_file {
-                            0.20 // test code is low-confidence
-                        } else {
-                            match intent.as_str() {
-                                "verify" | "parse" => 0.50,
-                                "negotiate" => 0.70,
-                                _ => 0.90, // protect / unknown
-                            }
-                        };
-                        let start_idx = line_idx.saturating_sub(5);
-                        let end_idx = (line_idx + 6).min(text_lines.len());
-                        let snippet = text_lines[start_idx..end_idx].join("\n");
-
-                        let mut algo_status = if is_test_file { "test-only".to_string() } else { intent.clone() };
-                        let mut algo_conf = base_confidence;
-
-                        // Try calling LLM proxy
-                        if use_llm && !is_test_file && base_confidence > 0.0 {
-                            if let Ok(llm_intent) = analyze_snippet_llm_sync(&cfg.http_endpoint(), pat.name, &entry.path().display().to_string(), &snippet) {
-                                algo_status = llm_intent;
-                                algo_conf = 0.95; // LLM confidence boost
-                            }
+                        // "DSA" must not fire inside ML-DSA / SLH-DSA tokens.
+                        if pat.name == "DSA" && is_pq_prefixed(stripped_line, m.start()) {
+                            continue;
                         }
-
-                        let is_qv = matches!(pat.name, "RSA" | "ECDSA" | "ECDH" | "ECDHE" | "DH" | "DSA" | "MD5" | "SHA-1");
-                        if is_qv {
-                            let patch = if use_llm {
-                                match generate_remediation_patch_llm(
-                                    &cfg.http_endpoint(),
-                                    pat.name,
-                                    &entry.path().display().to_string(),
-                                    &snippet,
-                                ) {
-                                    Ok(p) => p,
-                                    Err(_) => {
-                                        let path_str = entry.path().display().to_string();
-                                        let line_num = line_idx + 1;
-                                        let replacement = match pat.name {
-                                            "MD5" | "SHA-1" => line.replace(pat.name, "SHA256").replace("SHA-1", "SHA256"),
-                                            "RSA" => line.replace(pat.name, "MLKEM768"),
-                                            "ECDSA" => line.replace(pat.name, "MLDSA65"),
-                                            _ => line.replace(pat.name, "MLKEM768"),
-                                        };
-                                        format!(
-                                            "--- {}\n+++ {}\n@@ -{},1 +{},1 @@\n-{}\n+{}\n",
-                                            path_str, path_str, line_num, line_num, line.trim_end(), replacement.trim_end()
-                                        )
-                                    }
-                                }
-                            } else {
-                                let path_str = entry.path().display().to_string();
-                                let line_num = line_idx + 1;
-                                let replacement = match pat.name {
-                                    "MD5" | "SHA-1" => line.replace(pat.name, "SHA256").replace("SHA-1", "SHA256"),
-                                    "RSA" => line.replace(pat.name, "MLKEM768"),
-                                    "ECDSA" => line.replace(pat.name, "MLDSA65"),
-                                    _ => line.replace(pat.name, "MLKEM768"),
-                                };
-                                format!(
-                                    "--- {}\n+++ {}\n@@ -{},1 +{},1 @@\n-{}\n+{}\n",
-                                    path_str, path_str, line_num, line_num, line.trim_end(), replacement.trim_end()
-                                )
-                            };
-                            let patch_path = format!("{}.patch", entry.path().display());
-                            let _ = fs::write(&patch_path, &patch);
-                            let _ = fs::write("remediation.patch", &patch);
-                        }
-
-                        algorithms.push(CryptoAlgorithm {
-                            name: pat.name.to_string(),
-                            family: pat.family.to_string(),
-                            role: pat.role as i32,
-                            status: algo_status,
-                            key_bits: infer_key_bits(pat.name, line),
-                            curve: infer_curve(line),
-                            implementation_library: infer_library(line),
-                            source_file: entry.path().display().to_string(),
-                            source_line: (line_idx + 1) as u32,
-                            source_column: (m.start() + 1) as u32,
-                            symbol: m.as_str().to_string(),
-                            confidence: algo_conf,
-                            quantum_vulnerable: is_qv,
-                            context_snippet: snippet,
-                        });
+                        line_hits.push((pat, m));
                     }
+                }
+                // Second pass over the RAW line: algorithm names inside string literals
+                // passed to crypto APIs (`Cipher.getInstance("RSA")`) — the dominant
+                // selection idiom in JCA/Node/Python, invisible to the stripped pass.
+                let string_hits = string_literal_hits(line);
+                if line_hits.is_empty() && string_hits.is_empty() {
+                    continue;
+                }
+
+                // Intent from the stripped line so comments cannot steer classification.
+                let intent = infer_usage_intent(stripped_line);
+                let match_count = line_hits.len();
+
+                let start_idx = line_idx.saturating_sub(5);
+                let end_idx = (line_idx + 6).min(text_lines.len());
+                let snippet = text_lines[start_idx..end_idx].join("\n");
+
+                for (pat, m) in line_hits {
+                    let method = DetectionMethod::classify(is_test_file, &intent, match_count);
+
+                    // Intent-adjusted confidence: lower the floor for passive/observing intents.
+                    let algo_conf = if is_test_file {
+                        method.confidence_floor()
+                    } else {
+                        intent_adjusted_confidence(method, &intent)
+                    };
+
+                    let algo_status = if is_test_file {
+                        "test-only".to_string()
+                    } else {
+                        intent.clone()
+                    };
+
+                    // Attempt LLM intent classification when requested. The LLM may only
+                    // relabel intent within the closed enum and may only LOWER confidence,
+                    // never raise it above the deterministic tier — snippets are untrusted
+                    // input (a scanned repo can prompt-inject the classifier), so its output
+                    // is an annotation, not an authority.
+                    let (algo_status, algo_conf) = if use_llm && !is_test_file {
+                        match analyze_snippet_llm_sync(
+                            &cfg.http_endpoint(),
+                            &cfg.prompts_dir,
+                            pat.name,
+                            &entry.path().display().to_string(),
+                            &snippet,
+                        ) {
+                            Ok(llm_intent) if is_known_intent(&llm_intent) => {
+                                let llm_conf =
+                                    intent_adjusted_confidence(method, &llm_intent).min(algo_conf);
+                                (llm_intent, llm_conf)
+                            }
+                            _ => (algo_status, algo_conf),
+                        }
+                    } else {
+                        (algo_status, algo_conf)
+                    };
+
+                    let is_qv = is_quantum_vulnerable(pat.name);
+
+                    if is_qv && !is_test_file {
+                        let path_str = entry.path().display().to_string();
+                        let line_num = line_idx + 1;
+                        let patch = if use_llm {
+                            match generate_remediation_patch_llm(
+                                &cfg.http_endpoint(),
+                                &cfg.prompts_dir,
+                                pat.name,
+                                &path_str,
+                                &snippet,
+                            ) {
+                                Ok(p) => p,
+                                Err(_) => build_static_patch(&path_str, line_num, line, pat.name),
+                            }
+                        } else {
+                            build_static_patch(&path_str, line_num, line, pat.name)
+                        };
+                        pending_patches.push(patch);
+                    }
+
+                    // Update per-file strongest method for the Evidence summary.
+                    if method > file_strongest_method {
+                        file_strongest_method = method;
+                    }
+                    if !file_pattern_names.contains(&pat.name) {
+                        file_pattern_names.push(pat.name);
+                    }
+
+                    algorithms.push(CryptoAlgorithm {
+                        name: pat.name.to_string(),
+                        family: pat.family.to_string(),
+                        role: pat.role as i32,
+                        status: algo_status,
+                        key_bits: infer_key_bits(pat.name, line),
+                        curve: infer_curve(line),
+                        implementation_library: infer_library(line),
+                        source_file: entry.path().display().to_string(),
+                        source_line: (line_idx + 1) as u32,
+                        source_column: (m.start() + 1) as u32,
+                        symbol: m.as_str().to_string(),
+                        confidence: algo_conf,
+                        quantum_vulnerable: is_qv,
+                        context_snippet: snippet.clone(),
+                    });
+                }
+
+                for (s_name, s_family, s_role, s_col, s_symbol) in &string_hits {
+                    // Skip if the identifier pass already reported this algorithm here.
+                    if algorithms
+                        .iter()
+                        .any(|a| a.name == *s_name && a.source_line == (line_idx + 1) as u32)
+                    {
+                        continue;
+                    }
+                    let method = if is_test_file {
+                        DetectionMethod::RegexMatchTestFile
+                    } else {
+                        DetectionMethod::StringApiContext
+                    };
+                    let algo_conf = if is_test_file {
+                        method.confidence_floor()
+                    } else {
+                        intent_adjusted_confidence(method, &intent)
+                    };
+                    let algo_status = if is_test_file {
+                        "test-only".to_string()
+                    } else {
+                        intent.clone()
+                    };
+                    let is_qv = is_quantum_vulnerable(s_name);
+                    if is_qv && !is_test_file {
+                        let path_str = entry.path().display().to_string();
+                        pending_patches.push(build_static_patch(&path_str, line_idx + 1, line, s_name));
+                    }
+                    if method > file_strongest_method {
+                        file_strongest_method = method;
+                    }
+                    if !file_pattern_names.contains(s_name) {
+                        file_pattern_names.push(*s_name);
+                    }
+                    algorithms.push(CryptoAlgorithm {
+                        name: s_name.to_string(),
+                        family: s_family.to_string(),
+                        role: *s_role as i32,
+                        status: algo_status,
+                        key_bits: infer_key_bits(s_name, line),
+                        curve: infer_curve(line),
+                        implementation_library: infer_library(line),
+                        source_file: entry.path().display().to_string(),
+                        source_line: (line_idx + 1) as u32,
+                        source_column: (s_col + 1) as u32,
+                        symbol: s_symbol.clone(),
+                        confidence: algo_conf,
+                        quantum_vulnerable: is_qv,
+                        context_snippet: snippet.clone(),
+                    });
                 }
             }
             if algorithms.is_empty() {
@@ -442,14 +624,19 @@ pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
             let file_hash = sha256_hex(&raw);
             let path = entry.path().display().to_string();
             let evidence_id = Uuid::new_v4().to_string();
+            // source_tool encodes which patterns triggered so reviewers can trace provenance.
+            let source_tool = format!(
+                "janus-source-scanner/regex:{}",
+                file_pattern_names.join(",")
+            );
             out.evidence.push(Evidence {
                 evidence_id,
-                source_type: "source-code".to_string(),
-                source_tool: "janus-agent-static-patterns".to_string(),
+                source_type: file_strongest_method.source_type_label().to_string(),
+                source_tool,
                 target: path.clone(),
                 collection_time_unix: now(),
                 raw_artifact_sha256: file_hash,
-                confidence: 0.90,
+                confidence: file_strongest_method.confidence_floor(),
                 sensitivity_class: "metadata-only".to_string(),
             });
             out.components.push(CbomComponent {
@@ -471,6 +658,13 @@ pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
             });
         }
     }
+    if !pending_patches.is_empty() {
+        let report_dir = Path::new(&cfg.report_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let _ = fs::write(report_dir.join("remediation.patch"), pending_patches.join("\n"));
+    }
     Ok(out)
 }
 
@@ -480,6 +674,17 @@ fn patterns() -> Result<Vec<Pattern>> {
         (r"\bECDSA\b|\becdsa\b", "ECDSA", "ECC", CryptoRole::Signature),
         (r"\bECDH(E)?\b|\becdh\b", "ECDHE", "ECC", CryptoRole::KeyExchange),
         (r"\bDiffieHellman\b|\bDH_generate\b|\bdiffie[-_]?hellman\b", "DH", "DH", CryptoRole::KeyExchange),
+        (r"\bDSA(?:_|\b)", "DSA", "DSA", CryptoRole::Signature),
+        (r"(?i)\bed25519(?:_|\b)|\bEdDSA\b|\bed448(?:_|\b)", "Ed25519", "ECC", CryptoRole::Signature),
+        (r"(?i)\bx25519(?:_|\b)|\bcurve25519(?:_|\b)|\bx448(?:_|\b)", "X25519", "ECC", CryptoRole::KeyExchange),
+        // IANA-registered hybrid PQ groups (TLS 4587/4588/4589) and SSH hybrid KEX names —
+        // recognized so hybrid deployments inventory as PQ-capable, not as classical ECC.
+        (
+            r"(?i)\b(x25519mlkem768|secp256r1mlkem768|secp384r1mlkem1024|mlkem768x25519-sha256|mlkem768nistp256-sha256|mlkem1024nistp384-sha384|x25519kyber768draft00|sntrup761x25519-sha512)\b",
+            "PQ-hybrid-KEX",
+            "hybrid-pqc",
+            CryptoRole::KeyExchange,
+        ),
         (r"\bML[-_]?KEM[-_]?(512|768|1024)?\b|\bKyber\b", "ML-KEM", "ML-KEM", CryptoRole::Kem),
         (r"\bML[-_]?DSA[-_]?(44|65|87)?\b|\bDilithium\b", "ML-DSA", "ML-DSA", CryptoRole::Signature),
         (r"\bSLH[-_]?DSA\b|\bSPHINCS\+?\b", "SLH-DSA", "SLH-DSA", CryptoRole::Signature),
@@ -533,10 +738,16 @@ fn is_source(path: &Path) -> bool {
 
 /// Detect test files by naming conventions across languages.
 fn is_test_path(path: &Path) -> bool {
-    let s = path.to_string_lossy().to_ascii_lowercase();
     let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
-    // Directory-level test markers
-    if s.contains("__tests__") || s.contains("test_fixtures") || s.contains("testdata") {
+    // Directory-level test markers: exact path-component match (covers Rust `tests/`,
+    // which the previous substring checks missed, without matching e.g. "contest").
+    if path.components().any(|c| {
+        let c = c.as_os_str().to_string_lossy().to_ascii_lowercase();
+        matches!(
+            c.as_str(),
+            "test" | "tests" | "__tests__" | "testdata" | "test_fixtures" | "spec" | "specs"
+        )
+    }) {
         return true;
     }
     // File-level test markers by language convention
@@ -550,31 +761,114 @@ fn is_test_path(path: &Path) -> bool {
 
 /// Infer usage intent from surrounding code context.
 /// Returns one of: "protect", "verify", "parse", "negotiate", "observed".
+///
+/// Keywords are matched on word boundaries — substring matching mislabeled
+/// `design`→sign, `thread`→read, `checksum`→check, silently distorting confidence.
 fn infer_usage_intent(line: &str) -> String {
-    let l = line.to_ascii_lowercase();
-    // Verification / read-only patterns
-    if l.contains("verify") || l.contains("check") || l.contains("validate")
-        || l.contains("parse") || l.contains("decode") || l.contains("unmarshal")
-        || l.contains("deserialize") || l.contains("read") || l.contains("load_cert")
-        || l.contains("x509_check") || l.contains("certificate_verify")
-    {
+    static RES: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
+    let (verify_re, negotiate_re, protect_re) = RES.get_or_init(|| {
+        (
+            Regex::new(r"(?i)\b(verif(?:y|ied|ies|ication)|checks?|validat(?:e|ed|es|ion)|parse[sd]?|decode[sd]?|unmarshal|deserializ(?:e|ed)|load_cert|x509_check|certificate_verify)\b").unwrap(),
+            Regex::new(r"(?i)\b(cipher_?list|cipher_?suites?|supported|preferred|available|offered|set_ciphers|groups_list|sigalgs)\b").unwrap(),
+            Regex::new(r"(?i)\b(sign(?:s|ed|ing|ature)?|encrypt(?:s|ed|ion)?|generate_?key|new_?key|keygen|seal|wrap_?key|deriv(?:e|ed|ation))\b").unwrap(),
+        )
+    });
+    if verify_re.is_match(line) {
         return "verify".to_string();
     }
-    // Negotiation / capability listing patterns
-    if l.contains("cipher_list") || l.contains("ciphersuite") || l.contains("supported")
-        || l.contains("preferred") || l.contains("available") || l.contains("offered")
-        || l.contains("set_ciphers") || l.contains("cipher_suites")
-    {
+    if negotiate_re.is_match(line) {
         return "negotiate".to_string();
     }
-    // Active protection patterns
-    if l.contains("sign") || l.contains("encrypt") || l.contains("generate_key")
-        || l.contains("new_key") || l.contains("keygen") || l.contains("seal")
-        || l.contains("wrap_key") || l.contains("derive")
-    {
+    if protect_re.is_match(line) {
         return "protect".to_string();
     }
     "observed".to_string()
+}
+
+/// Closed intent vocabulary — LLM output outside this set is discarded (injection defense).
+fn is_known_intent(intent: &str) -> bool {
+    matches!(intent, "protect" | "verify" | "parse" | "negotiate" | "test" | "observed")
+}
+
+/// Confidence for a detection method adjusted by usage intent. Passive/observing
+/// intents lower the floor; nothing here can exceed the method's deterministic tier.
+fn intent_adjusted_confidence(method: DetectionMethod, intent: &str) -> f64 {
+    match intent {
+        "verify" | "parse" => method.confidence_floor() * 0.70,
+        "negotiate" => method.confidence_floor() * 0.85,
+        "test" => DetectionMethod::RegexMatchTestFile.confidence_floor(),
+        _ => method.confidence_floor(),
+    }
+}
+
+/// Algorithms whose findings are flagged quantum-vulnerable (or classically weak for
+/// MD5/SHA-1/legacy-symmetric) and receive candidate remediation patches.
+fn is_quantum_vulnerable(name: &str) -> bool {
+    matches!(
+        name,
+        "RSA" | "ECDSA" | "ECDH" | "ECDHE" | "DH" | "DSA" | "Ed25519" | "X25519" | "MD5"
+            | "SHA-1" | "legacy-symmetric"
+    )
+}
+
+/// True when the text immediately before `start` is an ML-/SLH- prefix, i.e. the
+/// match is the tail of a post-quantum algorithm token (ML-DSA, SLH-DSA).
+fn is_pq_prefixed(line: &str, start: usize) -> bool {
+    let pre = line[..start].to_ascii_lowercase();
+    pre.ends_with("ml-") || pre.ends_with("ml_") || pre.ends_with("slh-") || pre.ends_with("slh_")
+}
+
+/// Scan a RAW (unstripped) line for algorithm names inside string literals, gated on
+/// the line also containing a known crypto-API call. This is how JCA, Node `crypto`,
+/// Python `hashlib`/`cryptography`, and OpenSSL EVP select algorithms — entirely
+/// invisible to the stripped-identifier pass.
+/// Returns (canonical name, family, role, byte column, matched token).
+fn string_literal_hits(raw_line: &str) -> Vec<(&'static str, &'static str, CryptoRole, usize, String)> {
+    static RES: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
+    let (api_re, quoted_re, token_re) = RES.get_or_init(|| {
+        (
+            Regex::new(r#"(?ix)\b(getInstance|MessageDigest|KeyPairGenerator|KeyFactory|KeyAgreement|createHash|createHmac|createCipheriv|createSign|createVerify|createDiffieHellman|generateKeyPair(?:Sync)?|hashlib|EVP_(?:get_digestbyname|MD_fetch|CIPHER_fetch|PKEY)|SSL_CTX_set1?_(?:groups|sigalgs|curves)|set_ciphers|HashAlgorithmName|SignatureAlgorithm|CryptoConfig|algorithms?\s*[:=])"#).unwrap(),
+            Regex::new(r#"["'`]([^"'`]{1,120})["'`]"#).unwrap(),
+            Regex::new(r"(?i)\b(rsa|ecdsa|ecdhe?|dsa|ed25519|x25519|curve25519|md5|sha-?1|des(?:ede)?|3des|rc4)\b").unwrap(),
+        )
+    });
+    let mut hits = Vec::new();
+    if !api_re.is_match(raw_line) {
+        return hits;
+    }
+    for q in quoted_re.captures_iter(raw_line) {
+        let content = q.get(1).unwrap();
+        for t in token_re.find_iter(content.as_str()) {
+            if is_pq_prefixed(content.as_str(), t.start()) {
+                continue;
+            }
+            let mapped = match t.as_str().to_ascii_lowercase().as_str() {
+                "rsa" => ("RSA", "RSA", CryptoRole::Signature),
+                "ecdsa" => ("ECDSA", "ECC", CryptoRole::Signature),
+                "ecdh" | "ecdhe" => ("ECDHE", "ECC", CryptoRole::KeyExchange),
+                "dsa" => ("DSA", "DSA", CryptoRole::Signature),
+                "ed25519" => ("Ed25519", "ECC", CryptoRole::Signature),
+                "x25519" | "curve25519" => ("X25519", "ECC", CryptoRole::KeyExchange),
+                "md5" => ("MD5", "hash", CryptoRole::Hash),
+                "sha1" | "sha-1" => ("SHA-1", "hash", CryptoRole::Hash),
+                "des" | "desede" | "3des" | "rc4" => {
+                    ("legacy-symmetric", "legacy", CryptoRole::Symmetric)
+                }
+                _ => continue,
+            };
+            if hits.iter().any(|(n, ..)| *n == mapped.0) {
+                continue;
+            }
+            hits.push((
+                mapped.0,
+                mapped.1,
+                mapped.2,
+                content.start() + t.start(),
+                t.as_str().to_string(),
+            ));
+        }
+    }
+    hits
 }
 
 fn language(path: &Path) -> String {
@@ -627,6 +921,32 @@ fn infer_curve(line: &str) -> String {
     String::new()
 }
 
+/// Build a minimal unified-diff patch for a quantum-vulnerable line using
+/// static replacement heuristics (no LLM required).
+fn build_static_patch(path_str: &str, line_num: usize, line: &str, name: &str) -> String {
+    // Role-aware target selection: signature use migrates to ML-DSA, key
+    // establishment to ML-KEM (RSA is ambiguous — decide from line context).
+    let l = line.to_ascii_lowercase();
+    let signing_context = l.contains("sign") || l.contains("certificate") || l.contains("cert");
+    let replacement = match name {
+        "MD5" | "SHA-1" => line
+            .replace("MD5", "SHA256")
+            .replace("SHA-1", "SHA256")
+            .replace("SHA1", "SHA256")
+            .replace("md5", "sha256")
+            .replace("sha1", "sha256"),
+        "ECDSA" | "DSA" | "Ed25519" => line.replace(name, "MLDSA65"),
+        "ECDHE" | "ECDH" | "DH" | "X25519" => line.replace(name, "MLKEM768"),
+        "RSA" if signing_context => line.replace(name, "MLDSA65"),
+        _ => line.replace(name, "MLKEM768"),
+    };
+    format!(
+        "# janus candidate patch (heuristic, review required — never auto-applied)\n--- {path_str}\n+++ {path_str}\n@@ -{line_num},1 +{line_num},1 @@\n-{}\n+{}\n",
+        line.trim_end(),
+        replacement.trim_end()
+    )
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
@@ -638,5 +958,167 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod detection_method_tests {
+    use super::DetectionMethod;
+
+    #[test]
+    fn test_file_always_yields_lowest_tier() {
+        // Test-file flag overrides both intent and match count.
+        assert_eq!(
+            DetectionMethod::classify(true, "protect", 5),
+            DetectionMethod::RegexMatchTestFile
+        );
+        assert_eq!(
+            DetectionMethod::classify(true, "", 1),
+            DetectionMethod::RegexMatchTestFile
+        );
+    }
+
+    #[test]
+    fn multi_pattern_fires_at_two_or_more_matches() {
+        assert_eq!(
+            DetectionMethod::classify(false, "", 2),
+            DetectionMethod::MultiPatternCorroborated
+        );
+        assert_eq!(
+            DetectionMethod::classify(false, "protect", 3),
+            DetectionMethod::MultiPatternCorroborated
+        );
+        // Single match with intent does NOT reach MultiPatternCorroborated.
+        assert_ne!(
+            DetectionMethod::classify(false, "protect", 1),
+            DetectionMethod::MultiPatternCorroborated
+        );
+    }
+
+    #[test]
+    fn known_intents_yield_context_confirmed() {
+        for intent in &["protect", "verify", "negotiate"] {
+            assert_eq!(
+                DetectionMethod::classify(false, intent, 1),
+                DetectionMethod::ContextConfirmed,
+                "intent={intent}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_or_test_intent_yields_regex_match() {
+        for intent in &["", "test", "unknown", "other"] {
+            assert_eq!(
+                DetectionMethod::classify(false, intent, 1),
+                DetectionMethod::RegexMatch,
+                "intent={intent}"
+            );
+        }
+    }
+
+    #[test]
+    fn confidence_floors_match_spec() {
+        assert!((DetectionMethod::RegexMatchTestFile.confidence_floor() - 0.20).abs() < 1e-9);
+        assert!((DetectionMethod::RegexMatch.confidence_floor() - 0.60).abs() < 1e-9);
+        assert!((DetectionMethod::StringApiContext.confidence_floor() - 0.78).abs() < 1e-9);
+        assert!((DetectionMethod::ContextConfirmed.confidence_floor() - 0.80).abs() < 1e-9);
+        assert!((DetectionMethod::MultiPatternCorroborated.confidence_floor() - 0.88).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ordering_is_strongest_last() {
+        assert!(DetectionMethod::RegexMatchTestFile < DetectionMethod::RegexMatch);
+        assert!(DetectionMethod::RegexMatch < DetectionMethod::StringApiContext);
+        assert!(DetectionMethod::StringApiContext < DetectionMethod::ContextConfirmed);
+        assert!(DetectionMethod::ContextConfirmed < DetectionMethod::MultiPatternCorroborated);
+    }
+}
+
+#[cfg(test)]
+mod detection_quality_tests {
+    use super::*;
+
+    #[test]
+    fn intent_uses_word_boundaries() {
+        // Substring matching mislabeled these before.
+        assert_eq!(infer_usage_intent("let design = rsa_thing();"), "observed");
+        assert_eq!(infer_usage_intent("thread.spawn(rsa_task)"), "observed");
+        assert_eq!(infer_usage_intent("compute checksum with md5"), "observed");
+        // Real intents still classify.
+        assert_eq!(infer_usage_intent("rsa.sign(payload)"), "protect");
+        assert_eq!(infer_usage_intent("cert.verify(sig)"), "verify");
+        assert_eq!(infer_usage_intent("set_ciphers(list)"), "negotiate");
+    }
+
+    #[test]
+    fn string_literal_api_idioms_are_detected() {
+        let hits = string_literal_hits(r#"Cipher.getInstance("RSA/ECB/PKCS1Padding")"#);
+        assert!(hits.iter().any(|(n, ..)| *n == "RSA"), "JCA getInstance: {hits:?}");
+        let hits = string_literal_hits(r#"const h = crypto.createHash('md5');"#);
+        assert!(hits.iter().any(|(n, ..)| *n == "MD5"), "node createHash: {hits:?}");
+        let hits = string_literal_hits(r#"hashlib.new("sha1")"#);
+        assert!(hits.iter().any(|(n, ..)| *n == "SHA-1"));
+        // No API context on the line → no string findings (FP guard).
+        assert!(string_literal_hits(r#"log.info("uses RSA somewhere")"#).is_empty());
+        // PQ names inside strings must not fire the classical DSA rule.
+        assert!(string_literal_hits(r#"KeyPairGenerator.getInstance("ML-DSA-65")"#).is_empty());
+    }
+
+    #[test]
+    fn config_files_keep_string_values() {
+        let stripped = strip_comments_and_strings("ciphers = \"ECDHE-RSA-AES128\" # legacy\n", "toml");
+        assert!(stripped.contains("ECDHE-RSA-AES128"), "{stripped}");
+        assert!(!stripped.contains("legacy"));
+    }
+
+    #[test]
+    fn dsa_not_flagged_inside_pq_names() {
+        assert!(is_pq_prefixed("ML-DSA-65", 3));
+        assert!(is_pq_prefixed("SLH_DSA", 4));
+        assert!(!is_pq_prefixed("use DSA here", 4));
+    }
+
+    #[test]
+    fn hybrid_groups_and_missing_qv_algos_have_patterns() {
+        let pats = patterns().unwrap();
+        let find = |line: &str| -> Vec<&str> {
+            pats.iter().filter(|p| p.regex.is_match(line)).map(|p| p.name).collect()
+        };
+        assert!(find("ssh-ed25519 AAAA").contains(&"Ed25519"));
+        assert!(find("kex: X25519").contains(&"X25519"));
+        let hybrid = find("curve_pref = X25519MLKEM768");
+        assert!(hybrid.contains(&"PQ-hybrid-KEX"), "{hybrid:?}");
+        // Hybrid token must not double-report as classical X25519 or ML-KEM.
+        assert!(!hybrid.contains(&"X25519"));
+        assert!(!hybrid.contains(&"ML-KEM"));
+        assert!(find("DSA_generate_parameters").contains(&"DSA"));
+        assert!(!is_quantum_vulnerable("PQ-hybrid-KEX"));
+        assert!(is_quantum_vulnerable("Ed25519"));
+    }
+
+    #[test]
+    fn llm_intent_validation_is_closed_enum() {
+        assert!(is_known_intent("verify"));
+        assert!(!is_known_intent("ignore-previous-instructions"));
+        // LLM-supplied "test" intent down-ranks to the test-file floor.
+        let c = intent_adjusted_confidence(DetectionMethod::ContextConfirmed, "test");
+        assert!((c - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn static_patch_is_role_aware() {
+        let p = build_static_patch("a.go", 3, "cert := RSA_sign(key)", "RSA");
+        assert!(p.contains("MLDSA65"), "signing RSA should target ML-DSA: {p}");
+        let p = build_static_patch("a.go", 3, "shared := RSA_encrypt(pub)", "RSA");
+        assert!(p.contains("MLKEM768"), "key transport RSA should target ML-KEM: {p}");
+        assert!(p.starts_with("# janus candidate patch"));
+    }
+
+    #[test]
+    fn rust_tests_dir_is_test_path() {
+        assert!(is_test_path(Path::new("crate/tests/integration.rs")));
+        assert!(is_test_path(Path::new("pkg/__tests__/x.spec.ts")));
+        assert!(!is_test_path(Path::new("src/contest/scanner.rs")));
+    }
 }
 
