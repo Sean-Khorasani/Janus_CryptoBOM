@@ -27,3 +27,7 @@ Decision log, dead ends, and open questions. Newest entries at the bottom of eac
 - Deep review of source.rs found 11 defects (D1–D11, see docs/analysis/DETECTION-IMPROVEMENTS.md); 9 fixed and tested (14 tests green), D10 deliberately deferred pending calibration data, D11 mitigated.
 - Pre-existing compile breaks in the **user's uncommitted WIP** (plugin.rs:205 usize cast, interceptor.rs:245 FARPROC cast) fixed in the working tree but **left unstaged** — they belong to work this session didn't author; HEAD compiles without them.
 - Remaining session-limit-blocked work (rerun when tokens allow): 5 research domains (NIST/gov/ecosystem/cryptanalysis/tooling) → REPORT-v2.md; Phase 2 architecture/security docs; fixture corpus with measured precision/recall; ROADMAP.md.
+
+## 2026-06-12 — Shared-working-tree coordination (Windows ⇄ WSL)
+
+Both teammates operate on this SAME directory (WSL symlink → one tree, one .git). Protocol agreed: foreign uncommitted changes are off-limits; stage by explicit path only; no branch switches or concurrent same-file sessions without announcing here; worktree split proposed (see ONBOARDING.md Team Tips). Note for the Linux side: the ~79 modified files on main predate this session and were left untouched; two unstaged one-line build fixes in your WIP are mine (plugin.rs:205 usize cast, interceptor.rs:245 FARPROC cast) — keep or fold into your work. Current branch: research/pqc-verification-and-analysis.
