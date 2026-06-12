@@ -1,0 +1,17 @@
+# JOURNAL — PQC research verification & Janus improvement program
+
+Decision log, dead ends, and open questions. Newest entries at the bottom of each dated section.
+
+## 2026-06-12 — Session start
+
+**State found:**
+- `docs/RESEARCH.md` present (588 lines, knowledge horizon Jan 2026, ~30 ⚠ items). No `research/` artifacts yet.
+- Working tree on `main` had ~79 modified files (+4909/−1695) **uncommitted and not authored by this session**. Decision: do NOT commit or revert them; branch `research/pqc-verification-and-analysis` carries them in the working tree, but only files created by this program are staged/committed. **Open question for repo owner:** whether that working set should be committed or discarded.
+- Recent commits show prior sessions removed GitHub CI workflow (5ff505e) — so "CI on windows-latest + ubuntu-latest" (Phase 3 requirement) currently has no workflow to extend; will need to recreate one or document why not.
+
+**Plan:**
+1. Phase 1: six parallel research agents against live primary sources (NIST / IETF / gov timelines / ecosystem / cryptanalysis+implementations / competitive tooling) → `research/VERIFICATION.md`, `research/SOURCES.json`, `research/CHANGELOG.md`, `research/REPORT-v2.md`.
+2. Phase 2 in foreground while agents run: read server (Go), agent (Rust), UI (TS); build fixture corpus; measure detection precision/recall → `docs/analysis/*.md`.
+3. Checkpoint summary + `docs/ROADMAP.md`, then implement "now" tier on per-item feature branches.
+
+**Conventions discovered so far (to follow):** Go server `server/internal/*` packages, Rust agent modules under `agent/src/discovery/`, conventional commits already in history (`chore:`, `config:`, `hsm:` prefixes), `VERSION.env` as release contract, Makefile + MSBuild dual build.
