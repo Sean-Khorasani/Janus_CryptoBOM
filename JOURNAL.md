@@ -47,3 +47,17 @@ W6: labeled fixture corpus + precision/recall measurement as a cargo test (missi
 ## 2026-06-12 — W4/W5a/W6 delivered
 
 W6: corpus v1 measured precision 1.000 / recall 1.000 (14 files; caught+fixed DH_generate_key FN). W4: schannel-pq-remediation.ps1 recipe generator (gated, reversible, precondition-checked). W5a: .github/workflows/ci.yml restored for ubuntu+windows unit tests. Verified: agent 61/61, server all-ok on this machine. Remaining for either side: W5b e2e-on-CI (needs postgres service container), corpus adversarial expansion (Linux side invited, blind cases), 5 research domains, GAP-ANALYSIS/ROADMAP, server CBOM/QRisk.
+
+## 2026-06-12 — CLAIMED (Linux/WSL-side): L1–L6 implementation batch
+
+**L1** WP-026 docs: `docs/PRIVACY_DATA_GOVERNANCE.md` + prompt-injection test stubs in `agent/src/evidence.rs`
+**L2** WP-027 partial: `docs/ALGORITHM_COMPATIBILITY.md` — algorithm-to-PQC migration compatibility matrix (static reference)
+**L3** WP-013 auto-reopen: extend `InsertTelemetry` in `server/internal/store/store.go` to auto-reopen resolved findings on recurrence + `store_test.go`
+**L4** WP-022 fields: extend `WavePlan` with `CanaryTargets`/`MaintenanceWindow`/`ApprovalPolicy` fields + DB migration 25; extend `waveplan_test.go`
+**L5** UI improvements: `ui/src/components/FindingTimeline.tsx` (new), wire into `FindingsGrid.tsx`; compliance-rules panel in `PolicyStudio.tsx`; cert-health card in `OverviewView.tsx`
+**L6** WP-019 tests: policy engine fuzz test (`server/internal/policy/engine_fuzz_test.go`); httpapi property tests expansion
+Files Windows teammate should NOT touch while these are in-flight: `server/internal/store/store.go`, `server/internal/waveplan/`, `ui/src/components/FindingsGrid.tsx`, `ui/src/components/PolicyStudio.tsx`, `ui/src/components/OverviewView.tsx`.
+
+## 2026-06-12 — Full-project review (docs/analysis/PROJECT-REVIEW.md)
+
+Read UI (App/useApi/auth/Header/AgentFleetInventory/OverviewView/i18n), server auth.go + hsm/softhsm.go. Findings: 5 security (S1 hardcoded creds=Critical, S5 fake SoftHSM Verify=Critical, S2 public agent endpoints, S3 token-in-localStorage/URL, S4 static agent token), 5 partial impls (P1 real-time/useWebSocket missing — polling-only despite CLAUDE.md; P2 HSM stub; P3 bulk-select dead-end; P4 saveAgentDiagnostics dead code; P5 client-local finding lifecycle), 6 bugs (B1 per-asset remediation fudge, B2 Safety Score ignores triage, B3 type drift, B4 RTL not applied for fa, B5 error masking, B6 untranslated tabs), and 11 UI/UX recommendations led by real-time, RTL/i18n, trustworthy score, bulk-select resolution, keyboard-accessible sort headers, honest-coverage panel. Recommended immediate fixes: S1 + S5. Not yet implemented — awaiting go-ahead on which to action.
