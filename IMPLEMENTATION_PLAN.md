@@ -296,7 +296,24 @@ Resume roadmap implementation after manual server/agent/Web UI feedback.
 | WP-LNX-008 | In progress | Required Linux CI and release-evidence workflows exist; hosted runs, release signatures, and full declared-matrix evidence remain. |
 | Native manual-test deployment | Ready for manual testing | Additive isolated Linux server/UI/agent and Windows-agent bundles are staged under `dev/native-deployment/`; native server/UI/Linux-agent startup, shutdown, LAN API/UI access, login, registration, and telemetry upload pass locally. |
 | CR-AFM-001 through CR-AFM-014 | Implemented, verification in progress | Fleet contracts, immutable history, indexed APIs, real scan commands, paginated fleet/detail UI, home-page agent status/actions, provenance, contextual graph reports, live events, and scale tooling exist; full 5,000-agent and security evidence remains. |
-| WP-001 through WP-027 | Not started | Blocked by Linux Gate L0 according to the phase ordering above. |
+| WP-001 | Not started | Blocked by Linux Gate L0. |
+| WP-002 | Not started | Blocked by Linux Gate L0. |
+| WP-003 through WP-012 | Deferred | Security phase — implement after all functional/UI work is complete. |
+| WP-013 | Partially implemented | Lifecycle events, auto-reopen on recurrence, `GET /api/findings/{id}/timeline`, `GET /api/hosts/{uuid}/findings`. See WP-013 section. |
+| WP-014 | Not started | Requires large new deps (AST parsers per language). |
+| WP-015 | Partially implemented | CompatibilityAnalysis/DependencyUpdate in sandbox, HumanApprovalRequired. See WP-015 section. |
+| WP-016 | Partially implemented | TLS probing, STARTTLS, 9 assessment categories, OCSP placeholder, `docs/NETWORK_ASSESSMENT.md`. See WP-016 section. |
+| WP-017 | Partially implemented | 12 versioned ControlRules, BuiltinControlPack, profile EffectiveDate/FrameworkMappings, REST API, compliance rules UI. See WP-017 section. |
+| WP-018 | Partially implemented | Real cert health from DB, real SLA metrics, no fabricated values. UI cert-health card. See WP-018 section. |
+| WP-019 | Partially implemented | 71 Rust + 18 Go packages green, fuzz test, store interface assertion, race CI step. See WP-019 section. |
+| WP-020 | Not started | HA/tenancy infrastructure — P2, skip until functional complete. |
+| WP-021 | Partially implemented | CycloneDX 1.6 cryptoProperties, SARIF 2.1.0 with source locations. See WP-021 section. |
+| WP-022 | Extended | WavePlan CRUD + CanaryTargets/MaintenanceWindow/ApprovalPolicy/BudgetHours fields, DB migrations 22/25/27. 15+ tests. See WP-022 section. |
+| WP-023 | Scaffolded + exercise EP | Agility scorecard, REST API, UI dashboard, dry-run exercise endpoint. See WP-023 section. |
+| WP-024 | Partially implemented | SIEM-compatible webhook payload (event_type, source, finding, remediation fields). See WP-024 section. |
+| WP-025 | Partially implemented | SECURITY.md, SUPPORT.md, CAPABILITY_MATURITY.md, release readiness check endpoint. See WP-025 section. |
+| WP-026 | Substantially implemented | DataClassification enum, redact_secrets (5 patterns), 11 tests, PRIVACY_DATA_GOVERNANCE.md. See WP-026 section. |
+| WP-027 | Partially implemented | ALGORITHM_COMPATIBILITY.md migration matrix and library support table. See WP-027 section. |
 
 ### Latest Local Verification
 
