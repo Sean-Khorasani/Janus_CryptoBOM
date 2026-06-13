@@ -212,9 +212,9 @@ export function AgentFleetInventory() {
           {bulkStatus && <span className="text-[#4d594f] dark:text-[#8fa991]" role="status">{bulkStatus}</span>}
         </div>
       )}
-      <div className="overflow-x-auto">
+      <div className="max-h-[65vh] overflow-auto">
         <table className="w-full min-w-[1200px] text-left text-xs">
-          <thead><tr className="border-b border-[#dfe5dc] dark:border-[#2a3a30]">
+          <thead className="sticky top-0 z-10 bg-white dark:bg-[#1a2620]"><tr className="border-b border-[#dfe5dc] dark:border-[#2a3a30]">
             <th className="p-2"><input type="checkbox" aria-label="Select visible agents" checked={agents.length > 0 && agents.every(a => selectedAgents.has(a.host_uuid))} onChange={e => setSelectedAgents(e.target.checked ? new Set(agents.map(a => a.host_uuid)) : new Set())} /></th>
             {[["hostname","Agent"],["os_name","OS / Version"],["observed_ip","IP / DNS"],["agent_version","Agent Version"],["status","State"],["scan_progress","Progress"],["last_seen","Last Connection"],["last_scan_severity","Last Scan Risk"],["open_findings","Open Findings"]].map(([field,label]) => (
               <th

@@ -465,9 +465,9 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
         </div>
       )}
 
-      <div className="overflow-auto">
+      <div className="max-h-[60vh] overflow-auto">
         <table className="w-full min-w-[820px] text-left text-sm" role="table">
-          <thead className="border-b border-[#dfe5dc] text-xs uppercase text-[#697469] dark:border-[#2a3a30] dark:text-[#8fa991]">
+          <thead className="sticky top-0 z-10 border-b border-[#dfe5dc] bg-white text-xs uppercase text-[#697469] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#8fa991]">
             <tr>
               {canAnalyze && (
                 <th className="py-2 pr-2" scope="col">
