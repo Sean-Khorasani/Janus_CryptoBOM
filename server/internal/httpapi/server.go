@@ -82,6 +82,9 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.Handle("/api/llm/test-connection", RequireRole([]string{"admin"})(http.HandlerFunc(api.llmTestConnection)))
 	// LLM analysis pipeline (LLM-08/09/10/11/16)
 	mux.Handle("/api/llm/analyze", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.llmAnalyze)))
+	// Admin-initiated batch analysis (LLM-022): select N findings or a filter, one request.
+	mux.Handle("/api/llm/analyze/batch", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.llmAnalyzeBatch)))
+	mux.HandleFunc("/api/llm/batches/", api.llmBatchStatus)
 	mux.HandleFunc("/api/llm/jobs", api.llmJobs)
 	mux.HandleFunc("/api/llm/jobs/", api.llmJobs)
 	mux.HandleFunc("/api/llm/verdicts/", api.llmVerdict)
