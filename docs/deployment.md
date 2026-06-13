@@ -265,5 +265,4 @@ Available in `/api/overview` and compliance report.
 - [Design Manual](design.md) — Architecture, DB schema, API contracts
 - [Case Studies](case_studies.md) — 12 production playbooks
 - [Competitive Analysis](competitive-analysis.md) — 10-competitor comparison
-- [Feature Inventory](feature-inventory.md) — Implementation status
 - [Main README](../README.md) — Platform overview, quickstart

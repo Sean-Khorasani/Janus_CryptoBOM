@@ -237,5 +237,4 @@ Each profile supports `minimum_confidence` (default 0.4) for finding filtering (
 - [Deployment Guide](deployment.md) — HA topologies, systemd/GPO/Docker/Helm
 - [Case Studies](case_studies.md) — 12 production playbooks
 - [Competitive Analysis](competitive-analysis.md) — 10-competitor comparison
-- [Feature Inventory](feature-inventory.md) — 32-feature status tracking
 - [Main README](../README.md) — Overview, quickstart, API reference

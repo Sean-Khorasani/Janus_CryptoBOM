@@ -201,5 +201,4 @@ certutil -store Root
 - [Design Manual](design.md) — Architecture, DB schema, API contracts, sequence diagrams
 - [Deployment Guide](deployment.md) — HA topologies, env vars, systemd/GPO/Docker
 - [Competitive Analysis](competitive-analysis.md) — 10-competitor comparison, 24-feature roadmap
-- [Feature Inventory](feature-inventory.md) — Implementation status of all 32 features
 - [Main README](../README.md) — Platform overview, quickstart, API reference

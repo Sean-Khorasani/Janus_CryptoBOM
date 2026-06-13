@@ -98,7 +98,7 @@ and JWT signing; it is shared controller↔agent and required at startup.
 | Property / fuzz | ✅ | `policy.FuzzAssess` (seeded corpus) |
 | Race / concurrency | ✅ | `make race`; ws hub broadcast, webhook circuit breaker, graceful-shutdown drain — all `-race` clean |
 | Fault injection | ✅ (partial) | `WaitWebhooks` timeout drain; store-error paths via `writeError` |
-| Detection benchmark | ✅ | `detection_benchmark` — precision/recall by detector & language (`docs/analysis/DETECTION-BENCHMARK.md`) |
+| Detection benchmark | ✅ | `detection_benchmark` — precision/recall by detector & language |
 | Performance baseline | ✅ | `BenchmarkAssess` (~110 µs/op, 200-component payload) — recorded in release evidence |
 | Migration adapter | ✅ (Linux) | nginx/apache/ssh validate+reload+rollback (WP-LNX-006) |
 | HA / failover | ❌ | requires multi-replica coordination **[WP-020]** |
