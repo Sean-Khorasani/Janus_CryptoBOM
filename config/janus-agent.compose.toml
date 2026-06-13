@@ -1,0 +1,25 @@
+controller_endpoint = "http://janus-server:9443"
+execution_mode = "passive"
+cache_path = "/data/agent.db"
+host_uuid_path = "/data/janus-host-id"
+report_path = "/data/janus-agent-report.html"
+sarif_path = "/data/janus-agent.sarif"
+scan_interval_seconds = 60
+max_file_bytes = 2097152
+max_binary_bytes = 16777216
+command_signing_key = "overridden-by-JANUS_COMMAND_SIGNING_KEY_FILE"
+
+scan_roots = ["/scan/tests/testdata"]
+exclude_dirs = [".git", "target", "node_modules", "dist", ".venv", "__pycache__"]
+network_targets = []
+enable_runtime_discovery = false
+enable_process_memory_scraping = false
+enable_plugin_discovery = false
+enable_active_tls_probing = false
+plugin_dirs = []
+intercept_mode = "disabled"
+
+[active]
+allowed_services = []
+allowed_config_roots = []
+backup_dir = "/data/.janus-backups"

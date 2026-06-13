@@ -1,3 +1,26 @@
+metadata:
+  version: "1.0.0"
+  effective_date: "2026-01-01"
+  authority: "Enterprise-defined"
+  review_cadence: "annually"
+  status: "active"
+  evidence_requirements:
+    - "All findings must cite at least one Evidence record with confidence >= 0.6"
+    - "COMPLIANT label requires absence of critical/high severity findings for 30 days"
+    - "Assessments expire after 90 days without re-scan"
+
+compliance_labeling:
+  disclaimer: "Compliance labels are evidence-dependent assessments, not certifications"
+  compliant_requires:
+    no_critical_findings: true
+    no_high_findings_for_days: 30
+    last_scan_within_days: 90
+    evidence_confidence_minimum: 0.6
+  non_compliant_on:
+    any_critical_finding: true
+    scan_gap_days: 90
+    evidence_below_threshold: true
+
 version: custom-enterprise
 minimum_rsa_key_bits: 2048
 minimum_dh_safe_prime_bits: 2048

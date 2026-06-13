@@ -106,6 +106,7 @@ message CryptoAlgorithm {
   string symbol = 11;
   double confidence = 12;
   bool quantum_vulnerable = 13;
+  string context_snippet = 14;
 }
 
 message CryptoFinding {
