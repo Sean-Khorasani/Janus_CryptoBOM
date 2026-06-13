@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,10 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/janus-cbom/janus/server/internal/config"
 )
 
 type contextKey string
@@ -118,8 +123,9 @@ func AuthMiddleware(secret []byte, disableAuth bool) func(http.Handler) http.Han
 				return
 			}
 
-			// Heartbeat and CSR creation remain public for compatibility with older agents.
-			if r.URL.Path == "/api/agent/heartbeat" || r.URL.Path == "/api/certificates/csr" || r.URL.Path == "/api/health" || r.URL.Path == "/api/auth/login" {
+			// Heartbeat remains public for compatibility with older agents.
+			// CSR generation (AUTH-003) is operator/admin-only — removed from the public allowlist.
+			if r.URL.Path == "/api/agent/heartbeat" || r.URL.Path == "/api/health" || r.URL.Path == "/api/auth/login" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -197,7 +203,11 @@ type LoginResponse struct {
 	Role  string `json:"role"`
 }
 
-func LoginHandler(secret []byte, disableAuth bool) http.HandlerFunc {
+// dummyBcryptHash is a valid bcrypt hash of a random value, compared against when
+// no user matches so login timing doesn't leak username existence (S1).
+var dummyBcryptHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMy.Mrq4kZpaX3y0kF1cV1q1qFp9q1q1q1q")
+
+func LoginHandler(secret []byte, disableAuth bool, creds []config.Credential) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -216,17 +226,25 @@ func LoginHandler(secret []byte, disableAuth bool) http.HandlerFunc {
 			}
 			role = "admin"
 		} else {
-			// Static credentials for dev/prototype use.
-			if req.Username == "admin" && req.Password == "janus-admin-pass" {
-				role = "admin"
-			} else if req.Username == "operator" && req.Password == "janus-operator-pass" {
-				role = "operator"
-			} else if req.Username == "viewer" && req.Password == "janus-viewer-pass" {
-				role = "viewer"
-			} else {
+			// Credentials come from config (env), bcrypt-hashed — no compiled-in
+			// passwords (S1). Always run one bcrypt compare (against a dummy hash on
+			// miss) to avoid leaking which usernames exist.
+			var matched *config.Credential
+			for i := range creds {
+				if subtle.ConstantTimeCompare([]byte(creds[i].Username), []byte(req.Username)) == 1 {
+					matched = &creds[i]
+					break
+				}
+			}
+			hash := dummyBcryptHash
+			if matched != nil {
+				hash = matched.Hash
+			}
+			if err := bcrypt.CompareHashAndPassword(hash, []byte(req.Password)); err != nil || matched == nil {
 				http.Error(w, "invalid username or password", http.StatusUnauthorized)
 				return
 			}
+			role = matched.Role
 		}
 
 		token, err := GenerateToken(req.Username, role, secret)

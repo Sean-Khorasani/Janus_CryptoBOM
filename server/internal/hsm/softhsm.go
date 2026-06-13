@@ -1,6 +1,9 @@
 package hsm
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 	"time"
@@ -10,15 +13,22 @@ import (
 
 // SoftHSM2 implements the HSM interface using an in-memory software keystore.
 // This is a development/testing fallback when no physical HSM is available.
+//
+// Sign/Verify use real HMAC-SHA256 over a per-key random secret, so signatures
+// are unforgeable and Verify actually validates them (S5). The previous stub
+// returned a fixed byte pattern and Verify returned true for ANY signature —
+// a forgery hole if this fallback were ever reachable in production.
 type SoftHSM2 struct {
-	mu   sync.Mutex
-	keys map[string]KeyInfo
+	mu      sync.Mutex
+	keys    map[string]KeyInfo
+	secrets map[string][]byte // keyID -> HMAC secret
 }
 
 // NewSoftHSM2 creates a new SoftHSM2 software HSM instance.
 func NewSoftHSM2() *SoftHSM2 {
 	return &SoftHSM2{
-		keys: make(map[string]KeyInfo),
+		keys:    make(map[string]KeyInfo),
+		secrets: make(map[string][]byte),
 	}
 }
 
@@ -39,24 +49,29 @@ func (s *SoftHSM2) Sign(keyID string, data []byte) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.keys[keyID]; !ok {
+	secret, ok := s.secrets[keyID]
+	if !ok {
 		return nil, fmt.Errorf("softhsm: key %s not found", keyID)
 	}
-	// Return a deterministic signature for testing
-	sig := make([]byte, 64)
-	copy(sig, []byte(fmt.Sprintf("soft-hsm-sig-%s", keyID)))
-	return sig, nil
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(data)
+	return mac.Sum(nil), nil
 }
 
-// Verify checks a signature against data using the specified key.
+// Verify recomputes the HMAC over data and constant-time compares it to the
+// supplied signature. Returns false for a tampered signature or unknown key —
+// never an unconditional true.
 func (s *SoftHSM2) Verify(keyID string, data, signature []byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.keys[keyID]; !ok {
+	secret, ok := s.secrets[keyID]
+	if !ok {
 		return false, fmt.Errorf("softhsm: key %s not found", keyID)
 	}
-	return true, nil
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(data)
+	return hmac.Equal(mac.Sum(nil), signature), nil
 }
 
 // GenerateKeyPair creates a new key pair and stores it in memory.
@@ -65,6 +80,10 @@ func (s *SoftHSM2) GenerateKeyPair(algorithm string) (string, error) {
 	defer s.mu.Unlock()
 
 	keyID := uuid.NewString()
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", fmt.Errorf("softhsm: generate key secret: %w", err)
+	}
 	ki := KeyInfo{
 		KeyID:     keyID,
 		Label:     fmt.Sprintf("janus-soft-%s-%d", algorithm, time.Now().Unix()),
@@ -74,6 +93,7 @@ func (s *SoftHSM2) GenerateKeyPair(algorithm string) (string, error) {
 		CreatedAt: time.Now(),
 	}
 	s.keys[keyID] = ki
+	s.secrets[keyID] = secret
 	return keyID, nil
 }
 

@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // LLMConfig holds server-side LLM provider configuration.
@@ -109,7 +111,47 @@ type Config struct {
 	LogLevel          string
 	AgentStallSeconds int
 	GRPCMaxRecvBytes  int
-	LLM               LLMConfig
+	// GracefulShutdownSeconds bounds how long the server waits for in-flight
+	// HTTP requests, gRPC telemetry streams, and pending webhook dispatches to
+	// drain on SIGTERM/SIGINT before forcing exit (OPS-001).
+	GracefulShutdownSeconds int
+	LLM                     LLMConfig
+	// Credentials are the configured dashboard logins (S1). Loaded from env per
+	// role; there are NO compiled-in default passwords. Empty + auth enabled means
+	// login is disabled (fail closed) until an operator configures credentials.
+	Credentials []Credential
+}
+
+// Credential is one dashboard login: a username, its role, and a bcrypt hash.
+type Credential struct {
+	Username string
+	Role     string
+	Hash     []byte
+}
+
+// loadCredentials reads per-role credentials from the environment (S1). For each
+// role it prefers JANUS_<ROLE>_PASSWORD_HASH (a bcrypt hash, so no plaintext is
+// ever in the environment); otherwise it accepts JANUS_<ROLE>_PASSWORD (plaintext,
+// hashed at startup). Username defaults to the role name, overridable via
+// JANUS_<ROLE>_USERNAME. Roles with neither variable set simply cannot log in.
+func loadCredentials() []Credential {
+	var creds []Credential
+	for _, role := range []string{"admin", "operator", "viewer"} {
+		up := strings.ToUpper(role)
+		username := env("JANUS_"+up+"_USERNAME", role)
+		if h := strings.TrimSpace(os.Getenv("JANUS_" + up + "_PASSWORD_HASH")); h != "" {
+			creds = append(creds, Credential{Username: username, Role: role, Hash: []byte(h)})
+			continue
+		}
+		if p := os.Getenv("JANUS_" + up + "_PASSWORD"); p != "" {
+			hash, err := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)
+			if err != nil {
+				panic(fmt.Sprintf("hash JANUS_%s_PASSWORD: %v", up, err))
+			}
+			creds = append(creds, Credential{Username: username, Role: role, Hash: hash})
+		}
+	}
+	return creds
 }
 
 func FromEnv() Config {
@@ -137,8 +179,10 @@ func FromEnv() Config {
 		DBMaxConnLifetime: durationEnv("JANUS_DB_MAX_CONN_LIFETIME", 30*time.Minute),
 		DBMaxConnIdleTime: durationEnv("JANUS_DB_MAX_CONN_IDLE_TIME", 5*time.Minute),
 		LogLevel:          env("JANUS_LOG_LEVEL", "info"),
-		AgentStallSeconds: intEnv("JANUS_AGENT_STALL_SECONDS", 300),
-		GRPCMaxRecvBytes:  intEnv("JANUS_GRPC_MAX_RECV_BYTES", 32*1024*1024),
+		AgentStallSeconds:       intEnv("JANUS_AGENT_STALL_SECONDS", 300),
+		GRPCMaxRecvBytes:        intEnv("JANUS_GRPC_MAX_RECV_BYTES", 32*1024*1024),
+		GracefulShutdownSeconds: intEnv("JANUS_GRACEFUL_SHUTDOWN_SECONDS", 30),
+		Credentials:             loadCredentials(),
 	}
 
 	// Validate command signing key is set (no default fallback — fail on startup)
@@ -150,6 +194,15 @@ func FromEnv() Config {
 	}
 	if cfg.GRPCMaxRecvBytes < 4*1024*1024 {
 		panic("JANUS_GRPC_MAX_RECV_BYTES must be at least 4194304 (4 MiB)")
+	}
+	// Clamp graceful-shutdown window to a sane range (OPS-001). Zero or negative
+	// disables draining entirely, which would defeat the purpose; cap the upper
+	// bound so a misconfiguration cannot hang a rolling update indefinitely.
+	if cfg.GracefulShutdownSeconds < 1 {
+		cfg.GracefulShutdownSeconds = 1
+	}
+	if cfg.GracefulShutdownSeconds > 300 {
+		cfg.GracefulShutdownSeconds = 300
 	}
 
 	// LLM provider configuration — optional

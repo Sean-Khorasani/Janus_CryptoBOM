@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,9 +33,22 @@ type API struct {
 	hsmClient  hsm.HSM
 	cfg        config.Config
 	llmSvc     *llm.Service // set lazily in llmService()
+	// draining is set during graceful shutdown (OPS-001): the health endpoint
+	// then reports "draining" and new non-health requests receive 503 so load
+	// balancers stop routing traffic while in-flight requests finish.
+	draining atomic.Bool
 }
 
-func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine, jwtSecret []byte, disableAuth bool, wsHub *ws.Hub, cfg config.Config) http.Handler {
+// BeginDraining flips the API into draining mode (OPS-001). After this call the
+// health endpoint reports "draining" and new requests (other than /api/health)
+// receive 503 Service Unavailable.
+func (a *API) BeginDraining() {
+	a.draining.Store(true)
+}
+
+// New builds the HTTP API handler and returns it alongside the *API so the
+// caller can drive graceful-shutdown draining via api.BeginDraining() (OPS-001).
+func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engine, jwtSecret []byte, disableAuth bool, wsHub *ws.Hub, cfg config.Config) (http.Handler, *API) {
 	api := &API{
 		store:      store,
 		orch:       orch,
@@ -46,7 +60,7 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", api.health)
-	mux.HandleFunc("/api/auth/login", LoginHandler(jwtSecret, cfg.DisableAuth))
+	mux.HandleFunc("/api/auth/login", LoginHandler(jwtSecret, cfg.DisableAuth, cfg.Credentials))
 	mux.HandleFunc("/api/overview", api.overview)
 	mux.HandleFunc("/api/assets", api.assets)
 	mux.HandleFunc("/api/components", api.components)
@@ -58,7 +72,8 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/agents/", api.agentRoutes)          // per-agent detail/scans/connections/config/commands (UX-002)
 	mux.HandleFunc("/api/reports/", api.reportFindings)      // GET /api/reports/{scan_id}/findings (UX-003)
 	mux.HandleFunc("/api/scan-config/schema", api.scanConfigSchema) // GET scan-parameter schema (UX-004)
-	mux.HandleFunc("/api/certificates/csr", api.createCSR)
+	// CSR generation is operator/admin-only (AUTH-003): certificate issuance must stay under operator control.
+	mux.Handle("/api/certificates/csr", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.createCSR)))
 
 	// Require operator or admin role to enqueue migrations
 	mux.Handle("/api/migrations/enqueue", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.enqueueMigration)))
@@ -117,7 +132,24 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/metrics", api.metrics)
 
 	authWrapper := AuthMiddleware(jwtSecret, disableAuth)
-	return cors(authWrapper(mux))
+	return cors(drainGuard(api, authWrapper(mux))), api
+}
+
+// drainGuard rejects new requests with 503 while the server is draining during
+// graceful shutdown (OPS-001). The health endpoint is exempt so readiness
+// probes can observe the "draining" status and orchestrators can react.
+func drainGuard(api *API, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if api.draining.Load() && r.URL.Path != "/api/health" {
+			w.Header().Set("Retry-After", "5")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "draining",
+				"error":  "server is shutting down; retry after reconnect",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // spaHandler serves a React SPA from root. Static assets in root are served
@@ -143,6 +175,13 @@ func spaHandler(root string) http.Handler {
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	// During graceful shutdown report "draining" with 503 so orchestrators
+	// (Kubernetes readiness probes, load balancers) stop sending new traffic
+	// while in-flight requests finish (OPS-001).
+	if a.draining.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining", "api_version": version.APIVersion})
+		return
+	}
 	if err := a.store.Ping(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded", "error": err.Error()})
 		return
@@ -373,6 +412,13 @@ func (a *API) createCSR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// AUTH-003: certificate issuance is operator-controlled — record the actor.
+	username, _ := r.Context().Value(UserContextKey).(string)
+	_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
+		Username: username,
+		Action:   "CSR_GENERATE",
+		Details:  "common_name=" + req.CommonName + " target_signature=" + bundle.Profile.TargetSignature,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"csr_pem":            string(bundle.CSRPEM),
 		"private_key_sha256": certmanager.SHA256Hex(bundle.PrivatePEM),
