@@ -35,3 +35,7 @@ Both teammates operate on this SAME directory (WSL symlink → one tree, one .gi
 ## 2026-06-12 — CLAIMED (Windows-side Claude): items W1–W5
 
 W1 Windows agent depth (cert-store chain analysis, SChannel/CNG policy, PFX/JKS carving) · W2 CNG/SChannel PQ-capability detection (empirical, this machine) · W3 runtime/interceptor reconciliation (plugin.rs/interceptor.rs fixes are mine) · W4 SChannel remediation recipes + mutation.rs validation · W5 Windows e2e/CI/fixture measurement. Linux side: crypto-policies/eBPF/SSH depth, linux-gate, ubuntu CI. Neutral pool (first-come): research domains → REPORT-v2.md, GAP-ANALYSIS, ROADMAP, server CBOM/QRisk.
+
+## 2026-06-12 — W1/W2 delivered (commit follows), W4/W5 status
+
+W2 done: CNG PQ capability + SChannel group policy sensors, grounded in live probe of build 26200.8655 (ML-KEM/ML-DSA present in CNG; SChannel curves classical-only -> canonical finding). W1 done: cert-store QV flagging, weak-key, combo sig-alg fix, PQ-cert recognition, self-signed typing, PFX/PEM/JKS carving (metadata-only). W3 done earlier (fixes in tree, unstaged). W4 partial: remediation hint embedded in the SChannel finding; full recipe artifacts (PowerShell/registry diff + mutation.rs validation) remain. W5 not started (e2e needs PostgreSQL; CI workflow recreation pending). Linux side: please run make linux-gate over discovery changes - windows.rs parsers compile cross-platform with tests.
