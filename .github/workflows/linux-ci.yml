@@ -1,10 +1,10 @@
 name: Linux Gate L0
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  # Manual / on-demand only. This gate needs a full Linux toolchain plus
+  # systemd/HSM that GitHub-hosted runners don't provide; it's verified locally
+  # via `make linux-gate`. Run it from the Actions "Run workflow" button or a
+  # self-hosted runner. workflow_call is kept for composition.
   workflow_dispatch:
   workflow_call:
 

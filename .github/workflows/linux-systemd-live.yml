@@ -1,28 +1,12 @@
 name: Linux Live systemd Lifecycle
 
 on:
+  # Manual / on-demand only. A live systemd service lifecycle can't run on
+  # GitHub-hosted runners (no systemd as PID 1); run it via "Run workflow" or a
+  # self-hosted Linux runner. workflow_call is kept so the Linux Gate can invoke
+  # it when that gate is dispatched manually.
   workflow_call:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/linux-systemd-live.yml"
-      - "agent/**"
-      - "packaging/systemd/**"
-      - "scripts/ci/verify-linux-systemd-live.sh"
-      - "scripts/install-agent-linux.sh"
-      - "scripts/uninstall-agent-linux.sh"
-      - "rust-toolchain.toml"
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/linux-systemd-live.yml"
-      - "agent/**"
-      - "packaging/systemd/**"
-      - "scripts/ci/verify-linux-systemd-live.sh"
-      - "scripts/install-agent-linux.sh"
-      - "scripts/uninstall-agent-linux.sh"
-      - "rust-toolchain.toml"
 
 permissions:
   contents: read
