@@ -305,7 +305,11 @@ fn analyze_snippet_llm_sync(http_endpoint: &str, tmpl: &PromptTemplate, name: &s
         "temperature": tmpl.temperature
     }).to_string();
 
-    let mut stream = TcpStream::connect(host_port)?;
+    let addr: std::net::SocketAddr = host_port.parse()
+        .or_else(|_| std::net::ToSocketAddrs::to_socket_addrs(&host_port).map(|mut i| i.next().unwrap()))
+        .map_err(|e| anyhow::anyhow!("resolve {}: {}", host_port, e))?;
+    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     let req = format!(
         "POST /api/llm/proxy HTTP/1.1\r\n\
          Host: {}\r\n\
@@ -370,7 +374,11 @@ pub fn generate_remediation_patch_llm(
         "temperature": 0.0
     }).to_string();
 
-    let mut stream = TcpStream::connect(host_port)?;
+    let addr: std::net::SocketAddr = host_port.parse()
+        .or_else(|_| std::net::ToSocketAddrs::to_socket_addrs(&host_port).map(|mut i| i.next().unwrap()))
+        .map_err(|e| anyhow::anyhow!("resolve {}: {}", host_port, e))?;
+    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     let req = format!(
         "POST /api/llm/proxy HTTP/1.1\r\n\
          Host: {}\r\n\
