@@ -175,3 +175,57 @@ func TestReadinessChecklist_NonEmpty(t *testing.T) {
 		t.Error("ReadinessChecklist should return non-empty list")
 	}
 }
+
+func TestWavePlanValidatesApprovalPolicy(t *testing.T) {
+	valid := []string{"auto", "operator", "admin", ""}
+	for _, policy := range valid {
+		t.Run("valid:"+policy, func(t *testing.T) {
+			p, _ := newTestPlanner()
+			plan := &store.WavePlan{Name: "Test Wave", WaveNumber: 1, ApprovalPolicy: policy}
+			if err := p.Create(context.Background(), plan, "admin"); err != nil {
+				t.Errorf("expected approval_policy %q to be valid, got error: %v", policy, err)
+			}
+		})
+	}
+
+	invalid := []string{"superadmin", "root", "ADMIN", "Operator"}
+	for _, policy := range invalid {
+		t.Run("invalid:"+policy, func(t *testing.T) {
+			p, _ := newTestPlanner()
+			plan := &store.WavePlan{Name: "Test Wave", WaveNumber: 1, ApprovalPolicy: policy}
+			if err := p.Create(context.Background(), plan, "admin"); err == nil {
+				t.Errorf("expected approval_policy %q to be rejected, but Create succeeded", policy)
+			}
+		})
+	}
+}
+
+func TestWavePlanCanaryTargetsAllowed(t *testing.T) {
+	p, m := newTestPlanner()
+	plan := &store.WavePlan{
+		Name:          "Wave with Canaries",
+		WaveNumber:    1,
+		CanaryTargets: []string{"host-uuid-1", "host-uuid-2"},
+	}
+	if err := p.Create(context.Background(), plan, "admin"); err != nil {
+		t.Fatalf("Create with canary_targets failed: %v", err)
+	}
+	if len(m.plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(m.plans))
+	}
+	if len(m.plans[0].CanaryTargets) != 2 {
+		t.Errorf("expected 2 canary_targets, got %d", len(m.plans[0].CanaryTargets))
+	}
+}
+
+func TestWavePlanDefaultApprovalPolicy(t *testing.T) {
+	p, m := newTestPlanner()
+	// Empty approval_policy (the zero value) must be accepted — it is optional.
+	plan := &store.WavePlan{Name: "Test Wave", WaveNumber: 1}
+	if err := p.Create(context.Background(), plan, "admin"); err != nil {
+		t.Fatalf("expected empty approval_policy to pass validation, got: %v", err)
+	}
+	if m.plans[0].ApprovalPolicy != "" {
+		t.Errorf("expected approval_policy to remain empty, got %q", m.plans[0].ApprovalPolicy)
+	}
+}

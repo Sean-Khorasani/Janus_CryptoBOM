@@ -367,18 +367,21 @@ type AgilityMetrics struct {
 }
 
 type WavePlan struct {
-	PlanID           string     `json:"plan_id"`
-	Name             string     `json:"name"`
-	Description      string     `json:"description"`
-	WaveNumber       int        `json:"wave_number"`
-	AssetIDs         []string   `json:"asset_ids"`
-	AlgorithmTargets []string   `json:"algorithm_targets"`
-	StartDate        *time.Time `json:"start_date,omitempty"`
-	TargetDate       *time.Time `json:"target_date,omitempty"`
-	Status           string     `json:"status"`
-	CreatedBy        string     `json:"created_by"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	PlanID             string     `json:"plan_id"`
+	Name               string     `json:"name"`
+	Description        string     `json:"description"`
+	WaveNumber         int        `json:"wave_number"`
+	AssetIDs           []string   `json:"asset_ids"`
+	AlgorithmTargets   []string   `json:"algorithm_targets"`
+	StartDate          *time.Time `json:"start_date,omitempty"`
+	TargetDate         *time.Time `json:"target_date,omitempty"`
+	Status             string     `json:"status"`
+	CreatedBy          string     `json:"created_by"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	CanaryTargets      []string   `json:"canary_targets,omitempty" db:"canary_targets"`
+	MaintenanceWindow  string     `json:"maintenance_window,omitempty" db:"maintenance_window"`
+	ApprovalPolicy     string     `json:"approval_policy,omitempty" db:"approval_policy"`
 }
 
 type FindingLifecycleEvent struct {
@@ -814,6 +817,16 @@ CREATE TABLE IF NOT EXISTS tls_certificates (
 CREATE INDEX IF NOT EXISTS idx_tls_certs_expiry ON tls_certificates(not_after) WHERE not_after IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tls_certs_host ON tls_certificates(host_uuid, last_seen_at DESC);
 `},
+	{25, "Wave plan canary/maintenance/approval fields (WP-022)", `
+ALTER TABLE wave_plans
+  ADD COLUMN IF NOT EXISTS canary_targets TEXT[] DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS maintenance_window TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS approval_policy TEXT DEFAULT 'operator' CHECK (approval_policy IN ('auto','operator','admin'));
+`},
+	{26, "Finding reopen tracking columns (WP-013)", `
+ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS reopen_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS reopened_at TIMESTAMPTZ;
+`},
 }
 
 func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration, observedIP string) error {
@@ -990,6 +1003,34 @@ ON CONFLICT (occurrence_id) DO NOTHING`,
 			f.MigrationProfile, string(evidenceIDs), confidence)
 		if err != nil {
 			return err
+		}
+
+		// Auto-reopen: if the canonical finding for this (asset_ref, algorithm, policy_rule_id)
+		// was previously closed (remediated or accepted_risk), reopen it and record a lifecycle event.
+		// We look up by the conflict key tuple — not f.FindingId, which may change between scans.
+		var storedFindingID, storedStatus, storedHostUUID string
+		err = tx.QueryRow(ctx,
+			`SELECT finding_id, status, host_uuid FROM crypto_findings
+			 WHERE asset_ref=$1 AND algorithm=$2 AND policy_rule_id=$3`,
+			f.AssetRef, f.Algorithm, f.PolicyRuleId,
+		).Scan(&storedFindingID, &storedStatus, &storedHostUUID)
+		if err == nil && (storedStatus == "remediated" || storedStatus == "accepted_risk") {
+			_, err = tx.Exec(ctx,
+				`UPDATE crypto_findings
+				 SET status='open', reopen_count=reopen_count+1, reopened_at=now(), updated_at=now(), updated_by='system'
+				 WHERE finding_id=$1`,
+				storedFindingID)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `
+INSERT INTO finding_lifecycle_events (event_id, finding_id, host_uuid, event_type, from_status, to_status, actor, reason, occurred_at)
+VALUES ($1, $2, $3, 'reopened', $4, 'open', 'system', 'finding recurred in scan', now())
+ON CONFLICT (event_id) DO NOTHING`,
+				uuid.New().String(), storedFindingID, storedHostUUID, storedStatus)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	for _, component := range payload.Components {

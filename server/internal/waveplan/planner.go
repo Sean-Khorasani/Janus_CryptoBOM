@@ -115,6 +115,14 @@ func ReadinessChecklist() []string {
 	}
 }
 
+// validApprovalPolicies is the complete set of allowed approval_policy values.
+var validApprovalPolicies = map[string]bool{
+	"":         true,
+	"auto":     true,
+	"operator": true,
+	"admin":    true,
+}
+
 func validate(plan *store.WavePlan) error {
 	if plan.Name == "" {
 		return errors.New("wave plan name is required")
@@ -124,6 +132,9 @@ func validate(plan *store.WavePlan) error {
 	}
 	if plan.TargetDate != nil && plan.StartDate != nil && plan.TargetDate.Before(*plan.StartDate) {
 		return errors.New("target_date must not be before start_date")
+	}
+	if !validApprovalPolicies[plan.ApprovalPolicy] {
+		return fmt.Errorf("approval_policy must be one of auto, operator, admin (got %q)", plan.ApprovalPolicy)
 	}
 	return nil
 }
