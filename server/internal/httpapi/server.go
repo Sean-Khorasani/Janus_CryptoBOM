@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/janus-cbom/janus/server/internal/certmanager"
 	"github.com/janus-cbom/janus/server/internal/config"
 	"github.com/janus-cbom/janus/server/internal/hsm"
@@ -17,6 +18,7 @@ import (
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/sandbox"
 	"github.com/janus-cbom/janus/server/internal/store"
+	"github.com/janus-cbom/janus/server/internal/version"
 	"github.com/janus-cbom/janus/server/internal/ws"
 )
 
@@ -49,7 +51,7 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/assets", api.assets)
 	mux.HandleFunc("/api/components", api.components)
 	mux.HandleFunc("/api/findings", api.findings)
-	mux.HandleFunc("/api/findings/", api.findingStatus) // PUT /api/findings/{id}/status
+	mux.HandleFunc("/api/findings/", api.findingsDispatch) // PUT /api/findings/{id}/status | GET /api/findings/{id}/timeline
 	mux.HandleFunc("/api/migrations", api.migrations)
 	mux.HandleFunc("/api/report.html", api.reportHTML)
 	mux.HandleFunc("/api/certificates/csr", api.createCSR)
@@ -63,6 +65,9 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/policies", api.policies)
 	mux.HandleFunc("/api/policies/active", api.activePolicy)
 	mux.HandleFunc("/api/policies/create", api.createPolicy)
+	// Versioned compliance control pack (WP-017)
+	mux.HandleFunc("/api/policy/rules", api.complianceRules)
+	mux.HandleFunc("/api/policy/rules/", api.complianceRuleByID)
 	mux.HandleFunc("/api/agent/heartbeat", api.agentHeartbeat)
 	mux.HandleFunc("/api/fleet/config", api.fleetConfig)
 	mux.HandleFunc("/api/fleet/profiles", api.fleetProfiles)
@@ -443,33 +448,147 @@ func intParam(r *http.Request, key string, def int) int {
 // Export handlers
 // ---------------------------------------------------------------------------
 
+// algCryptoProperties maps a CycloneDX algorithm name string to a cryptoProperties block
+// following the CycloneDX 1.6 cryptography extension schema.
+func algCryptoProperties(algName string) map[string]any {
+	upper := strings.ToUpper(algName)
+	props := map[string]any{"assetType": "algorithm"}
+	ap := map[string]any{"implementationPlatform": "unknown"}
+	switch {
+	case strings.HasPrefix(upper, "ML-KEM") || strings.HasPrefix(upper, "MLKEM") ||
+		strings.HasPrefix(upper, "KYBER") || strings.HasPrefix(upper, "X25519MLKEM"):
+		ap["primitive"] = "kem"
+		if strings.Contains(upper, "512") {
+			ap["parameterSetIdentifier"] = "512"
+			ap["nistQuantumSecurityLevel"] = 1
+		} else if strings.Contains(upper, "768") || strings.Contains(upper, "X25519MLKEM768") {
+			ap["parameterSetIdentifier"] = "768"
+			ap["nistQuantumSecurityLevel"] = 3
+		} else if strings.Contains(upper, "1024") {
+			ap["parameterSetIdentifier"] = "1024"
+			ap["nistQuantumSecurityLevel"] = 5
+		}
+	case strings.HasPrefix(upper, "ML-DSA") || strings.HasPrefix(upper, "MLDSA") || strings.HasPrefix(upper, "DILITHIUM"):
+		ap["primitive"] = "signature"
+		if strings.Contains(upper, "44") {
+			ap["parameterSetIdentifier"] = "44"
+			ap["nistQuantumSecurityLevel"] = 2
+		} else if strings.Contains(upper, "65") {
+			ap["parameterSetIdentifier"] = "65"
+			ap["nistQuantumSecurityLevel"] = 3
+		} else if strings.Contains(upper, "87") {
+			ap["parameterSetIdentifier"] = "87"
+			ap["nistQuantumSecurityLevel"] = 5
+		}
+	case strings.HasPrefix(upper, "SLH-DSA") || strings.HasPrefix(upper, "SLHDSA") || strings.HasPrefix(upper, "SPHINCS"):
+		ap["primitive"] = "signature"
+		ap["nistQuantumSecurityLevel"] = 1
+	case strings.HasPrefix(upper, "RSA"):
+		ap["primitive"] = "pke"
+		ap["nistQuantumSecurityLevel"] = 0
+		for _, bits := range []string{"4096", "3072", "2048", "1024", "512"} {
+			if strings.Contains(upper, bits) {
+				ap["parameterSetIdentifier"] = bits
+				break
+			}
+		}
+	case strings.HasPrefix(upper, "ECDSA") || strings.HasPrefix(upper, "ECDH"):
+		ap["primitive"] = "signature"
+		ap["nistQuantumSecurityLevel"] = 0
+		for _, curve := range []string{"P-521", "P-384", "P-256", "SECP256K1"} {
+			if strings.Contains(upper, strings.ReplaceAll(curve, "-", "")) || strings.Contains(upper, curve) {
+				ap["parameterSetIdentifier"] = curve
+				break
+			}
+		}
+	case strings.HasPrefix(upper, "AES"):
+		ap["primitive"] = "ae"
+		ap["nistQuantumSecurityLevel"] = 0
+		for _, size := range []string{"256", "192", "128"} {
+			if strings.Contains(upper, size) {
+				ap["parameterSetIdentifier"] = size
+				break
+			}
+		}
+		for _, mode := range []string{"GCM", "CBC", "CTR", "CCM", "CFB", "OFB"} {
+			if strings.Contains(upper, mode) {
+				ap["mode"] = strings.ToLower(mode)
+				break
+			}
+		}
+	case strings.HasPrefix(upper, "SHA"):
+		ap["primitive"] = "hash"
+		ap["nistQuantumSecurityLevel"] = 0
+		for _, size := range []string{"3-512", "3-256", "512", "384", "256", "224"} {
+			if strings.Contains(upper, size) {
+				ap["parameterSetIdentifier"] = size
+				break
+			}
+		}
+	case strings.HasPrefix(upper, "CHACHA") || strings.HasPrefix(upper, "XCHACHA"):
+		ap["primitive"] = "ae"
+		ap["nistQuantumSecurityLevel"] = 0
+	case strings.HasPrefix(upper, "ED25519") || strings.HasPrefix(upper, "ED448"):
+		ap["primitive"] = "signature"
+		ap["nistQuantumSecurityLevel"] = 0
+	default:
+		return nil
+	}
+	props["algorithmProperties"] = ap
+	return props
+}
+
 func (a *API) exportCycloneDX(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	components, err := a.store.Components(r.Context(), 2000)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	type cdxComponent struct {
-		BomRef    string   `json:"bom-ref"`
-		Type      string   `json:"type"`
-		Name      string   `json:"name"`
-		Version   string   `json:"version"`
-		FilePath  string   `json:"evidence_filepath,omitempty"`
-		Algorithms []string `json:"algorithms,omitempty"`
+	type cdxCryptoComponent struct {
+		BomRef          string         `json:"bom-ref"`
+		Type            string         `json:"type"`
+		Name            string         `json:"name"`
+		Version         string         `json:"version,omitempty"`
+		Evidence        map[string]any `json:"evidence,omitempty"`
+		CryptoProperties map[string]any `json:"cryptoProperties,omitempty"`
 	}
-	cdxComps := make([]cdxComponent, 0, len(components))
+	cdxComps := make([]cdxCryptoComponent, 0, len(components))
 	for _, c := range components {
-		cdxComps = append(cdxComps, cdxComponent{
-			BomRef: c.BomRef, Type: c.ComponentType, Name: c.Name,
-			Version: c.Version, FilePath: c.FilePath, Algorithms: c.Algorithms,
-		})
+		comp := cdxCryptoComponent{
+			BomRef:  c.BomRef,
+			Type:    c.ComponentType,
+			Name:    c.Name,
+			Version: c.Version,
+		}
+		if c.FilePath != "" {
+			comp.Evidence = map[string]any{
+				"occurrences": []map[string]any{{"location": c.FilePath}},
+			}
+		}
+		// Add cryptoProperties for the first algorithm detected on this component.
+		if len(c.Algorithms) > 0 {
+			comp.CryptoProperties = algCryptoProperties(c.Algorithms[0])
+		}
+		cdxComps = append(cdxComps, comp)
 	}
 	cbom := map[string]any{
-		"bomFormat":   "CycloneDX",
-		"specVersion": "1.6",
-		"version":     1,
-		"metadata":    map[string]any{"timestamp": time.Now().UTC().Format(time.RFC3339)},
-		"components":  cdxComps,
+		"bomFormat":    "CycloneDX",
+		"specVersion":  "1.6",
+		"version":      1,
+		"serialNumber": "urn:uuid:" + uuid.New().String(),
+		"metadata": map[string]any{
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"tools": []map[string]any{{
+				"vendor":  "Janus CryptoBOM",
+				"name":    "janus-server",
+				"version": version.Version,
+			}},
+		},
+		"components": cdxComps,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", `attachment; filename="janus-cbom.cyclonedx.json"`)
@@ -496,44 +615,113 @@ func (a *API) exportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sarifSeverity maps Janus severity (1-5) to SARIF level strings.
+func sarifSeverity(sev int32) string {
+	switch {
+	case sev >= 5:
+		return "error"
+	case sev >= 3:
+		return "warning"
+	default:
+		return "note"
+	}
+}
+
+// parseSARIFLocation extracts a SARIF physicalLocation from an asset reference.
+// Asset refs may be plain file paths ("src/main.go") or include line hints
+// ("src/main.go:42" or "src/main.go:42:7"). Network observations use
+// "hostname:port" which produces an artifactLocation with no region.
+func parseSARIFLocation(assetRef string) map[string]any {
+	uri := assetRef
+	loc := map[string]any{}
+
+	// Try to parse "path:line" or "path:line:col" for source file findings.
+	// Only treat as line number if the suffix is purely numeric.
+	if idx := strings.LastIndex(assetRef, ":"); idx > 0 {
+		maybeNum := assetRef[idx+1:]
+		lineVal := 0
+		for _, ch := range maybeNum {
+			if ch < '0' || ch > '9' {
+				lineVal = -1
+				break
+			}
+			lineVal = lineVal*10 + int(ch-'0')
+		}
+		if lineVal > 0 {
+			uri = assetRef[:idx]
+			loc["region"] = map[string]any{"startLine": lineVal}
+		}
+	}
+
+	loc["artifactLocation"] = map[string]any{"uri": uri, "uriBaseId": "%SRCROOT%"}
+	return map[string]any{"physicalLocation": loc}
+}
+
 func (a *API) exportSARIF(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	findings, err := a.store.Findings(r.Context(), 5000)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	type sarifResult struct {
-		RuleID  string `json:"ruleId"`
-		Level   string `json:"level"`
-		Message struct {
-			Text string `json:"text"`
-		} `json:"message"`
-		Locations []map[string]any `json:"locations"`
-	}
-	var results []sarifResult
+
+	// Build SARIF rules from the unique policy_rule_ids seen in findings.
+	ruleSet := make(map[string]struct{})
 	for _, f := range findings {
-		level := "warning"
-		if f.Severity >= 5 {
-			level = "error"
-		} else if f.Severity <= 2 {
-			level = "note"
+		if f.PolicyRuleID != "" {
+			ruleSet[f.PolicyRuleID] = struct{}{}
 		}
-		sr := sarifResult{RuleID: f.PolicyRuleID, Level: level}
-		sr.Message.Text = f.Title + ": " + f.Description
-		sr.Locations = []map[string]any{{"physicalLocation": map[string]any{
-			"artifactLocation": map[string]string{"uri": f.AssetRef},
-		}}}
+	}
+	sarifRules := make([]map[string]any, 0, len(ruleSet))
+	for ruleID := range ruleSet {
+		sarifRules = append(sarifRules, map[string]any{
+			"id": ruleID,
+			"helpUri": "https://github.com/janus-cbom/janus/blob/main/docs/AGILITY_SCORECARD.md",
+		})
+	}
+
+	type sarifResult struct {
+		RuleID    string           `json:"ruleId"`
+		Level     string           `json:"level"`
+		Message   map[string]any   `json:"message"`
+		Locations []map[string]any `json:"locations"`
+		Properties map[string]any  `json:"properties,omitempty"`
+	}
+	results := make([]sarifResult, 0, len(findings))
+	for _, f := range findings {
+		sr := sarifResult{
+			RuleID:  f.PolicyRuleID,
+			Level:   sarifSeverity(f.Severity),
+			Message: map[string]any{"text": f.Title + ": " + f.Description},
+			Locations: []map[string]any{parseSARIFLocation(f.AssetRef)},
+		}
+		if f.Algorithm != "" || f.Confidence > 0 {
+			sr.Properties = map[string]any{
+				"algorithm":  f.Algorithm,
+				"confidence": f.Confidence,
+				"status":     f.Status,
+			}
+		}
 		results = append(results, sr)
 	}
+
 	sarif := map[string]any{
 		"$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
 		"version": "2.1.0",
 		"runs": []map[string]any{{
 			"tool": map[string]any{"driver": map[string]any{
-				"name": "Janus CryptoBOM", "version": "0.1.0",
+				"name":           "Janus CryptoBOM",
+				"version":        version.Version,
 				"informationUri": "https://github.com/janus-cbom/janus",
+				"rules":          sarifRules,
 			}},
-			"results": results,
+			"results":        results,
+			"originalUriBaseIds": map[string]any{
+				"%SRCROOT%": map[string]any{"uri": "./"},
+			},
 		}},
 	}
 	w.Header().Set("Content-Type", "application/json")

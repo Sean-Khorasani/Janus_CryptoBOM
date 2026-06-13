@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +79,16 @@ type Store interface {
 	GetWavePlans(ctx context.Context) ([]WavePlan, error)
 	UpdateWavePlan(ctx context.Context, plan *WavePlan) error
 	DeleteWavePlan(ctx context.Context, planID string) error
+	RecordLifecycleEvent(ctx context.Context, evt *FindingLifecycleEvent) error
+	ListLifecycleEvents(ctx context.Context, findingID string) ([]FindingLifecycleEvent, error)
+	GetCertHealth(ctx context.Context) (*CertHealth, error)
+}
+
+type CertHealth struct {
+	Expired       int `json:"expired"`
+	Expiring30    int `json:"expiring_30_days"`
+	Expiring90    int `json:"expiring_90_days"`
+	TotalTracked  int `json:"total_tracked"`
 }
 
 type Postgres struct {
@@ -367,6 +379,18 @@ type WavePlan struct {
 	CreatedBy        string     `json:"created_by"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type FindingLifecycleEvent struct {
+	EventID    string    `json:"event_id"`
+	FindingID  string    `json:"finding_id"`
+	HostUUID   string    `json:"host_uuid"`
+	EventType  string    `json:"event_type"`
+	FromStatus string    `json:"from_status"`
+	ToStatus   string    `json:"to_status"`
+	Actor      string    `json:"actor"`
+	Reason     string    `json:"reason"`
+	OccurredAt time.Time `json:"occurred_at"`
 }
 
 func NewPostgres(ctx context.Context, cfg PostgresConfig) (*Postgres, error) {
@@ -774,6 +798,22 @@ CREATE TABLE IF NOT EXISTS finding_lifecycle_events (
 CREATE INDEX IF NOT EXISTS idx_lifecycle_finding ON finding_lifecycle_events(finding_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_host ON finding_lifecycle_events(host_uuid, occurred_at DESC);
 `},
+	{24, "TLS certificate health tracking (WP-018)", `
+CREATE TABLE IF NOT EXISTS tls_certificates (
+  cert_id TEXT PRIMARY KEY,
+  host_uuid TEXT NOT NULL REFERENCES assets(host_uuid) ON DELETE CASCADE,
+  target TEXT NOT NULL,
+  protocol_version TEXT NOT NULL DEFAULT '',
+  cipher_suite TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  issuer TEXT NOT NULL DEFAULT '',
+  not_after TIMESTAMPTZ,
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  scan_id TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tls_certs_expiry ON tls_certificates(not_after) WHERE not_after IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tls_certs_host ON tls_certificates(host_uuid, last_seen_at DESC);
+`},
 }
 
 func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration, observedIP string) error {
@@ -970,6 +1010,29 @@ ON CONFLICT (scan_id,bom_ref) DO NOTHING`,
 		if err != nil {
 			return err
 		}
+	}
+
+	// Upsert TLS certificate health data from network observations (WP-018).
+	for _, obs := range payload.NetworkObservations {
+		if obs.CertificateNotAfterUnix == 0 {
+			continue
+		}
+		raw := sha256.Sum256([]byte(payload.HostUuid + ":" + obs.Endpoint + ":" + obs.CertificateSubject))
+		certID := hex.EncodeToString(raw[:8])
+		notAfter := time.Unix(obs.CertificateNotAfterUnix, 0).UTC()
+		_, _ = tx.Exec(ctx, `
+INSERT INTO tls_certificates (cert_id, host_uuid, target, protocol_version, cipher_suite, subject, issuer, not_after, last_seen_at, scan_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
+ON CONFLICT (cert_id) DO UPDATE SET
+  protocol_version = EXCLUDED.protocol_version,
+  cipher_suite = EXCLUDED.cipher_suite,
+  subject = EXCLUDED.subject,
+  issuer = EXCLUDED.issuer,
+  not_after = EXCLUDED.not_after,
+  last_seen_at = now(),
+  scan_id = EXCLUDED.scan_id`,
+			certID, payload.HostUuid, obs.Endpoint, obs.TlsVersion, obs.CipherSuite,
+			obs.CertificateSubject, obs.CertificateIssuer, notAfter, payload.TelemetryId)
 	}
 
 	return tx.Commit(ctx)
@@ -1695,10 +1758,48 @@ func (p *Postgres) UpdateFindingStatus(ctx context.Context, findingID, status, u
 	if !allowed[status] {
 		return errors.New("invalid status value")
 	}
-	_, err := p.pool.Exec(ctx, `
-UPDATE crypto_findings SET status=$2, updated_by=$3, updated_at=now() WHERE finding_id=$1`,
-		findingID, status, updatedBy)
-	return err
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var fromStatus, hostUUID string
+	if err := tx.QueryRow(ctx,
+		`SELECT status, host_uuid FROM crypto_findings WHERE finding_id=$1`,
+		findingID).Scan(&fromStatus, &hostUUID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("finding not found")
+		}
+		return err
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE crypto_findings SET status=$2, updated_by=$3, updated_at=now() WHERE finding_id=$1`,
+		findingID, status, updatedBy); err != nil {
+		return err
+	}
+
+	evt := &FindingLifecycleEvent{
+		EventID:    uuid.New().String(),
+		FindingID:  findingID,
+		HostUUID:   hostUUID,
+		EventType:  "status_change",
+		FromStatus: fromStatus,
+		ToStatus:   status,
+		Actor:      updatedBy,
+		Reason:     "",
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO finding_lifecycle_events (event_id, finding_id, host_uuid, event_type, from_status, to_status, actor, reason, occurred_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+ON CONFLICT (event_id) DO NOTHING`,
+		evt.EventID, evt.FindingID, evt.HostUUID, evt.EventType,
+		evt.FromStatus, evt.ToStatus, evt.Actor, evt.Reason); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (p *Postgres) Migrations(ctx context.Context) ([]Migration, error) {
@@ -2393,4 +2494,55 @@ WHERE plan_id=$1`,
 func (p *Postgres) DeleteWavePlan(ctx context.Context, planID string) error {
 	_, err := p.pool.Exec(ctx, `DELETE FROM wave_plans WHERE plan_id=$1`, planID)
 	return err
+}
+
+func (p *Postgres) RecordLifecycleEvent(ctx context.Context, evt *FindingLifecycleEvent) error {
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO finding_lifecycle_events (event_id, finding_id, host_uuid, event_type, from_status, to_status, actor, reason, occurred_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+ON CONFLICT (event_id) DO NOTHING`,
+		evt.EventID, evt.FindingID, evt.HostUUID, evt.EventType,
+		evt.FromStatus, evt.ToStatus, evt.Actor, evt.Reason)
+	return err
+}
+
+func (p *Postgres) ListLifecycleEvents(ctx context.Context, findingID string) ([]FindingLifecycleEvent, error) {
+	rows, err := p.pool.Query(ctx, `
+SELECT event_id, finding_id, host_uuid, event_type, from_status, to_status, actor, reason, occurred_at
+FROM finding_lifecycle_events
+WHERE finding_id = $1
+ORDER BY occurred_at ASC`, findingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []FindingLifecycleEvent
+	for rows.Next() {
+		var e FindingLifecycleEvent
+		if err := rows.Scan(&e.EventID, &e.FindingID, &e.HostUUID, &e.EventType,
+			&e.FromStatus, &e.ToStatus, &e.Actor, &e.Reason, &e.OccurredAt); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// TLS Certificate Health (WP-018)
+// ---------------------------------------------------------------------------
+
+func (p *Postgres) GetCertHealth(ctx context.Context) (*CertHealth, error) {
+	var h CertHealth
+	err := p.pool.QueryRow(ctx, `
+SELECT
+  COUNT(*) FILTER (WHERE not_after < now()) AS expired,
+  COUNT(*) FILTER (WHERE not_after >= now() AND not_after < now() + interval '30 days') AS expiring_30,
+  COUNT(*) FILTER (WHERE not_after >= now() AND not_after < now() + interval '90 days') AS expiring_90,
+  COUNT(*) AS total
+FROM tls_certificates`).Scan(&h.Expired, &h.Expiring30, &h.Expiring90, &h.TotalTracked)
+	if err != nil {
+		return nil, err
+	}
+	return &h, nil
 }

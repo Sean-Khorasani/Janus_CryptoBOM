@@ -13,14 +13,16 @@ import (
 )
 
 type Profile struct {
-	Version                string  `yaml:"version" json:"version"`
-	MinimumRSAKeyBits      uint32  `yaml:"minimum_rsa_key_bits" json:"minimum_rsa_key_bits"`
-	MinimumDHSafePrimeBits uint32  `yaml:"minimum_dh_safe_prime_bits" json:"minimum_dh_safe_prime_bits"`
-	RequireTLS13           bool    `yaml:"require_tls_13" json:"require_tls_13"`
-	RequireHybridPQTLS13   bool    `yaml:"require_hybrid_pq_tls_13" json:"require_hybrid_pq_tls_13"`
-	PreferredKEM           string  `yaml:"preferred_kem" json:"preferred_kem"`
-	PreferredSignature     string  `yaml:"preferred_signature" json:"preferred_signature"`
-	MinimumConfidence      float64 `yaml:"minimum_confidence" json:"minimum_confidence"`
+	Version                string   `yaml:"version" json:"version"`
+	MinimumRSAKeyBits      uint32   `yaml:"minimum_rsa_key_bits" json:"minimum_rsa_key_bits"`
+	MinimumDHSafePrimeBits uint32   `yaml:"minimum_dh_safe_prime_bits" json:"minimum_dh_safe_prime_bits"`
+	RequireTLS13           bool     `yaml:"require_tls_13" json:"require_tls_13"`
+	RequireHybridPQTLS13   bool     `yaml:"require_hybrid_pq_tls_13" json:"require_hybrid_pq_tls_13"`
+	PreferredKEM           string   `yaml:"preferred_kem" json:"preferred_kem"`
+	PreferredSignature     string   `yaml:"preferred_signature" json:"preferred_signature"`
+	MinimumConfidence      float64  `yaml:"minimum_confidence" json:"minimum_confidence"`
+	EffectiveDate          string   `yaml:"effective_date" json:"effective_date,omitempty"`
+	FrameworkMappings      []string `yaml:"framework_mappings" json:"framework_mappings,omitempty"`
 }
 
 type Engine struct {
@@ -39,6 +41,8 @@ func NIST2026Profile() Profile {
 		RequireHybridPQTLS13:   true,
 		PreferredKEM:           "X25519MLKEM768",
 		PreferredSignature:     "ML-DSA-65",
+		EffectiveDate:          "2025-08-13",
+		FrameworkMappings:      []string{"NIST.FIPS.203", "NIST.FIPS.204", "NIST.FIPS.205"},
 	}
 }
 
@@ -127,6 +131,20 @@ func (e *Engine) AvailableProfiles() []Profile {
 
 func (e *Engine) Assess(payload *pb.CbomTelemetryPayload) {
 	profile := e.GetActiveProfile()
+	e.assessWithProfile(payload, profile)
+}
+
+func (e *Engine) AssessWithVersion(payload *pb.CbomTelemetryPayload, version string) {
+	e.mu.RLock()
+	profile, ok := e.profiles[version]
+	e.mu.RUnlock()
+	if !ok {
+		profile = e.GetActiveProfile()
+	}
+	e.assessWithProfile(payload, profile)
+}
+
+func (e *Engine) assessWithProfile(payload *pb.CbomTelemetryPayload, profile Profile) {
 	for _, component := range payload.Components {
 		for _, alg := range component.Algorithms {
 			e.assessAlgorithm(payload, component, alg, profile)

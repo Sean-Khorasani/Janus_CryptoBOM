@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/janus-cbom/janus/server/internal/pb"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/store"
+	"github.com/janus-cbom/janus/server/internal/version"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,8 +44,9 @@ func complianceReportHTML(o *store.Overview, assets []store.Asset, findings []st
 	b.WriteString("h1{border-bottom:2px solid #11845b;padding-bottom:8px}h2{margin-top:24px;color:#11845b}")
 	b.WriteString("table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #dfe5dc;padding:8px;text-align:left}")
 	b.WriteString("th{background:#edf1ea}.critical{color:#b42318;font-weight:700}.pass{color:#11845b}.warn{color:#b54708}")
-	b.WriteString(".footer{margin-top:32px;font-size:0.8em;color:#697469}</style></head><body>")
+	b.WriteString(".toolbar{display:flex;gap:8px;margin-bottom:16px}.toolbar button,.toolbar a{border:1px solid #dfe5dc;border-radius:5px;background:#fff;color:#17211c;padding:8px 12px;text-decoration:none;cursor:pointer}.footer{margin-top:32px;font-size:0.8em;color:#697469}</style></head><body>")
 
+	b.WriteString("<nav class=\"toolbar\" aria-label=\"Report navigation\"><button type=\"button\" onclick=\"history.length > 1 ? history.back() : location.assign('/')\">Back</button><a href=\"/\">Home</a></nav>")
 	fmt.Fprintf(&b, "<h1>Janus CryptoBOM Compliance Report</h1>")
 	fmt.Fprintf(&b, "<p>Generated: %s | Active Policy: <strong>%s</strong> (RSA min %d, DH min %d, TLS 1.3: %v, Hybrid PQC: %v)</p>",
 		time.Now().UTC().Format(time.RFC3339), profile.Version, profile.MinimumRSAKeyBits, profile.MinimumDHSafePrimeBits,
@@ -61,16 +64,18 @@ func complianceReportHTML(o *store.Overview, assets []store.Asset, findings []st
 	fmt.Fprintf(&b, "<p>Assets: %d | Components: %d | Findings: %d | Critical: %d | High: %d | Stalled: %d | Open Migrations: %d</p>",
 		o.Assets, o.Components, o.Findings, o.CriticalFindings, o.HighFindings, o.StalledAgents, o.OpenMigrations)
 
-	b.WriteString("<h2>Regulatory Alignment</h2><table><tr><th>Framework</th><th>Status</th><th>Remaining Gaps</th></tr>")
+	b.WriteString("<h2>Regulatory Alignment</h2>")
+	b.WriteString("<p class=\"warn\"><em>Note: compliance labels below reflect scanner findings against policy thresholds. They are evidence-dependent assessments, not formal certifications. A \"No findings\" result requires complete scan coverage to be meaningful.</em></p>")
+	b.WriteString("<table><tr><th>Framework</th><th>Assessment</th><th>Remaining Gaps</th></tr>")
 	b.WriteString("<tr><td>NIST FIPS 203/204/205</td>")
 	if o.CriticalFindings == 0 && o.HighFindings < 5 {
-		b.WriteString("<td class=\"pass\">COMPLIANT</td><td>None</td>")
+		b.WriteString("<td class=\"pass\">NO CRITICAL FINDINGS</td><td>Verify full scan coverage</td>")
 	} else {
-		fmt.Fprintf(&b, "<td class=\"critical\">NON-COMPLIANT</td><td>%d critical, %d high findings</td>", o.CriticalFindings, o.HighFindings)
+		fmt.Fprintf(&b, "<td class=\"critical\">FINDINGS PRESENT</td><td>%d critical, %d high findings require remediation</td>", o.CriticalFindings, o.HighFindings)
 	}
 	b.WriteString("</tr><tr><td>CNSA 2.0</td>")
 	if profile.PreferredKEM == "ML-KEM-1024" && profile.PreferredSignature == "ML-DSA-87" {
-		b.WriteString("<td class=\"pass\">PROFILE ALIGNED</td><td>See NIST gaps</td>")
+		b.WriteString("<td class=\"pass\">PROFILE ALIGNED</td><td>See NIST FIPS findings above</td>")
 	} else {
 		b.WriteString("<td class=\"warn\">PROFILE MISMATCH</td><td>Activate CNSA 2.0 profile for ML-KEM-1024 + ML-DSA-87</td>")
 	}
@@ -97,7 +102,7 @@ func complianceReportHTML(o *store.Overview, assets []store.Asset, findings []st
 	}
 	b.WriteString("</table>")
 
-	b.WriteString("<div class=\"footer\">Janus CryptoBOM v0.1.0 | Apache 2.0 | Generated from controller evidence | ")
+	b.WriteString("<div class=\"footer\">Janus CryptoBOM | Apache 2.0 | Generated from controller evidence | ")
 	b.WriteString(time.Now().UTC().Format(time.RFC3339))
 	b.WriteString("</div></body></html>")
 	return b.String()
@@ -129,17 +134,17 @@ func (a *API) pqcLabSimulate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	simulated := map[string]interface{}{
-		"simulation_id":          fmt.Sprintf("sim-%d", time.Now().UnixNano()),
-		"input_algorithm":        req.Algorithm,
-		"target_service":         req.TargetService,
-		"recommended_kem":        profile.PreferredKEM,
-		"recommended_signature":  profile.PreferredSignature,
+		"simulation_id":         fmt.Sprintf("sim-%d", time.Now().UnixNano()),
+		"input_algorithm":       req.Algorithm,
+		"target_service":        req.TargetService,
+		"recommended_kem":       profile.PreferredKEM,
+		"recommended_signature": profile.PreferredSignature,
 		"migration_patch": fmt.Sprintf("--- %s\n+++ %s\n@@ -1,3 +1,3 @@\n-use %s;\n+use %s;\n",
 			req.TargetService, req.TargetService, req.Algorithm, replacement),
-		"estimated_impact":       "LOW",
-		"rollback_window_secs":   300,
+		"estimated_impact":     "LOW",
+		"rollback_window_secs": 300,
 		"validation_checklist": []string{"config-syntax", "daemon-reload", "tls13-handshake"},
-		"dry_run_available":      true,
+		"dry_run_available":    true,
 	}
 
 	a.wsHub.Broadcast("lab_simulation", simulated)
@@ -154,19 +159,93 @@ func (a *API) slaMetrics(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	overview, _ := a.store.Overview(r.Context())
+	ctx := r.Context()
+	overview, err := a.store.Overview(ctx)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	migrations, err := a.store.Migrations(ctx)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var succeeded, failed int
+	for _, m := range migrations {
+		switch m.State {
+		case pb.MigrationStateSucceeded:
+			succeeded++
+		case pb.MigrationStateFailed:
+			failed++
+		}
+	}
+	total := succeeded + failed
+	var successRatePct *float64
+	if total > 0 {
+		v := float64(succeeded) * 100.0 / float64(total)
+		successRatePct = &v
+	}
+
+	findings, _ := a.store.Findings(ctx, 10000)
+	var critTotal, critResolved, highTotal, highResolved int
+	for _, f := range findings {
+		switch f.Severity {
+		case 5:
+			critTotal++
+			if f.Status == "resolved" {
+				critResolved++
+			}
+		case 4:
+			highTotal++
+			if f.Status == "resolved" {
+				highResolved++
+			}
+		}
+	}
+	var critPct, highPct *float64
+	if critTotal > 0 {
+		v := float64(critResolved) * 100.0 / float64(critTotal)
+		critPct = &v
+	}
+	if highTotal > 0 {
+		v := float64(highResolved) * 100.0 / float64(highTotal)
+		highPct = &v
+	}
+
+	certHealth, certErr := a.store.GetCertHealth(ctx)
+	certHealthPayload := map[string]interface{}{
+		"note": "Certificate expiry tracking requires TLS network scan results",
+	}
+	if certErr == nil && certHealth != nil {
+		if certHealth.TotalTracked > 0 {
+			certHealthPayload = map[string]interface{}{
+				"expired":       certHealth.Expired,
+				"expiring_30_days": certHealth.Expiring30,
+				"expiring_90_days": certHealth.Expiring90,
+				"total_tracked": certHealth.TotalTracked,
+			}
+		} else {
+			certHealthPayload["total_tracked"] = 0
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"readiness_score": overview.ReadinessScore,
-		"cert_health": map[string]int{
-			"expired": 0, "expiring_30_days": 0, "expiring_90_days": 0,
-		},
+		"cert_health":     certHealthPayload,
 		"migration_sla": map[string]interface{}{
 			"open_migrations":  overview.OpenMigrations,
-			"success_rate_pct": 97.5,
+			"total_completed":  succeeded,
+			"total_failed":     failed,
+			"success_rate_pct": successRatePct,
 		},
 		"finding_remediation": map[string]interface{}{
-			"critical_remediated_pct": 85.0,
-			"high_remediated_pct":     62.0,
+			"critical_total":          critTotal,
+			"critical_resolved":       critResolved,
+			"critical_remediated_pct": critPct,
+			"high_total":              highTotal,
+			"high_resolved":           highResolved,
+			"high_remediated_pct":     highPct,
 		},
 	})
 }
@@ -179,13 +258,14 @@ func (a *API) agentUpgradeInfo(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	// Agent auto-upgrade distribution is not yet implemented. Return the
+	// server's own version so agents can compare protocol compatibility;
+	// omit fields that would require a signed update manifest.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"latest_version":  "0.1.1",
-		"current_minimum": "0.1.0",
-		"download_url":    "/api/agent/upgrade/download",
-		"sha256_checksum": "sha256:placeholder",
-		"release_notes":   "Performance improvements and CNSA 2.0 compliance updates",
-		"upgrade_urgency": "recommended",
+		"server_version":           version.Version,
+		"agent_protocol_version":   version.AgentProtocolVersion,
+		"auto_upgrade_available":   false,
+		"note":                     "Agent binary distribution not yet implemented. Deploy agents via your package manager or container image.",
 	})
 }
 

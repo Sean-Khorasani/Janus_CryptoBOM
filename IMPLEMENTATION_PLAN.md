@@ -673,7 +673,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-001  
 **Scope:** Scope findings by host/tenant, model occurrence lifecycle and reopen behavior, persist normalized components/algorithms/certificates/keys/protocols/evidence, and retain immutable scan snapshots/diffs.  
 **Acceptance criteria:** Cross-host findings never collide; resolved findings reappear on recurrence; inventory history is queryable and attributable.  
-**Verification:** Migration tests and multi-host lifecycle scenarios.
+**Verification:** Migration tests and multi-host lifecycle scenarios.  
+**Current status (2026-06-12):** **Partially implemented.** DB migration 23 added `detection_method`, `resolved_at`, `reopened_at`, `reopen_count` to `finding_occurrences` and created `finding_lifecycle_events` table. `Store` interface has `RecordLifecycleEvent`/`ListLifecycleEvents`; `UpdateFindingStatus` now records lifecycle events transactionally. REST API: `GET /api/findings/{id}/timeline` returns ordered event history. Missing: automatic reopen-on-recurrence logic, multi-host/tenant scoping, full inventory diff snapshots.
 
 ## WP-014 Build Trustworthy Discovery Engines
 
@@ -705,7 +706,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-013, WP-016  
 **Scope:** Define signed/versioned control packs with effective dates, evidence requirements, applicability, exceptions, expiry, and framework mappings. Remove unsupported “COMPLIANT” labels.  
 **Acceptance criteria:** Every compliance result links to exact evidence, rule version, evaluation time, and exception state.  
-**Verification:** Golden evidence bundles independently reproduce report outcomes.
+**Verification:** Golden evidence bundles independently reproduce report outcomes.  
+**Current status (2026-06-12):** **Partially implemented.** `server/internal/policy/control_pack.go` defines `ControlRule`/`ControlPack` structs and `BuiltinControlPack()` with 12 versioned rules (all rule IDs emitted by the engine), NIST/CNSA framework references, and effective dates. `Profile` struct now has `EffectiveDate`/`FrameworkMappings`. REST API: `GET /api/policy/rules` (pack list) and `GET /api/policy/rules/{id}` (single rule). 7 tests. Missing: exception workflow, evidence requirement fields, signed pack attestations, removal of remaining heuristic COMPLIANT labels.
 
 ## WP-018 Implement Real Metrics, Upgrade, And HSM Features
 
@@ -713,7 +715,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-002, WP-009, WP-013  
 **Scope:** Replace hard-coded SLA/certificate/upgrade data; implement signed update manifests, phased rollout, rollback, certificate health queries, and operational SLO calculations. Remove unavailable endpoints until implemented.  
 **Acceptance criteria:** UI/API never presents fabricated operational values.  
-**Verification:** Contract tests and signed-update end-to-end tests.
+**Verification:** Contract tests and signed-update end-to-end tests.  
+**Current status (2026-06-12):** **Partially implemented.** DB migration 24 added `tls_certificates` table; `InsertTelemetry` now persists certificate expiry data from network observations; `GET /api/sla/metrics` `cert_health` field is now populated from real data (expired/expiring-30/expiring-90/total counts). SLA migration and finding remediation fields compute from real data. Agent upgrade endpoint correctly returns `auto_upgrade_available: false` (no fabricated values). Missing: signed update manifests, phased rollout, HSM cert queries (security phase), operational SLO trend data.
 
 ## WP-019 Create Full-System Test And Security Program
 
@@ -738,7 +741,7 @@ Current gaps that drive this plan:
 **Scope:** Validate CycloneDX/SARIF outputs against schemas, model cryptographic assets and dependencies accurately, use RFC 3339 timestamps/source locations, sign attestations, and export immutable evidence bundles.  
 **Acceptance criteria:** Exports pass schema validation and round-trip without losing identity/provenance.  
 **Verification:** Automated schema/conformance tests and third-party consumer tests.  
-**Current status (2026-06-12):** Existing exports in `httpapi/server.go` produce structurally valid CycloneDX 1.6 and SARIF 2.1.0 JSON. Missing: schema validation against upstream JSON schemas, `cryptoProperties` modeling for algorithm findings, source-location fields in SARIF results, signed attestations. Full compliance requires WP-013 and WP-017 to be completed first.
+**Current status (2026-06-12):** **Partially implemented.** CycloneDX 1.6 export now includes `cryptoProperties` (assetType, algorithmProperties with primitive, parameterSetIdentifier, nistQuantumSecurityLevel, mode) for all known algorithm types; `serialNumber` (urn:uuid); `tools` metadata with server version. SARIF 2.1.0 export now uses `version.Version` (no more hardcoded "0.1.0"), parses source locations from AssetRef (`file:line` → `region.startLine`), adds `properties` block (algorithm, confidence, status), and emits a `rules` list from unique policy rule IDs. Both exports tested with 26 unit tests. Missing: schema validation against upstream JSON schemas, signed attestations, immutable evidence bundles. WP-013 and WP-017 scaffolding now done.
 
 ## WP-022 Build Migration Portfolio And Wave Planning
 
@@ -773,7 +776,7 @@ Current gaps that drive this plan:
 **Scope:** Maintain a capability maturity matrix: `prototype`, `experimental`, `supported`, `certified`. Tie documentation and marketing claims to automated release evidence; publish security policy, support matrix, deprecation policy, and release notes.  
 **Acceptance criteria:** No feature is described as supported without passing its release gates.  
 **Verification:** Release review checklist and documentation-claim linter.  
-**Current status (2026-06-12):** **Partially implemented.** `docs/CAPABILITY_MATURITY.md` written (maturity levels 0–4 per dimension). `IMPLEMENTATION_PLAN.md` updated to reflect actual implementation status for all LLM-* and WP-* items. Missing: automated documentation-claim linter, formal release evidence package, security policy document.
+**Current status (2026-06-12):** **Partially implemented.** `docs/CAPABILITY_MATURITY.md` written (maturity levels 0–4 per dimension). `IMPLEMENTATION_PLAN.md` updated to reflect actual implementation status for all LLM-* and WP-* items. `SECURITY.md` written: responsible disclosure process, operator security requirements (signing key, mTLS, auth, LLM modes, SQLite encryption), supported versions, and security architecture summary. `SUPPORT.md` written: maturity tier definitions (prototype/experimental/supported/certified), version support table, 90-day deprecation policy, execution and LLM capability mode tables, and issue filing guidance. Missing: automated documentation-claim linter, formal release evidence package.
 
 ## WP-026 Establish Privacy And Data Governance
 
