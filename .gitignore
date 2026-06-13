@@ -22,11 +22,46 @@ janus-host-id
 janus-agent-report.html
 janus-agent.sarif
 bin/
-/server/go.sum
-/agent/Cargo.lock
 /HSM/bin/
 /HSM/tokens/
 /HSM/tools/
-/Test/reports/
+/tests/reports/
+/test-results/
+/ui/test-results/
 /Temp/
 *.patch
+
+# Additive native manual-test deployment runtime
+/dev/native-deployment/common/
+/dev/native-deployment/**/bin/
+/dev/native-deployment/**/logs/
+/dev/native-deployment/**/run/
+/dev/native-deployment/**/state/
+/dev/native-deployment/**/scan/
+/dev/native-deployment/linux-server/policies/
+/dev/native-deployment/windows-agent/command-signing-key
+/dev/native-deployment/windows-agent/janus-agent.exe
+
+# Generated release-evidence bundles (WP-025)
+release-evidence/
+
+# ---------------------------------------------------------------------------
+# Internal / not-shipped (kept locally, excluded from the public repo)
+# ---------------------------------------------------------------------------
+# Process & coordination docs
+/IMPLEMENTATION_PLAN.md
+/JOURNAL.md
+/TASKS.md
+/ONBOARDING.md
+# Internal research artifacts and engineering reviews
+/research/
+/docs/RESEARCH.md
+/docs/pqc-migration-research-report.md
+/docs/feature-inventory.md
+/docs/analysis/
+# Internal developer deployment / manual-test tooling
+/dev/
+# Stray build output and runtime artifacts at the repo root
+/ui/dist/
+*.sqlite3-journal
+remediation*.patch
