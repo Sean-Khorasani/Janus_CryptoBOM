@@ -71,6 +71,77 @@ mode passes.
 | LLM-018 Add LLM security and reliability controls | Not started (security phase) | Deferred. |
 | LLM-019 Add evaluation and release gates | Partially implemented | `server/internal/llm/llm_test.go`: 15 tests covering ValidateVerdict (valid + invalid cases), ValidateSuggestion, HashString determinism. Missing: false-positive corpus, provider-contract tests, prompt-injection defense. |
 | LLM-020 Correct documentation and product claims | Partially implemented | `CLAUDE.md` updated. `docs/LLM_CAPABILITY_CONTRACT.md` written. Missing: `README.md` capability-maturity section, per-feature experimental/supported labels. |
+| LLM-021 Remove agent-initiated LLM from the scan path | **Implemented** | `agent/src/discovery/source.rs`: removed `analyze_snippet_llm_sync` and `generate_remediation_patch_llm` and their per-match call sites (commit 92d539a). Scanning is fully deterministic; the agent reports findings + bounded evidence only. `scan()` flag retained but ignored. 15 source tests pass. |
+| LLM-022 Server-side admin-initiated batch analysis | **In progress** | Batch + filter selection endpoint, server-side evidence assembly, background worker, and findings-list UI selection + inline verdicts. See "Corrected LLM Analysis Flow" below for the normative design and acceptance criteria. |
+
+### Corrected LLM Analysis Flow (LLM-021 / LLM-022)
+
+**Problem identified.** Two defects broke the intended architecture:
+
+1. *Agent initiated LLM during scanning (wrong).* The Rust source scanner called
+   `POST /api/llm/proxy` synchronously **once per crypto match** — for intent
+   classification and patch generation. The agent must never initiate LLM
+   analysis; its responsibility ends at reporting findings + evidence. (Fixed in
+   LLM-021.)
+2. *Server analysis was one-finding-at-a-time (incomplete).* `POST /api/llm/analyze`
+   accepts a single `finding_id`. There is no batch submission, no filter-based
+   selection ("all", "all critical", by host/algorithm/status), no findings-list
+   selection UI, and no inline verdict display. Queued jobs (no inline evidence)
+   are never processed — there is no background worker.
+
+**Normative corrected flow.** The only correct sequence is:
+
+```
+agents scan per policy → report findings (+ bounded evidence) → server stores findings
+   → ADMIN selects findings in the UI: individual (checkbox) | subset | scope
+     (all / all-critical / all-of-an-algorithm / per-host)
+   → admin submits ONE batch request → server creates one analysis job per finding
+   → background worker (bounded concurrency = JANUS_LLM_MAX_CONCURRENT) assembles
+     evidence SERVER-SIDE from the stored finding + component context, calls the
+     LLM, validates + persists the verdict and provenance
+   → UI polls batch/job status → renders inline verdict per finding (real /
+     false-positive / abstain, proposed adjusted severity, reasoning, citations)
+   → admin acts on the verdict (accept / mark false-positive / remediate) — the
+     LLM never mutates finding state; it only proposes (Invariant: authority
+     inversion, LLM_CAPABILITY_CONTRACT §9).
+```
+
+**Work items (LLM-022):**
+
+- **API — batch submit.** `POST /api/llm/analyze/batch` (role: operator/admin),
+  accepting EITHER `finding_ids: ["…"]` OR a `filter` object
+  (`severity_gte`, `status`, `algorithm`, `host_uuid`, `scope ∈ {all, all_critical}`).
+  Server resolves the set, dedups against fresh existing verdicts (skip unless
+  `force: true`), creates one job per finding, returns a `batch_id` + per-finding
+  job ids. Caps batch size (e.g. ≤500) and logs an audit entry.
+- **API — batch status.** `GET /api/llm/batches/{batch_id}` returns counts
+  (queued/running/completed/failed) and per-finding verdict refs.
+- **Worker.** A bounded-concurrency background worker drains queued jobs:
+  assembles a `BoundedEvidencePackage` **server-side** from the stored finding
+  (algorithm, context, file/host, detection method) — never trusting agent- or
+  client-supplied evidence for control flow — then calls `AnalyzeFinding`.
+  Respects `JANUS_LLM_MAX_CONCURRENT`, retries, and timeout from config.
+- **UI — selection.** Findings list (Overview "Highest Priority Findings" and the
+  CBOM findings grid) gains row checkboxes, select-all, and quick scopes
+  ("Select all critical"). An "Analyze selected with AI" button (operator/admin
+  only; hidden when LLM disabled) submits the batch.
+- **UI — inline verdict.** Each finding row shows its latest verdict badge
+  (real / false-positive / abstain + confidence), expandable to reasoning +
+  citations + proposed severity, with accept / mark-false-positive / remediate
+  actions wired to the existing finding-status endpoint.
+
+**Acceptance criteria:**
+
+- Agent performs zero LLM calls during a scan (grep: no `/api/llm/` in agent scan
+  paths). ✅ (LLM-021)
+- Selecting N findings and clicking "Analyze" creates N jobs from ONE request and
+  processes them asynchronously with bounded concurrency.
+- Filter scope "all critical" analyses exactly the open critical findings.
+- Verdicts render inline in the findings list; LLM never changes finding status
+  automatically.
+- LLM disabled → batch endpoint returns 503 and the UI control is hidden.
+- Server builds evidence; no endpoint requires the client to supply analysis
+  evidence for the batch path.
 
 ### Research-Backed Practical Suggestions For A: Finding Validation
 
