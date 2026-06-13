@@ -3,19 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 /// Sensitivity classification for evidence data (RESEARCH.md §4.4)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SensitivityLabel {
     Public,
+    #[default]
     Internal,
     Confidential,
     Restricted,
-}
-
-impl Default for SensitivityLabel {
-    fn default() -> Self {
-        SensitivityLabel::Internal
-    }
 }
 
 /// The source of an evidence item — which discovery module produced it
@@ -81,6 +76,7 @@ pub const MAX_CONTEXT_BYTES: usize = 512;
 
 impl BoundedEvidencePackage {
     /// Build a source-code evidence package. Trims context_snippet to MAX_CONTEXT_BYTES.
+    #[allow(clippy::too_many_arguments)] // evidence fields are intentionally explicit
     pub fn from_source(
         finding_id: impl Into<String>,
         algorithm: impl Into<String>,

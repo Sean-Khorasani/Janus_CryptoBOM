@@ -5,7 +5,6 @@ pub mod evidence;
 mod host;
 mod mutation;
 mod policy;
-mod prompts;
 mod proto;
 mod report;
 mod storage;
