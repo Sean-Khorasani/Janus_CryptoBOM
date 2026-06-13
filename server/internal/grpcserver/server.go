@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -16,12 +17,13 @@ import (
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/store"
 	"github.com/janus-cbom/janus/server/internal/ws"
+	"google.golang.org/grpc/peer"
 )
 
 // webhookCircuit tracks failure state for circuit-breaking.
 type webhookCircuit struct {
-	mu           sync.Mutex
-	failures     map[string]int       // url -> consecutive failure count
+	mu            sync.Mutex
+	failures      map[string]int       // url -> consecutive failure count
 	cooldownUntil map[string]time.Time // url -> cooldown expiry
 }
 
@@ -66,7 +68,7 @@ func New(store store.Store, policy *policy.Engine, orch *orchestrator.Orchestrat
 		orch:   orch,
 		wsHub:  wsHub,
 		circuit: &webhookCircuit{
-			failures:     make(map[string]int),
+			failures:      make(map[string]int),
 			cooldownUntil: make(map[string]time.Time),
 		},
 	}
@@ -76,9 +78,20 @@ func (s *Server) RegisterAgent(ctx context.Context, reg *pb.AgentRegistration) (
 	if reg.HostUuid == "" || reg.Hostname == "" {
 		return nil, fmt.Errorf("host_uuid and hostname are required")
 	}
-	if err := s.store.UpsertAgent(ctx, reg); err != nil {
+	if reg.HostUuid == "ci-cd-runner" {
+		return nil, fmt.Errorf("ci-cd-runner is a reserved scan identity and cannot register as a managed agent")
+	}
+	observedIP := ""
+	if remote, ok := peer.FromContext(ctx); ok {
+		observedIP = remote.Addr.String()
+		if host, _, err := net.SplitHostPort(observedIP); err == nil {
+			observedIP = host
+		}
+	}
+	if err := s.store.UpsertAgent(ctx, reg, observedIP); err != nil {
 		return nil, err
 	}
+	s.wsHub.Broadcast("agent_registered", map[string]any{"host_uuid": reg.HostUuid, "hostname": reg.Hostname, "observed_ip": observedIP, "agent_version": reg.AgentVersion})
 	return &pb.AgentRegistrationAck{
 		HostUuid:      reg.HostUuid,
 		Accepted:      true,
@@ -107,11 +120,16 @@ func (s *Server) StreamTelemetry(stream pb.JanusTelemetry_StreamTelemetryServer)
 			return fmt.Errorf("payload host_uuid is required")
 		}
 		hostUUID = payload.HostUuid
-		s.policy.Assess(payload)
+		config, _ := s.store.GetAgentScanConfig(stream.Context(), payload.HostUuid)
+		if config != nil && config.PolicyVersion != "" {
+			s.policy.AssessWithVersion(payload, config.PolicyVersion)
+		} else {
+			s.policy.Assess(payload)
+		}
 		if err := s.store.InsertTelemetry(stream.Context(), payload); err != nil {
 			return err
 		}
-		
+
 		// Telemetry Webhook Dispatch Feature
 		hasCritical := false
 		for _, f := range payload.Findings {
@@ -147,6 +165,18 @@ func (s *Server) StreamTelemetry(stream pb.JanusTelemetry_StreamTelemetryServer)
 				return err
 			}
 		}
+		agentCommands, err := s.store.DrainAgentCommands(stream.Context(), hostUUID)
+		if err != nil {
+			return err
+		}
+		for _, cmd := range agentCommands {
+			if err := stream.Send(cmd); err != nil {
+				return err
+			}
+			if err := s.store.MarkAgentCommandDelivered(stream.Context(), cmd.CommandId); err != nil {
+				return err
+			}
+		}
 	}
 }
 
@@ -168,18 +198,18 @@ func (s *Server) ReportMigrationStatus(stream pb.JanusTelemetry_ReportMigrationS
 		if err := s.store.UpdateMigrationStatus(stream.Context(), report); err != nil {
 			return err
 		}
-			slog.Info("migration status",
-				"command_id", report.CommandId,
-				"host_uuid", report.HostUuid,
-				"state", report.State,
-				"success", report.Success,
-			)
-			s.wsHub.Broadcast("migration_status", map[string]interface{}{
-				"command_id": report.CommandId,
-				"host_uuid":  report.HostUuid,
-				"state":      report.State,
-				"success":    report.Success,
-			})
+		slog.Info("migration status",
+			"command_id", report.CommandId,
+			"host_uuid", report.HostUuid,
+			"state", report.State,
+			"success", report.Success,
+		)
+		s.wsHub.Broadcast("migration_status", map[string]interface{}{
+			"command_id": report.CommandId,
+			"host_uuid":  report.HostUuid,
+			"state":      report.State,
+			"success":    report.Success,
+		})
 	}
 }
 

@@ -3,15 +3,19 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/janus-cbom/janus/server/internal/config"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/store"
 )
+
+var errDBDown = errors.New("connection refused")
 
 // ---------------------------------------------------------------------------
 // Minimal mock store for handler tests
@@ -23,6 +27,7 @@ type handlerMockStore struct {
 	components []store.Component
 	events     []store.FindingLifecycleEvent
 	certHealth *store.CertHealth
+	pingErr    error
 }
 
 func (m *handlerMockStore) Findings(_ context.Context, _ int) ([]store.Finding, error) {
@@ -45,6 +50,9 @@ func (m *handlerMockStore) GetCertHealth(_ context.Context) (*store.CertHealth, 
 		return m.certHealth, nil
 	}
 	return &store.CertHealth{}, nil
+}
+func (m *handlerMockStore) Ping(_ context.Context) error {
+	return m.pingErr
 }
 
 func newTestAPI(mock *handlerMockStore) *API {
@@ -318,5 +326,214 @@ func TestExportSARIFEmptyFindings(t *testing.T) {
 	api.exportSARIF(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/release-check tests
+// ---------------------------------------------------------------------------
+
+// TestReleaseCheckRequiresAdmin verifies that insufficient role returns 403.
+// We test via the RequireRole middleware wrapper, not by calling the handler directly.
+func TestReleaseCheckRequiresAdmin(t *testing.T) {
+	api := newTestAPI(&handlerMockStore{})
+	// Wrap the handler exactly as server.go does.
+	wrapped := RequireRole([]string{"admin"})(http.HandlerFunc(api.releaseCheck))
+
+	// No role in context → 403.
+	t.Run("no_role", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/release-check", nil)
+		rr := httptest.NewRecorder()
+		wrapped.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want 403 (no role)", rr.Code)
+		}
+	})
+
+	// Viewer role → 403.
+	t.Run("viewer_role", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/release-check", nil)
+		ctx := context.WithValue(req.Context(), RoleContextKey, "viewer")
+		req = req.WithContext(ctx)
+		rr := httptest.NewRecorder()
+		wrapped.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want 403 (viewer role)", rr.Code)
+		}
+	})
+
+	// Operator role → 403 (admin only).
+	t.Run("operator_role", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/release-check", nil)
+		ctx := context.WithValue(req.Context(), RoleContextKey, "operator")
+		req = req.WithContext(ctx)
+		rr := httptest.NewRecorder()
+		wrapped.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want 403 (operator role)", rr.Code)
+		}
+	})
+}
+
+// TestReleaseCheckPassesWithConfig verifies that an admin with a configured
+// signing key gets a 200 response with release_ready determined only by
+// hard failures (warn-level checks must not block release_ready).
+func TestReleaseCheckPassesWithConfig(t *testing.T) {
+	mock := &handlerMockStore{}
+	api := newTestAPI(mock)
+	api.cfg = config.Config{
+		CommandSigningKey: []byte("aaaabbbbccccddddeeeeffffgggghhhh"), // 32 bytes
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/release-check", nil)
+	// Inject admin role directly into the handler context (bypasses middleware).
+	ctx := context.WithValue(req.Context(), RoleContextKey, "admin")
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	api.releaseCheck(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// With valid config and no DB error, release_ready must be true.
+	releaseReady, ok := result["release_ready"].(bool)
+	if !ok {
+		t.Fatal("release_ready field missing or not bool")
+	}
+	if !releaseReady {
+		t.Errorf("release_ready = false, want true (db pass, signing_key pass; policy warn must not block)")
+	}
+
+	// Checks array must be present and non-empty.
+	checks, ok := result["checks"].([]any)
+	if !ok || len(checks) == 0 {
+		t.Fatal("checks field missing or empty")
+	}
+
+	// Timestamp must be present.
+	if _, ok := result["timestamp"]; !ok {
+		t.Error("timestamp field missing")
+	}
+}
+
+// TestReleaseCheckDBFailSetsNotReady verifies that a DB ping failure
+// causes release_ready to be false.
+func TestReleaseCheckDBFailSetsNotReady(t *testing.T) {
+	mock := &handlerMockStore{pingErr: errDBDown}
+	api := newTestAPI(mock)
+	api.cfg = config.Config{
+		CommandSigningKey: []byte("aaaabbbbccccddddeeeeffffgggghhhh"),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/release-check", nil)
+	ctx := context.WithValue(req.Context(), RoleContextKey, "admin")
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	api.releaseCheck(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["release_ready"].(bool) {
+		t.Error("release_ready = true with DB failure, want false")
+	}
+}
+
+// TestReleaseCheckMethodNotAllowed ensures non-GET is rejected.
+func TestReleaseCheckMethodNotAllowed(t *testing.T) {
+	api := newTestAPI(&handlerMockStore{})
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/release-check", nil)
+	ctx := context.WithValue(req.Context(), RoleContextKey, "admin")
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	api.releaseCheck(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rr.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// hostFindings tests (WP-013)
+// ---------------------------------------------------------------------------
+
+func (m *handlerMockStore) FindingsByHost(_ context.Context, hostUUID string) ([]store.Finding, error) {
+	var out []store.Finding
+	for _, f := range m.findings {
+		if f.HostUUID == hostUUID {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func TestHostFindingsReturnsFiltered(t *testing.T) {
+	mock := &handlerMockStore{
+		findings: []store.Finding{
+			{FindingID: "f1", HostUUID: "host-aaa", Severity: 5, Title: "RSA-1024 detected"},
+			{FindingID: "f2", HostUUID: "host-bbb", Severity: 4, Title: "ECDSA-P256 detected"},
+			{FindingID: "f3", HostUUID: "host-aaa", Severity: 3, Title: "AES-128 detected"},
+		},
+	}
+	api := newTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/api/hosts/host-aaa/findings", nil)
+	req.URL.Path = "/api/hosts/host-aaa/findings"
+	rr := httptest.NewRecorder()
+	api.hostFindings(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var findings []store.Finding
+	if err := json.NewDecoder(rr.Body).Decode(&findings); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Errorf("got %d findings, want 2 (only host-aaa findings)", len(findings))
+	}
+	for _, f := range findings {
+		if f.HostUUID != "host-aaa" {
+			t.Errorf("finding %q has wrong host_uuid %q, want host-aaa", f.FindingID, f.HostUUID)
+		}
+	}
+}
+
+func TestHostFindingsEmptyReturnsArray(t *testing.T) {
+	api := newTestAPI(&handlerMockStore{})
+	req := httptest.NewRequest(http.MethodGet, "/api/hosts/no-such-host/findings", nil)
+	req.URL.Path = "/api/hosts/no-such-host/findings"
+	rr := httptest.NewRecorder()
+	api.hostFindings(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	body := strings.TrimSpace(rr.Body.String())
+	if body == "null" || body == "" {
+		t.Error("empty host findings should return [] not null")
+	}
+	var findings []store.Finding
+	if err := json.Unmarshal([]byte(body), &findings); err != nil {
+		t.Fatalf("json parse error: %v (body: %s)", err, body)
+	}
+}
+
+func TestHostFindingsMethodNotAllowed(t *testing.T) {
+	api := newTestAPI(&handlerMockStore{})
+	req := httptest.NewRequest(http.MethodPost, "/api/hosts/host-aaa/findings", nil)
+	req.URL.Path = "/api/hosts/host-aaa/findings"
+	rr := httptest.NewRecorder()
+	api.hostFindings(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rr.Code)
 	}
 }
