@@ -13,6 +13,7 @@ import { AgilityDashboard } from "./components/AgilityDashboard";
 import { WavePlanning } from "./components/WavePlanning";
 import { SkipLink } from "./a11y/SkipLink";
 import { useI18n } from "./i18n";
+import { useToast } from "./hooks/useToast";
 import { authChangedEvent, hasSession } from "./auth";
 
 const findingStatusesStorageKey = "janus_finding_statuses";
@@ -101,6 +102,7 @@ function App() {
   } = useApi(authenticated);
   const [tab, setTab] = useState<"overview" | "cbom" | "compliance" | "policy" | "migrations" | "fleet" | "llm" | "agility" | "waves">("overview");
   const { t } = useI18n();
+  const { notify } = useToast();
 
   useEffect(() => {
     const updateAuthentication = () => setAuthenticated(hasSession());
@@ -141,8 +143,10 @@ function App() {
 
     try {
       await updateFindingStatus(findingId, status);
+      notify(`Finding marked ${status.replace("-", " ")}.`, "success");
     } catch {
       // The persisted optimistic state remains available for retry/reconciliation.
+      notify("Couldn't save the status change to the server; it will retry.", "error");
     }
   };
 
