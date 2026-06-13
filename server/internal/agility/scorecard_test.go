@@ -57,7 +57,7 @@ func TestComputeScorecard_BlastRadius(t *testing.T) {
 }
 
 func TestComputeScorecard_ProfileAdoptionLatency(t *testing.T) {
-	switched := time.Now().Add(-30 * 24 * time.Hour) // 30 days ago
+	switched := time.Now().Add(-30 * 24 * time.Hour)   // 30 days ago
 	remediated := time.Now().Add(-10 * 24 * time.Hour) // 10 days ago
 	findings := []store.Finding{
 		{FindingID: "f1", Algorithm: "RSA-2048", AssetRef: "a.go",
@@ -90,9 +90,9 @@ func TestMaturityLevel_String(t *testing.T) {
 
 func TestComputeMaturity_Levels(t *testing.T) {
 	tests := []struct {
-		hi      float64
-		nc      float64
-		want    MaturityLevel
+		hi   float64
+		nc   float64
+		want MaturityLevel
 	}{
 		{0.01, 0.95, MaturityCryptoAgile},
 		{0.04, 0.85, MaturityAgile},

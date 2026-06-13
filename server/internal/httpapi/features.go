@@ -220,10 +220,10 @@ func (a *API) slaMetrics(w http.ResponseWriter, r *http.Request) {
 	if certErr == nil && certHealth != nil {
 		if certHealth.TotalTracked > 0 {
 			certHealthPayload = map[string]interface{}{
-				"expired":       certHealth.Expired,
+				"expired":          certHealth.Expired,
 				"expiring_30_days": certHealth.Expiring30,
 				"expiring_90_days": certHealth.Expiring90,
-				"total_tracked": certHealth.TotalTracked,
+				"total_tracked":    certHealth.TotalTracked,
 			}
 		} else {
 			certHealthPayload["total_tracked"] = 0
@@ -262,10 +262,10 @@ func (a *API) agentUpgradeInfo(w http.ResponseWriter, r *http.Request) {
 	// server's own version so agents can compare protocol compatibility;
 	// omit fields that would require a signed update manifest.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"server_version":           version.Version,
-		"agent_protocol_version":   version.AgentProtocolVersion,
-		"auto_upgrade_available":   false,
-		"note":                     "Agent binary distribution not yet implemented. Deploy agents via your package manager or container image.",
+		"server_version":         version.Version,
+		"agent_protocol_version": version.AgentProtocolVersion,
+		"auto_upgrade_available": false,
+		"note":                   "Agent binary distribution not yet implemented. Deploy agents via your package manager or container image.",
 	})
 }
 

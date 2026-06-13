@@ -1,11 +1,11 @@
 // Package llm implements the neuro-symbolic LLM analysis pipeline for Janus CryptoBOM.
 //
 // Architecture invariants (LLM_CAPABILITY_CONTRACT.md §1):
-//  - LLMs receive only bounded evidence packages, never raw file contents
-//  - All output is schema-validated before persistence
-//  - Deterministic verifiers gate every state change
-//  - Authority inversion: LLMs annotate, never authorize
-//  - Complete provenance is recorded for every LLM call
+//   - LLMs receive only bounded evidence packages, never raw file contents
+//   - All output is schema-validated before persistence
+//   - Deterministic verifiers gate every state change
+//   - Authority inversion: LLMs annotate, never authorize
+//   - Complete provenance is recorded for every LLM call
 package llm
 
 import (
@@ -26,9 +26,9 @@ import (
 type CapabilityMode string
 
 const (
-	ModeDisabled             CapabilityMode = "disabled"
-	ModeAnalysisOnly         CapabilityMode = "analysis_only"
-	ModeSuggestRemediation   CapabilityMode = "suggest_remediation"
+	ModeDisabled           CapabilityMode = "disabled"
+	ModeAnalysisOnly       CapabilityMode = "analysis_only"
+	ModeSuggestRemediation CapabilityMode = "suggest_remediation"
 	// ModeAutomatedRemediation is not implemented — requires LLM-13/14 (security phase).
 )
 

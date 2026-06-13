@@ -125,7 +125,10 @@ func TestParseSARIFLocation(t *testing.T) {
 }
 
 func TestSarifSeverity(t *testing.T) {
-	tests := []struct{ sev int32; want string }{
+	tests := []struct {
+		sev  int32
+		want string
+	}{
 		{5, "error"},
 		{4, "warning"},
 		{3, "warning"},

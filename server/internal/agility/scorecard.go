@@ -20,10 +20,10 @@ import (
 type MaturityLevel int
 
 const (
-	MaturityNone     MaturityLevel = 0
-	MaturityReactive MaturityLevel = 1
-	MaturityPlanned  MaturityLevel = 2
-	MaturityAgile    MaturityLevel = 3
+	MaturityNone        MaturityLevel = 0
+	MaturityReactive    MaturityLevel = 1
+	MaturityPlanned     MaturityLevel = 2
+	MaturityAgile       MaturityLevel = 3
 	MaturityCryptoAgile MaturityLevel = 4
 )
 
@@ -46,16 +46,16 @@ func (m MaturityLevel) String() string {
 
 // Scorecard is the computed agility scorecard for one host or the fleet.
 type Scorecard struct {
-	HostUUID                   string        `json:"host_uuid,omitempty"`
-	HardcodeIndex              float64       `json:"hardcode_index"`              // 0–1, lower is better
-	NegotiationCoverage        float64       `json:"negotiation_coverage"`        // 0–1, higher is better
-	BlastRadiusScore           float64       `json:"blast_radius_score"`          // 0–1, lower is better
-	TTSADays                   *float64      `json:"ttsa_days,omitempty"`
-	ProfileAdoptionLatencyDays *float64      `json:"profile_adoption_latency_days,omitempty"`
-	MaturityLevel              MaturityLevel `json:"maturity_level"`
-	MaturityName               string        `json:"maturity_name"`
-	AlgorithmBlastRadii        map[string]float64 `json:"algorithm_blast_radii"`  // per-algorithm blast radius
-	ComputedAt                 time.Time     `json:"computed_at"`
+	HostUUID                   string             `json:"host_uuid,omitempty"`
+	HardcodeIndex              float64            `json:"hardcode_index"`       // 0–1, lower is better
+	NegotiationCoverage        float64            `json:"negotiation_coverage"` // 0–1, higher is better
+	BlastRadiusScore           float64            `json:"blast_radius_score"`   // 0–1, lower is better
+	TTSADays                   *float64           `json:"ttsa_days,omitempty"`
+	ProfileAdoptionLatencyDays *float64           `json:"profile_adoption_latency_days,omitempty"`
+	MaturityLevel              MaturityLevel      `json:"maturity_level"`
+	MaturityName               string             `json:"maturity_name"`
+	AlgorithmBlastRadii        map[string]float64 `json:"algorithm_blast_radii"` // per-algorithm blast radius
+	ComputedAt                 time.Time          `json:"computed_at"`
 }
 
 // ComputeScorecard derives a Scorecard from a set of findings for one host.

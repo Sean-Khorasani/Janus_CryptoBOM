@@ -14,13 +14,13 @@ import (
 
 // CompatibilityAnalysis captures migration compatibility concerns.
 type CompatibilityAnalysis struct {
-	TargetEcosystem   string            `json:"target_ecosystem"`              // "tls", "code-signing", "dependency", "config"
-	BreakingChanges   []string          `json:"breaking_changes"`              // protocol/API-level breaks
-	DependencyUpdates []DependencyUpdate `json:"dependency_updates"`           // package bumps needed
-	RollbackRisk      string            `json:"rollback_risk"`                 // "low", "medium", "high"
-	MinTLSVersion     string            `json:"min_tls_version,omitempty"`     // e.g. "TLSv1.3"
-	HybridRequired    bool              `json:"hybrid_required"`
-	EstimatedDowntime string            `json:"estimated_downtime"`            // "none", "<30s", "<5m", "extended"
+	TargetEcosystem   string             `json:"target_ecosystem"`          // "tls", "code-signing", "dependency", "config"
+	BreakingChanges   []string           `json:"breaking_changes"`          // protocol/API-level breaks
+	DependencyUpdates []DependencyUpdate `json:"dependency_updates"`        // package bumps needed
+	RollbackRisk      string             `json:"rollback_risk"`             // "low", "medium", "high"
+	MinTLSVersion     string             `json:"min_tls_version,omitempty"` // e.g. "TLSv1.3"
+	HybridRequired    bool               `json:"hybrid_required"`
+	EstimatedDowntime string             `json:"estimated_downtime"` // "none", "<30s", "<5m", "extended"
 }
 
 // DependencyUpdate describes a package upgrade required for the migration.

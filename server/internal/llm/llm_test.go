@@ -61,22 +61,22 @@ func TestValidateVerdict_InvalidCases(t *testing.T) {
 		citations        []string
 	}{
 		{
-			name:      "unknown verdict value",
-			verdict:   "unknown_verdict",
+			name:       "unknown verdict value",
+			verdict:    "unknown_verdict",
 			confidence: 0.5,
-			citations: []string{"ev-1"},
+			citations:  []string{"ev-1"},
 		},
 		{
-			name:      "confidence below 0",
-			verdict:   VerdictConfirmed,
+			name:       "confidence below 0",
+			verdict:    VerdictConfirmed,
 			confidence: -0.1,
-			citations: []string{"ev-1"},
+			citations:  []string{"ev-1"},
 		},
 		{
-			name:      "confidence above 1",
-			verdict:   VerdictConfirmed,
+			name:       "confidence above 1",
+			verdict:    VerdictConfirmed,
 			confidence: 1.5,
-			citations: []string{"ev-1"},
+			citations:  []string{"ev-1"},
 		},
 		{
 			name:             "abstain without reason",
@@ -86,10 +86,10 @@ func TestValidateVerdict_InvalidCases(t *testing.T) {
 			citations:        []string{},
 		},
 		{
-			name:      "non-abstain with empty citations",
-			verdict:   VerdictConfirmed,
+			name:       "non-abstain with empty citations",
+			verdict:    VerdictConfirmed,
 			confidence: 0.8,
-			citations: []string{},
+			citations:  []string{},
 		},
 		{
 			name:             "severity_adjusted without adjusted_severity",

@@ -9,9 +9,9 @@ import (
 
 // JobType values for LLMAnalysisJob.
 const (
-	JobTypeIntentClassification    = "intent_classification"
-	JobTypeFalsePositiveTriage     = "false_positive_triage"
-	JobTypeRemediationSuggestion   = "remediation_suggestion"
+	JobTypeIntentClassification  = "intent_classification"
+	JobTypeFalsePositiveTriage   = "false_positive_triage"
+	JobTypeRemediationSuggestion = "remediation_suggestion"
 )
 
 // JobStatus values for LLMAnalysisJob.
@@ -44,18 +44,18 @@ const (
 // RemediationSuggestion is the schema-validated output of a remediation_suggestion job.
 // human_approval_required is always true — there is no automated application path.
 type RemediationSuggestion struct {
-	SuggestionID         string   `json:"suggestion_id"`
-	JobID                string   `json:"job_id"`
-	FindingID            string   `json:"finding_id"`
-	RecommendationType   string   `json:"recommendation_type"`
-	TargetAlgorithm      string   `json:"target_algorithm"`
-	CandidatePatch       string   `json:"candidate_patch,omitempty"` // unified diff, max 4096 bytes
-	Assumptions          []string `json:"assumptions"`
-	CompatibilityNotes   string   `json:"compatibility_notes"`
-	ValidationRequired   []string `json:"validation_required"`
-	HumanApprovalRequired bool    `json:"human_approval_required"` // always true
-	Confidence           float64  `json:"confidence"`
-	CreatedAt            string   `json:"created_at"`
+	SuggestionID          string   `json:"suggestion_id"`
+	JobID                 string   `json:"job_id"`
+	FindingID             string   `json:"finding_id"`
+	RecommendationType    string   `json:"recommendation_type"`
+	TargetAlgorithm       string   `json:"target_algorithm"`
+	CandidatePatch        string   `json:"candidate_patch,omitempty"` // unified diff, max 4096 bytes
+	Assumptions           []string `json:"assumptions"`
+	CompatibilityNotes    string   `json:"compatibility_notes"`
+	ValidationRequired    []string `json:"validation_required"`
+	HumanApprovalRequired bool     `json:"human_approval_required"` // always true
+	Confidence            float64  `json:"confidence"`
+	CreatedAt             string   `json:"created_at"`
 }
 
 // ValidateVerdict checks the eight invariants from LLM_CAPABILITY_CONTRACT.md §4.

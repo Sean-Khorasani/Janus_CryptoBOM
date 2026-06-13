@@ -172,13 +172,13 @@ func (a *API) llmStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	svc := a.llmService()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"capability_mode":       string(svc.Mode()),
-		"enabled":               svc.IsEnabled(),
-		"suggest_remediation":   svc.CanSuggestRemediation(),
-		"model_analysis":        a.cfg.LLM.ModelAnalysis,
-		"model_remediation":     a.cfg.LLM.ModelRemediation,
-		"base_url_configured":   a.cfg.LLM.BaseURL != "",
-		"api_key_configured":    a.cfg.LLM.APIKey() != "",
+		"capability_mode":     string(svc.Mode()),
+		"enabled":             svc.IsEnabled(),
+		"suggest_remediation": svc.CanSuggestRemediation(),
+		"model_analysis":      a.cfg.LLM.ModelAnalysis,
+		"model_remediation":   a.cfg.LLM.ModelRemediation,
+		"base_url_configured": a.cfg.LLM.BaseURL != "",
+		"api_key_configured":  a.cfg.LLM.APIKey() != "",
 	})
 }
 
