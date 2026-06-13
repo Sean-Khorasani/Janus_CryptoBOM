@@ -183,7 +183,10 @@ export function OverviewView({ overview, score, findings, components, assets, st
 
   return (
     <div className="space-y-5">
-      {/* Active Scan Banners */}
+      {/* Active Scan Banners — bounded so a fleet-wide scan storm can't push the
+          rest of the dashboard off-screen (UX-013). */}
+      {activeScans.length > 0 && (
+      <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
       {activeScans.map((asset) => (
         <div key={asset.host_uuid} className="rounded-md border border-[#f59e0b] bg-[#fffbeb] p-4 text-[#78350f] active-scan-banner dark:bg-[#2d2010] dark:text-[#fbbf24]" role="status">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -215,6 +218,8 @@ export function OverviewView({ overview, score, findings, components, assets, st
           </div>
         </div>
       ))}
+      </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Metric icon={<Gauge aria-hidden="true" />} label="Safety Score" value={`${score}/100`} accent="bg-[#11845b]" hint="100 minus weighted open findings: critical ×18, high ×8, other ×2. Findings marked remediated, false-positive, or accepted are excluded, so triaging raises the score." />
@@ -242,7 +247,7 @@ export function OverviewView({ overview, score, findings, components, assets, st
               <h2 className="text-base font-semibold dark:text-[#e8ede9]">Algorithm Exposure Distribution</h2>
               <GitBranch size={18} className="text-[#8b5cf6]" aria-hidden="true" />
             </div>
-            <div className="space-y-3">
+            <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
               {histogram.length === 0 ? (
                 <div className="text-xs text-[#697469] text-center py-8 dark:text-[#8fa991]">
                   No algorithms cataloged in the CBOM index yet.
@@ -288,7 +293,7 @@ export function OverviewView({ overview, score, findings, components, assets, st
 
           <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
             <h2 className="text-base font-semibold mb-3 dark:text-[#e8ede9]">Asset Remediation Status</h2>
-            <div className="flex flex-wrap gap-4">
+            <div className="flex max-h-72 flex-wrap gap-4 overflow-y-auto pr-1">
               {assets.length === 0 ? (
                 <span className="remediation-progress text-sm font-medium text-[#4d594f] dark:text-[#6b7e6f]" data-testid="remediation-progress">
                   {findings.filter(f => statuses[f.finding_id] === "remediated" || statuses[f.finding_id] === "false-positive").length}/{findings.length} findings remediated

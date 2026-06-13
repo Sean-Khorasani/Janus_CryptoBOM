@@ -57,9 +57,9 @@ export function HonestCoverage({ assets, components }: HonestCoverageProps) {
           No agents have reported evidence yet.
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="max-h-80 overflow-auto">
           <table className="w-full text-left text-xs">
-            <thead>
+            <thead className="sticky top-0 z-10 bg-white dark:bg-[#1a2620]">
               <tr className="border-b border-[#dfe5dc] dark:border-[#2a3a30] text-[#697469] dark:text-[#8fa991]">
                 <th scope="col" className="p-2">Host</th>
                 <th scope="col" className="p-2">Evidence freshness</th>
