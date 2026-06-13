@@ -84,20 +84,42 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
-    
+
     let mut in_line_comment = false;
     let mut in_block_comment = false;
     let mut in_string = false;
     let mut string_char = '\0';
     let mut is_escaped = false;
-    
+
     let mut in_triple_string = false;
     let mut triple_char = '\0';
-    
+
     let mut in_xml_comment = false;
 
-    let is_c_like = matches!(ext, "rs" | "go" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "cs" | "c" | "h" | "cpp" | "hpp" | "swift" | "m" | "mm" | "scala" | "php");
-    let is_script = matches!(ext, "py" | "rb" | "sh" | "yaml" | "yml" | "toml" | "conf" | "cnf");
+    let is_c_like = matches!(
+        ext,
+        "rs" | "go"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "java"
+            | "kt"
+            | "cs"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "swift"
+            | "m"
+            | "mm"
+            | "scala"
+            | "php"
+    );
+    let is_script = matches!(
+        ext,
+        "py" | "rb" | "sh" | "yaml" | "yml" | "toml" | "conf" | "cnf"
+    );
     let is_xml = matches!(ext, "xml");
     // In config formats the quoted value IS the signal (`ciphers = "ECDHE-RSA-..."`);
     // blanking strings there erases exactly what we scan for. Only strip comments.
@@ -105,7 +127,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
 
     while i < chars.len() {
         let c = chars[i];
-        
+
         if c == '\n' || c == '\r' {
             in_line_comment = false;
             if in_string && string_char != '`' {
@@ -124,7 +146,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
         }
 
         if in_block_comment {
-            if is_c_like && i + 1 < chars.len() && chars[i] == '*' && chars[i+1] == '/' {
+            if is_c_like && i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '/' {
                 out.push(' ');
                 out.push(' ');
                 i += 2;
@@ -137,7 +159,8 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
         }
 
         if in_xml_comment {
-            if i + 2 < chars.len() && chars[i] == '-' && chars[i+1] == '-' && chars[i+2] == '>' {
+            if i + 2 < chars.len() && chars[i] == '-' && chars[i + 1] == '-' && chars[i + 2] == '>'
+            {
                 out.push(' ');
                 out.push(' ');
                 out.push(' ');
@@ -152,7 +175,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
 
         if in_triple_string {
             let tc = triple_char;
-            if i + 2 < chars.len() && chars[i] == tc && chars[i+1] == tc && chars[i+2] == tc {
+            if i + 2 < chars.len() && chars[i] == tc && chars[i + 1] == tc && chars[i + 2] == tc {
                 out.push(' ');
                 out.push(' ');
                 out.push(' ');
@@ -187,7 +210,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
             continue;
         }
 
-        if is_c_like && i + 1 < chars.len() && chars[i] == '/' && chars[i+1] == '*' {
+        if is_c_like && i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '*' {
             in_block_comment = true;
             out.push(' ');
             out.push(' ');
@@ -195,7 +218,13 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
             continue;
         }
 
-        if is_xml && i + 3 < chars.len() && chars[i] == '<' && chars[i+1] == '!' && chars[i+2] == '-' && chars[i+3] == '-' {
+        if is_xml
+            && i + 3 < chars.len()
+            && chars[i] == '<'
+            && chars[i + 1] == '!'
+            && chars[i + 2] == '-'
+            && chars[i + 3] == '-'
+        {
             in_xml_comment = true;
             out.push(' ');
             out.push(' ');
@@ -205,7 +234,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
             continue;
         }
 
-        if is_c_like && i + 1 < chars.len() && chars[i] == '/' && chars[i+1] == '/' {
+        if is_c_like && i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '/' {
             in_line_comment = true;
             out.push(' ');
             out.push(' ');
@@ -222,7 +251,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
 
         if ext == "py" && i + 2 < chars.len() {
             let tc = chars[i];
-            if (tc == '"' || tc == '\'') && chars[i+1] == tc && chars[i+2] == tc {
+            if (tc == '"' || tc == '\'') && chars[i + 1] == tc && chars[i + 2] == tc {
                 in_triple_string = true;
                 triple_char = tc;
                 out.push(' ');
@@ -244,7 +273,7 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
         out.push(c);
         i += 1;
     }
-    
+
     out
 }
 
@@ -263,13 +292,21 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
     // a passive scan must never write into the scanned tree.
     let mut pending_patches: Vec<String> = Vec::new();
     for root in &cfg.scan_roots {
-        for entry in WalkDir::new(root).into_iter().filter_entry(|e| include_entry(e.path(), cfg)) {
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| include_entry(e.path(), cfg))
+        {
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
             };
             super::status::update_progress("Static Source Analysis", entry.path());
-            if !entry.file_type().is_file() || !is_source(entry.path()) {
+            // Admit source files by extension, plus extensionless structured
+            // config files (e.g. sshd_config) that the structural parser handles (WP-014).
+            if !entry.file_type().is_file()
+                || (!is_source(entry.path())
+                    && !super::config_parse::is_known_config_path(entry.path()))
+            {
                 continue;
             }
             let metadata = match entry.metadata() {
@@ -284,10 +321,66 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
                 Err(_) => continue,
             };
             let text = String::from_utf8_lossy(&raw);
-            let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+            let ext = entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+
+            // WP-014: structured config formats (nginx, sshd_config, openssl.cnf)
+            // are parsed directive-by-directive rather than by line regex. This is
+            // higher-confidence and PQC-aware (it recognizes hybrid groups). When a
+            // file is a recognized structured format, the structural parser is
+            // authoritative and the generic regex pass is skipped for it.
+            if let Some(scan) = super::config_parse::scan(entry.path(), &text) {
+                if !scan.algorithms.is_empty() {
+                    let file_hash = sha256_hex(&raw);
+                    let path = entry.path().display().to_string();
+                    let mut names: Vec<String> =
+                        scan.algorithms.iter().map(|a| a.name.clone()).collect();
+                    names.sort();
+                    names.dedup();
+                    out.evidence.push(Evidence {
+                        evidence_id: Uuid::new_v4().to_string(),
+                        source_type: super::config_parse::source_type_label().to_string(),
+                        source_tool: format!(
+                            "janus-config-parser/{}:{}",
+                            scan.format.label(),
+                            names.join(",")
+                        ),
+                        target: path.clone(),
+                        collection_time_unix: now(),
+                        raw_artifact_sha256: file_hash,
+                        confidence: super::config_parse::CONFIG_CONFIDENCE,
+                        sensitivity_class: "metadata-only".to_string(),
+                    });
+                    out.components.push(CbomComponent {
+                        bom_ref: format!("file:{}", path.replace('\\', "/")),
+                        name: entry
+                            .path()
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string(),
+                        version: String::new(),
+                        component_type: "config".to_string(),
+                        purl: String::new(),
+                        file_path: path,
+                        language: "config".to_string(),
+                        algorithms: scan.algorithms,
+                        dependencies: Vec::new(),
+                        // Honest reachability (WP-014): a config directive is an
+                        // active, negotiated selection, so it IS reachable.
+                        reachable: true,
+                    });
+                }
+                continue;
+            }
+
             let stripped = strip_comments_and_strings(&text, &ext);
             let mut algorithms = Vec::new();
-            
+
             let is_test_file = is_test_path(entry.path());
             let text_lines: Vec<&str> = text.lines().collect();
             let stripped_lines: Vec<&str> = stripped.lines().collect();
@@ -299,7 +392,9 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
 
             // Only match against comment/string-stripped lines to avoid false positives.
             // We first count matches per line so MultiPatternCorroborated can be detected.
-            for (line_idx, (line, stripped_line)) in text_lines.iter().zip(stripped_lines.iter()).enumerate() {
+            for (line_idx, (line, stripped_line)) in
+                text_lines.iter().zip(stripped_lines.iter()).enumerate()
+            {
                 // Collect all pattern hits on this stripped line.
                 let mut line_hits: Vec<(&Pattern, regex::Match<'_>)> = Vec::new();
                 for pat in &patterns {
@@ -409,7 +504,12 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
                     let is_qv = is_quantum_vulnerable(s_name);
                     if is_qv && !is_test_file {
                         let path_str = entry.path().display().to_string();
-                        pending_patches.push(build_static_patch(&path_str, line_idx + 1, line, s_name));
+                        pending_patches.push(build_static_patch(
+                            &path_str,
+                            line_idx + 1,
+                            line,
+                            s_name,
+                        ));
                     }
                     if method > file_strongest_method {
                         file_strongest_method = method;
@@ -471,7 +571,10 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
                 language: language(entry.path()),
                 algorithms,
                 dependencies: Vec::new(),
-                reachable: true,
+                // WP-014: a textual/regex match does NOT prove the crypto is
+                // reachable at runtime. Reachability is not established by static
+                // source matching, so we do not claim it as proven.
+                reachable: false,
             });
         }
     }
@@ -480,20 +583,62 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let _ = fs::write(report_dir.join("remediation.patch"), pending_patches.join("\n"));
+        let _ = fs::write(
+            report_dir.join("remediation.patch"),
+            pending_patches.join("\n"),
+        );
     }
     Ok(out)
 }
 
 fn patterns() -> Result<Vec<Pattern>> {
     let defs = [
-        (r"\bRSA(_|\b|\.|::|With|with)", "RSA", "RSA", CryptoRole::Signature),
-        (r"\bECDSA\b|\becdsa\b", "ECDSA", "ECC", CryptoRole::Signature),
-        (r"\bECDH(E)?\b|\becdh\b", "ECDHE", "ECC", CryptoRole::KeyExchange),
-        (r"\bDiffieHellman\b|\bDH_generate|\bdiffie[-_]?hellman\b", "DH", "DH", CryptoRole::KeyExchange),
-        (r"\bDSA(?:_|\b)", "DSA", "DSA", CryptoRole::Signature),
-        (r"(?i)\bed25519(?:_|\b)|\bEdDSA\b|\bed448(?:_|\b)", "Ed25519", "ECC", CryptoRole::Signature),
-        (r"(?i)\bx25519(?:_|\b)|\bcurve25519(?:_|\b)|\bx448(?:_|\b)", "X25519", "ECC", CryptoRole::KeyExchange),
+        // Uppercase RSA tokens, plus the lowercase module-call idiom common in
+        // Go (`rsa.GenerateKey`), Rust (`rsa::`), and Python (`rsa.`) (WP-014).
+        (
+            r"\bRSA(_|\b|\.|::|With|with)|\brsa[._:]",
+            "RSA",
+            "RSA",
+            CryptoRole::Signature,
+        ),
+        (
+            r"\bECDSA\b|\becdsa\b",
+            "ECDSA",
+            "ECC",
+            CryptoRole::Signature,
+        ),
+        (
+            r"\bECDH(E)?\b|\becdh\b",
+            "ECDHE",
+            "ECC",
+            CryptoRole::KeyExchange,
+        ),
+        (
+            r"\bDiffieHellman\b|\bDH_generate|\bdiffie[-_]?hellman\b",
+            "DH",
+            "DH",
+            CryptoRole::KeyExchange,
+        ),
+        // Uppercase DSA plus the lowercase `dsa.`/`dsa_` module idiom. `\bdsa`
+        // will not fire inside `ecdsa` (no word boundary before the 'd').
+        (
+            r"\bDSA(?:_|\b)|\bdsa[._]",
+            "DSA",
+            "DSA",
+            CryptoRole::Signature,
+        ),
+        (
+            r"(?i)\bed25519(?:_|\b)|\bEdDSA\b|\bed448(?:_|\b)",
+            "Ed25519",
+            "ECC",
+            CryptoRole::Signature,
+        ),
+        (
+            r"(?i)\bx25519(?:_|\b)|\bcurve25519(?:_|\b)|\bx448(?:_|\b)",
+            "X25519",
+            "ECC",
+            CryptoRole::KeyExchange,
+        ),
         // IANA-registered hybrid PQ groups (TLS 4587/4588/4589) and SSH hybrid KEX names —
         // recognized so hybrid deployments inventory as PQ-capable, not as classical ECC.
         (
@@ -502,25 +647,105 @@ fn patterns() -> Result<Vec<Pattern>> {
             "hybrid-pqc",
             CryptoRole::KeyExchange,
         ),
-        (r"\bML[-_]?KEM[-_]?(512|768|1024)?\b|\bKyber\b", "ML-KEM", "ML-KEM", CryptoRole::Kem),
-        (r"\bML[-_]?DSA[-_]?(44|65|87)?\b|\bDilithium\b", "ML-DSA", "ML-DSA", CryptoRole::Signature),
-        (r"\bSLH[-_]?DSA\b|\bSPHINCS\+?\b", "SLH-DSA", "SLH-DSA", CryptoRole::Signature),
-        (r"\bAES[-_]?128\b|\bAES_128\b", "AES-128", "AES", CryptoRole::Symmetric),
-        (r"\bAES[-_]?256\b|\bAES_256\b", "AES-256", "AES", CryptoRole::Symmetric),
-        (r"\bDES\b|\b3DES\b|\bRC4\b", "legacy-symmetric", "legacy", CryptoRole::Symmetric),
+        (
+            r"\bML[-_]?KEM[-_]?(512|768|1024)?\b|\bKyber\b",
+            "ML-KEM",
+            "ML-KEM",
+            CryptoRole::Kem,
+        ),
+        (
+            r"\bML[-_]?DSA[-_]?(44|65|87)?\b|\bDilithium\b",
+            "ML-DSA",
+            "ML-DSA",
+            CryptoRole::Signature,
+        ),
+        (
+            r"\bSLH[-_]?DSA\b|\bSPHINCS\+?\b",
+            "SLH-DSA",
+            "SLH-DSA",
+            CryptoRole::Signature,
+        ),
+        (
+            r"\bAES[-_]?128\b|\bAES_128\b",
+            "AES-128",
+            "AES",
+            CryptoRole::Symmetric,
+        ),
+        (
+            r"\bAES[-_]?256\b|\bAES_256\b",
+            "AES-256",
+            "AES",
+            CryptoRole::Symmetric,
+        ),
+        (
+            r"\bDES\b|\b3DES\b|\bRC4\b",
+            "legacy-symmetric",
+            "legacy",
+            CryptoRole::Symmetric,
+        ),
         (r"\bMD5\b", "MD5", "hash", CryptoRole::Hash),
         (r"\bSHA1\b|\bSHA-1\b", "SHA-1", "hash", CryptoRole::Hash),
-        (r"\bSHA384\b|\bSHA-384\b", "SHA-384", "hash", CryptoRole::Hash),
-        (r"\bSHA512\b|\bSHA-512\b", "SHA-512", "hash", CryptoRole::Hash),
-        (r"\bSecureRandom\b|\brand\.Reader\b|\bgetrandom\b|\bBCryptGenRandom\b", "secure-random", "random", CryptoRole::Random),
+        (
+            r"\bSHA384\b|\bSHA-384\b",
+            "SHA-384",
+            "hash",
+            CryptoRole::Hash,
+        ),
+        (
+            r"\bSHA512\b|\bSHA-512\b",
+            "SHA-512",
+            "hash",
+            CryptoRole::Hash,
+        ),
+        (
+            r"\bSecureRandom\b|\brand\.Reader\b|\bgetrandom\b|\bBCryptGenRandom\b",
+            "secure-random",
+            "random",
+            CryptoRole::Random,
+        ),
         // FHE (Fully Homomorphic Encryption) pattern families
-        (r"\bFHE\b", "FHE", "homomorphic-encryption", CryptoRole::Unspecified),
-        (r"\bHomomorphicEncrypt(ion)?\b", "HomomorphicEncryption", "homomorphic-encryption", CryptoRole::Unspecified),
-        (r"\bCKKS\b", "CKKS", "homomorphic-encryption", CryptoRole::Unspecified),
-        (r"\bBGV\b", "BGV", "homomorphic-encryption", CryptoRole::Unspecified),
-        (r"\bBFV\b", "BFV", "homomorphic-encryption", CryptoRole::Unspecified),
-        (r"\bTFHE\b", "TFHE", "homomorphic-encryption", CryptoRole::Unspecified),
-        (r"\bGSW\b", "GSW", "homomorphic-encryption", CryptoRole::Unspecified),
+        (
+            r"\bFHE\b",
+            "FHE",
+            "homomorphic-encryption",
+            CryptoRole::Unspecified,
+        ),
+        (
+            r"\bHomomorphicEncrypt(ion)?\b",
+            "HomomorphicEncryption",
+            "homomorphic-encryption",
+            CryptoRole::Unspecified,
+        ),
+        (
+            r"\bCKKS\b",
+            "CKKS",
+            "homomorphic-encryption",
+            CryptoRole::Unspecified,
+        ),
+        (
+            r"\bBGV\b",
+            "BGV",
+            "homomorphic-encryption",
+            CryptoRole::Unspecified,
+        ),
+        (
+            r"\bBFV\b",
+            "BFV",
+            "homomorphic-encryption",
+            CryptoRole::Unspecified,
+        ),
+        (
+            r"\bTFHE\b",
+            "TFHE",
+            "homomorphic-encryption",
+            CryptoRole::Unspecified,
+        ),
+        (
+            r"\bGSW\b",
+            "GSW",
+            "homomorphic-encryption",
+            CryptoRole::Unspecified,
+        ),
     ];
     defs.iter()
         .map(|(re, name, family, role)| {
@@ -538,8 +763,10 @@ fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
     // Use path-component matching so excluding "target" only matches the directory, not "custom-target"
     if path.components().any(|comp| {
         let comp_str = comp.as_os_str().to_string_lossy();
-        cfg.exclude_dirs.iter().any(|d| comp_str == d.as_str()) ||
-            super::status::get_exclusions().iter().any(|d| comp_str == d.as_str())
+        cfg.exclude_dirs.iter().any(|d| comp_str == d.as_str())
+            || super::status::get_exclusions()
+                .iter()
+                .any(|d| comp_str == d.as_str())
     }) {
         return false;
     }
@@ -548,14 +775,45 @@ fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
 
 fn is_source(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|s| s.to_str()).unwrap_or_default(),
-        "rs" | "go" | "js" | "jsx" | "ts" | "tsx" | "py" | "java" | "kt" | "cs" | "c" | "h" | "cpp" | "hpp" | "rb" | "php" | "swift" | "m" | "mm" | "scala" | "sh" | "yaml" | "yml" | "toml" | "xml" | "conf" | "cnf"
+        path.extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default(),
+        "rs" | "go"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "py"
+            | "java"
+            | "kt"
+            | "cs"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "rb"
+            | "php"
+            | "swift"
+            | "m"
+            | "mm"
+            | "scala"
+            | "sh"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "xml"
+            | "conf"
+            | "cnf"
     )
 }
 
 /// Detect test files by naming conventions across languages.
 fn is_test_path(path: &Path) -> bool {
-    let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let name = path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     // Directory-level test markers: exact path-component match (covers Rust `tests/`,
     // which the previous substring checks missed, without matching e.g. "contest").
     if path.components().any(|c| {
@@ -573,7 +831,7 @@ fn is_test_path(path: &Path) -> bool {
         || name.ends_with(".test")   // JS/TS
         || name.ends_with(".spec")   // JS/TS
         || name.ends_with("tests")   // General
-        || name.contains("_test_")   // Embedded tests
+        || name.contains("_test_") // Embedded tests
 }
 
 /// Infer usage intent from surrounding code context.
@@ -606,7 +864,10 @@ fn infer_usage_intent(line: &str) -> String {
 /// the agent no longer performs LLM intent classification during scans.
 #[allow(dead_code)]
 fn is_known_intent(intent: &str) -> bool {
-    matches!(intent, "protect" | "verify" | "parse" | "negotiate" | "test" | "observed")
+    matches!(
+        intent,
+        "protect" | "verify" | "parse" | "negotiate" | "test" | "observed"
+    )
 }
 
 /// Confidence for a detection method adjusted by usage intent. Passive/observing
@@ -625,8 +886,17 @@ fn intent_adjusted_confidence(method: DetectionMethod, intent: &str) -> f64 {
 fn is_quantum_vulnerable(name: &str) -> bool {
     matches!(
         name,
-        "RSA" | "ECDSA" | "ECDH" | "ECDHE" | "DH" | "DSA" | "Ed25519" | "X25519" | "MD5"
-            | "SHA-1" | "legacy-symmetric"
+        "RSA"
+            | "ECDSA"
+            | "ECDH"
+            | "ECDHE"
+            | "DH"
+            | "DSA"
+            | "Ed25519"
+            | "X25519"
+            | "MD5"
+            | "SHA-1"
+            | "legacy-symmetric"
     )
 }
 
@@ -642,7 +912,9 @@ fn is_pq_prefixed(line: &str, start: usize) -> bool {
 /// Python `hashlib`/`cryptography`, and OpenSSL EVP select algorithms — entirely
 /// invisible to the stripped-identifier pass.
 /// Returns (canonical name, family, role, byte column, matched token).
-fn string_literal_hits(raw_line: &str) -> Vec<(&'static str, &'static str, CryptoRole, usize, String)> {
+fn string_literal_hits(
+    raw_line: &str,
+) -> Vec<(&'static str, &'static str, CryptoRole, usize, String)> {
     static RES: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
     let (api_re, quoted_re, token_re) = RES.get_or_init(|| {
         (
@@ -691,7 +963,11 @@ fn string_literal_hits(raw_line: &str) -> Vec<(&'static str, &'static str, Crypt
 }
 
 fn language(path: &Path) -> String {
-    match path.extension().and_then(|s| s.to_str()).unwrap_or_default() {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+    {
         "rs" => "rust",
         "go" => "go",
         "js" | "jsx" | "ts" | "tsx" => "javascript",
@@ -707,7 +983,17 @@ fn language(path: &Path) -> String {
 
 fn infer_library(line: &str) -> String {
     let l = line.to_ascii_lowercase();
-    for lib in ["openssl", "boringssl", "crypto", "javax.crypto", "cryptography", "bcrypt", "commoncrypto", "ring", "rustls"] {
+    for lib in [
+        "openssl",
+        "boringssl",
+        "crypto",
+        "javax.crypto",
+        "cryptography",
+        "bcrypt",
+        "commoncrypto",
+        "ring",
+        "rustls",
+    ] {
         if l.contains(lib) {
             return lib.to_string();
         }
@@ -732,7 +1018,15 @@ fn infer_key_bits(name: &str, line: &str) -> u32 {
 
 fn infer_curve(line: &str) -> String {
     let l = line.to_ascii_lowercase();
-    for curve in ["p-256", "prime256v1", "secp256r1", "p-384", "secp384r1", "x25519", "x448"] {
+    for curve in [
+        "p-256",
+        "prime256v1",
+        "secp256r1",
+        "p-384",
+        "secp384r1",
+        "x25519",
+        "x448",
+    ] {
         if l.contains(curve) {
             return curve.to_string();
         }
@@ -872,9 +1166,15 @@ mod detection_quality_tests {
     #[test]
     fn string_literal_api_idioms_are_detected() {
         let hits = string_literal_hits(r#"Cipher.getInstance("RSA/ECB/PKCS1Padding")"#);
-        assert!(hits.iter().any(|(n, ..)| *n == "RSA"), "JCA getInstance: {hits:?}");
+        assert!(
+            hits.iter().any(|(n, ..)| *n == "RSA"),
+            "JCA getInstance: {hits:?}"
+        );
         let hits = string_literal_hits(r#"const h = crypto.createHash('md5');"#);
-        assert!(hits.iter().any(|(n, ..)| *n == "MD5"), "node createHash: {hits:?}");
+        assert!(
+            hits.iter().any(|(n, ..)| *n == "MD5"),
+            "node createHash: {hits:?}"
+        );
         let hits = string_literal_hits(r#"hashlib.new("sha1")"#);
         assert!(hits.iter().any(|(n, ..)| *n == "SHA-1"));
         // No API context on the line → no string findings (FP guard).
@@ -885,7 +1185,8 @@ mod detection_quality_tests {
 
     #[test]
     fn config_files_keep_string_values() {
-        let stripped = strip_comments_and_strings("ciphers = \"ECDHE-RSA-AES128\" # legacy\n", "toml");
+        let stripped =
+            strip_comments_and_strings("ciphers = \"ECDHE-RSA-AES128\" # legacy\n", "toml");
         assert!(stripped.contains("ECDHE-RSA-AES128"), "{stripped}");
         assert!(!stripped.contains("legacy"));
     }
@@ -901,7 +1202,10 @@ mod detection_quality_tests {
     fn hybrid_groups_and_missing_qv_algos_have_patterns() {
         let pats = patterns().unwrap();
         let find = |line: &str| -> Vec<&str> {
-            pats.iter().filter(|p| p.regex.is_match(line)).map(|p| p.name).collect()
+            pats.iter()
+                .filter(|p| p.regex.is_match(line))
+                .map(|p| p.name)
+                .collect()
         };
         assert!(find("ssh-ed25519 AAAA").contains(&"Ed25519"));
         assert!(find("kex: X25519").contains(&"X25519"));
@@ -927,9 +1231,15 @@ mod detection_quality_tests {
     #[test]
     fn static_patch_is_role_aware() {
         let p = build_static_patch("a.go", 3, "cert := RSA_sign(key)", "RSA");
-        assert!(p.contains("MLDSA65"), "signing RSA should target ML-DSA: {p}");
+        assert!(
+            p.contains("MLDSA65"),
+            "signing RSA should target ML-DSA: {p}"
+        );
         let p = build_static_patch("a.go", 3, "shared := RSA_encrypt(pub)", "RSA");
-        assert!(p.contains("MLKEM768"), "key transport RSA should target ML-KEM: {p}");
+        assert!(
+            p.contains("MLKEM768"),
+            "key transport RSA should target ML-KEM: {p}"
+        );
         assert!(p.starts_with("# janus candidate patch"));
     }
 
@@ -954,18 +1264,46 @@ mod detection_corpus {
     // (relative path, content, expect_qv_finding)
     const CORPUS: &[(&str, &str, bool)] = &[
         // True positives — must be flagged
-        ("app/Jca.java", r#"Cipher c = Cipher.getInstance("RSA/ECB/PKCS1Padding");"#, true),
-        ("app/hash.js", r#"const h = crypto.createHash('md5');"#, true),
-        ("app/sign.go", "sig, err := ecdsa.SignASN1(rand.Reader, priv, digest)", true),
+        (
+            "app/Jca.java",
+            r#"Cipher c = Cipher.getInstance("RSA/ECB/PKCS1Padding");"#,
+            true,
+        ),
+        (
+            "app/hash.js",
+            r#"const h = crypto.createHash('md5');"#,
+            true,
+        ),
+        (
+            "app/sign.go",
+            "sig, err := ecdsa.SignASN1(rand.Reader, priv, digest)",
+            true,
+        ),
         ("app/kex.c", "DH_generate_key(dh);", true),
         ("app/legacy.py", r#"h = hashlib.new("sha1")"#, true),
-        ("conf/tls.conf", "ciphers = \"ECDHE-RSA-AES256-GCM-SHA384\"\n", true),
+        (
+            "conf/tls.conf",
+            "ciphers = \"ECDHE-RSA-AES256-GCM-SHA384\"\n",
+            true,
+        ),
         ("app/sshkey.rs", "let sig = ed25519_sign(&msg, &key);", true),
-        ("app/kx.ts", "const shared = x25519_derive(base, peer);", true),
+        (
+            "app/kx.ts",
+            "const shared = x25519_derive(base, peer);",
+            true,
+        ),
         // True negatives — must NOT be flagged (each targets a known FP class)
-        ("app/comment.go", "// RSA is no longer used here\nfunc nothing() {}", false),
+        (
+            "app/comment.go",
+            "// RSA is no longer used here\nfunc nothing() {}",
+            false,
+        ),
         ("app/log.js", r#"log.info("uses RSA somewhere");"#, false),
-        ("tests/rsa_test.go", "k, _ := rsa.GenerateKey(rand.Reader, 2048)", false),
+        (
+            "tests/rsa_test.go",
+            "k, _ := rsa.GenerateKey(rand.Reader, 2048)",
+            false,
+        ),
         ("app/pq.rs", "let kp = ML_DSA_keygen();", false),
         ("conf/hybrid.conf", "Groups = X25519MLKEM768\n", false),
         ("app/aes.go", "alg := AES_256", false),
@@ -991,14 +1329,13 @@ mod detection_corpus {
             .components
             .iter()
             .filter(|c| {
-                c.algorithms.iter().any(|a| {
-                    a.quantum_vulnerable && a.status != "test-only" && a.confidence >= 0.5
-                })
+                c.algorithms
+                    .iter()
+                    .any(|a| a.quantum_vulnerable && a.status != "test-only" && a.confidence >= 0.5)
             })
             .map(|c| c.file_path.replace('\\', "/"))
             .collect();
-        let is_flagged =
-            |rel: &str| flagged.iter().any(|f| f.ends_with(&rel.replace('\\', "/")));
+        let is_flagged = |rel: &str| flagged.iter().any(|f| f.ends_with(&rel.replace('\\', "/")));
 
         let (mut tp, mut fp_, mut fn_) = (0u32, 0u32, 0u32);
         for (rel, _, expect) in CORPUS {
@@ -1037,3 +1374,239 @@ mod detection_corpus {
     }
 }
 
+/// WP-014 detection benchmark: a versioned, labeled corpus that reports
+/// precision/recall broken down by language and by detector family, satisfying
+/// the acceptance criterion "Published benchmark corpus reports precision/recall
+/// by detector and language." The numeric results are documented in
+/// docs/analysis/DETECTION-BENCHMARK.md. Run:
+///   cargo test detection_benchmark::benchmark_by_language_and_detector -- --nocapture
+#[cfg(test)]
+mod detection_benchmark {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    /// (relative path, content, should_be_flagged, language, detector family)
+    /// `detector` groups true-positive expectations so we can report recall per
+    /// detector family. For true negatives `detector` is "" (not counted there).
+    const BENCH: &[(&str, &str, bool, &str, &str)] = &[
+        // ---- source true positives, by language ----
+        (
+            "app/sign.go",
+            "sig, err := ecdsa.SignASN1(rand.Reader, priv, digest)",
+            true,
+            "go",
+            "ECDSA",
+        ),
+        (
+            "app/kex.go",
+            "priv, _ := rsa.GenerateKey(rand.Reader, 2048)",
+            true,
+            "go",
+            "RSA",
+        ),
+        (
+            "app/hash.js",
+            "const h = crypto.createHash('md5');",
+            true,
+            "javascript",
+            "MD5",
+        ),
+        (
+            "app/legacy.py",
+            r#"h = hashlib.new("sha1")"#,
+            true,
+            "python",
+            "SHA-1",
+        ),
+        (
+            "app/Jca.java",
+            r#"Cipher c = Cipher.getInstance("RSA/ECB/PKCS1Padding");"#,
+            true,
+            "jvm",
+            "RSA",
+        ),
+        (
+            "app/kx.ts",
+            "const shared = x25519_derive(base, peer);",
+            true,
+            "javascript",
+            "X25519",
+        ),
+        ("app/dh.c", "DH_generate_key(dh);", true, "native", "DH"),
+        (
+            "app/ed.rs",
+            "let sig = ed25519_sign(&msg, &key);",
+            true,
+            "rust",
+            "Ed25519",
+        ),
+        // NOTE: legacy symmetric (DES/3DES/RC4) is a CLASSICAL weakness, not
+        // quantum-vulnerable, so it is intentionally outside this QV-recall
+        // benchmark (it is covered by the separate classical-weakness axis).
+        (
+            "app/dsa.py",
+            "key = dsa.generate_private_key(2048)",
+            true,
+            "python",
+            "DSA",
+        ),
+        // ---- config true positives (structural detector), by format ----
+        (
+            "etc/nginx.conf",
+            "ssl_protocols TLSv1 TLSv1.2;\nssl_ciphers ECDHE-RSA-AES256-GCM-SHA384;\n",
+            true,
+            "config",
+            "structural-nginx",
+        ),
+        (
+            "etc/sshd_config",
+            "KexAlgorithms curve25519-sha256\nHostKeyAlgorithms ssh-rsa\n",
+            true,
+            "config",
+            "structural-ssh",
+        ),
+        (
+            "etc/openssl.cnf",
+            "CipherString = ECDHE-ECDSA-AES256-GCM-SHA384\n",
+            true,
+            "config",
+            "structural-openssl",
+        ),
+        // ---- config true positive: PQC hybrid must NOT be flagged QV ----
+        (
+            "etc/nginx_pqc.conf",
+            "ssl_ecdh_curve X25519MLKEM768;\n",
+            false,
+            "config",
+            "",
+        ),
+        // ---- true negatives (must NOT be flagged) ----
+        (
+            "app/comment.go",
+            "// RSA is no longer used here\nfunc nothing() {}",
+            false,
+            "go",
+            "",
+        ),
+        (
+            "app/log.js",
+            r#"log.info("uses RSA somewhere");"#,
+            false,
+            "javascript",
+            "",
+        ),
+        (
+            "tests/rsa_test.go",
+            "k, _ := rsa.GenerateKey(rand.Reader, 2048)",
+            false,
+            "go",
+            "",
+        ),
+        ("app/pq.rs", "let kp = ML_DSA_keygen();", false, "rust", ""),
+        (
+            "app/sshd_hybrid",
+            "KexAlgorithms mlkem768x25519-sha256\n",
+            false,
+            "config",
+            "",
+        ),
+    ];
+
+    #[test]
+    fn benchmark_by_language_and_detector() {
+        let dir = std::env::temp_dir().join(format!("janus-bench-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (rel, content, _, _, _) in BENCH {
+            let p = dir.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, content).unwrap();
+        }
+        let cfg = AgentConfig {
+            scan_roots: vec![dir.display().to_string()],
+            report_path: dir.join("report.html").display().to_string(),
+            ..AgentConfig::default()
+        };
+        let result = scan(&cfg, false).unwrap();
+
+        // A file is "flagged" if it carries a quantum-vulnerable, non-test
+        // finding at usable confidence.
+        let flagged: Vec<String> = result
+            .components
+            .iter()
+            .filter(|c| {
+                c.algorithms
+                    .iter()
+                    .any(|a| a.quantum_vulnerable && a.status != "test-only" && a.confidence >= 0.5)
+            })
+            .map(|c| c.file_path.replace('\\', "/"))
+            .collect();
+        let is_flagged = |rel: &str| flagged.iter().any(|f| f.ends_with(&rel.replace('\\', "/")));
+
+        // Aggregate + per-language + per-detector tallies.
+        let (mut tp, mut fp, mut fn_) = (0u32, 0u32, 0u32);
+        let mut by_lang: BTreeMap<&str, (u32, u32, u32)> = BTreeMap::new(); // lang -> (tp, fp, fn)
+        let mut by_det: BTreeMap<&str, (u32, u32)> = BTreeMap::new(); // detector -> (tp, fn) over positives
+
+        for (rel, _, expect, lang, det) in BENCH {
+            let got = is_flagged(rel);
+            let entry = by_lang.entry(lang).or_default();
+            match (expect, got) {
+                (true, true) => {
+                    tp += 1;
+                    entry.0 += 1;
+                    let d = by_det.entry(det).or_default();
+                    d.0 += 1;
+                }
+                (true, false) => {
+                    fn_ += 1;
+                    entry.2 += 1;
+                    let d = by_det.entry(det).or_default();
+                    d.1 += 1;
+                    eprintln!("FN [{lang}/{det}]: {rel}");
+                }
+                (false, true) => {
+                    fp += 1;
+                    entry.1 += 1;
+                    eprintln!("FP [{lang}]: {rel}");
+                }
+                (false, false) => {}
+            }
+        }
+
+        let precision = tp as f64 / (tp + fp).max(1) as f64;
+        let recall = tp as f64 / (tp + fn_).max(1) as f64;
+
+        eprintln!("\n=== Janus detection benchmark v2 ===");
+        eprintln!(
+            "cases={} tp={tp} fp={fp} fn={fn_} precision={precision:.3} recall={recall:.3}",
+            BENCH.len()
+        );
+        eprintln!("\n-- by language --");
+        for (lang, &(l_tp, l_fp, l_fn)) in &by_lang {
+            let lp = l_tp as f64 / (l_tp + l_fp).max(1) as f64;
+            let lr = l_tp as f64 / (l_tp + l_fn).max(1) as f64;
+            eprintln!(
+                "  {lang:<12} tp={l_tp} fp={l_fp} fn={l_fn} precision={lp:.3} recall={lr:.3}"
+            );
+        }
+        eprintln!("\n-- by detector (recall over positives) --");
+        for (det, &(d_tp, d_fn)) in &by_det {
+            if det.is_empty() {
+                continue;
+            }
+            let dr = d_tp as f64 / (d_tp + d_fn).max(1) as f64;
+            eprintln!("  {det:<20} tp={d_tp} fn={d_fn} recall={dr:.3}");
+        }
+
+        // Release gates: no false positives, and high recall. These are the
+        // numbers documented in docs/analysis/DETECTION-BENCHMARK.md.
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(fp, 0, "benchmark must have zero false positives");
+        assert!(recall >= 0.90, "benchmark recall regressed: {recall:.3}");
+        assert!(
+            precision >= 0.99,
+            "benchmark precision regressed: {precision:.3}"
+        );
+    }
+}

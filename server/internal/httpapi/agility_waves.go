@@ -38,7 +38,58 @@ func (a *API) agilityExercise(w http.ResponseWriter, r *http.Request) {
 	}
 
 	report := agility.RunExercise(scorecards)
-	writeJSON(w, http.StatusOK, report)
+
+	// Per-adapter negotiation harness (WP-023): evaluate the migration adapters
+	// against the active profile's PQC targets. Targets may be overridden via
+	// ?targets=a,b,c; otherwise they come from the active policy profile.
+	targets := parseTargets(r.URL.Query().Get("targets"))
+	if len(targets) == 0 && a.engine != nil {
+		prof := a.engine.GetActiveProfile()
+		if prof.PreferredKEM != "" {
+			targets = append(targets, prof.PreferredKEM)
+		}
+		if prof.PreferredSignature != "" {
+			targets = append(targets, prof.PreferredSignature)
+		}
+	}
+	negotiation := agility.RunNegotiationHarness(targets)
+
+	// Persist per-host agility metric snapshots so the agility_metrics table
+	// reflects each exercise run (it was previously never written). host_uuid
+	// carries a foreign key to assets, so we record one row per real host.
+	fleet := agility.ComputeFleetScorecard(scorecards)
+	fleetTTSA := agility.EstimateTTSADays(fleet, negotiation)
+	for _, sc := range scorecards {
+		hostTTSA := agility.EstimateTTSADays(sc, negotiation)
+		_ = a.store.UpsertAgilityMetrics(r.Context(), &store.AgilityMetrics{
+			HostUUID:            sc.HostUUID,
+			MeasurementDate:     report.RunAt,
+			TTSADays:            &hostTTSA,
+			HardcodeIndex:       sc.HardcodeIndex,
+			NegotiationCoverage: sc.NegotiationCoverage,
+			BlastRadiusScore:    sc.BlastRadiusScore,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exercise":            report,
+		"negotiation":         negotiation,
+		"estimated_ttsa_days": fleetTTSA,
+	})
+}
+
+// parseTargets splits a comma-separated target list, trimming blanks.
+func parseTargets(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // GET /api/agility/scorecard
@@ -76,8 +127,8 @@ func (a *API) agilityScorecard(w http.ResponseWriter, r *http.Request) {
 	}
 	fleet := agility.ComputeFleetScorecard(scorecards)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"fleet":   fleet,
-		"hosts":   scorecards,
+		"fleet":            fleet,
+		"hosts":            scorecards,
 		"top_blast_radius": agility.TopBlastRadiusAlgorithms(fleet, 5),
 	})
 }
@@ -131,6 +182,30 @@ func (a *API) wavePlanByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	planner := waveplan.New(a.store)
+
+	// GET /api/waves/graph — dependency graph + budget rollup (WP-022).
+	if planID == "graph" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		graph, err := planner.Graph(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		budget, err := planner.Budget(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"graph":  graph,
+			"budget": budget,
+		})
+		return
+	}
+
 	username, _ := r.Context().Value(UserContextKey).(string)
 	if username == "" {
 		username = "admin"

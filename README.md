@@ -1,6 +1,6 @@
 # Janus CryptoBOM: Enterprise Post-Quantum Cryptographic Posture Management & Migration Suite
 
-Janus CryptoBOM is an enterprise-grade, post-quantum cryptographic posture management (PQC-PM), discovery, and automated migration platform. It enables organizations to discover legacy cryptographic vulnerabilities, assess quantum readiness, align with emerging standards, and orchestrate safe, automated migrations to Post-Quantum Cryptography (PQC).
+Janus CryptoBOM is an enterprise post-quantum cryptographic posture management (PQC-PM), discovery, and automated migration platform. It enables organizations to discover legacy cryptographic vulnerabilities, assess quantum readiness, align with emerging standards, and orchestrate safe, automated migrations to Post-Quantum Cryptography (PQC).
 
 ---
 

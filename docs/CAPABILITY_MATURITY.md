@@ -46,7 +46,7 @@ Each dimension has five levels (0–4). An organization's overall maturity is th
 
 **Evidence model requirements by level.** At Level 3 and above, every finding is an evidence record with: sensor identity, collection timestamp, confidence score (calibrated per sensor on a known-answer corpus), and detection method. Negative evidence ("scanned, none found") is a first-class database entry — the absence of a finding on a scanned asset is different from no scan having been run. At Level 4, evidence records carry cryptographic signatures, conflicts between sensors surface as typed conflict objects, and coverage SLOs (p95 evidence age < 30 days; ≥ 85% of known estate at ≥ 2 sensor classes) are monitored. (RESEARCH.md §4.4.)
 
-**Current Janus status (2026-06-12):** Level 2–3. Regex source + binary + dependency + network scan implemented. `DetectionMethod` enum with confidence floors. `BoundedEvidencePackage` for evidence provenance. Missing: AST analysis, published benchmark corpus.
+**Current Janus status (2026-06-13):** Level 3. Regex source + binary + dependency + network scan, plus **directive-aware structural parsing** for nginx/sshd_config/openssl.cnf (WP-014). `DetectionMethod` enum with confidence floors; `BoundedEvidencePackage` for evidence provenance. Reachability is reported honestly (textual/import matches set `reachable=false`; config directives `reachable=true`). **Published benchmark corpus** with precision/recall by detector and language (`docs/analysis/DETECTION-BENCHMARK.md`, 1.000/1.000 on the labeled corpus). Missing for Level 4: full multi-language AST/data-flow analysis (deferred — tree-sitter toolchain cost) and a measured false-positive budget on a large field corpus.
 
 ---
 
@@ -98,7 +98,7 @@ Each dimension has five levels (0–4). An organization's overall maturity is th
 
 Both conditions must hold at the target tier. Conditions are evaluated highest-tier-first with strict inequalities.
 
-**Current Janus status (2026-06-12):** Level 3. `server/internal/agility/` package computes all five metrics. DB migration 21 (`agility_metrics`). `GET /api/agility/scorecard` fleet + per-host API. React UI (`AgilityDashboard.tsx`). `docs/AGILITY_SCORECARD.md` published. Missing: automated exercises, end-to-end negotiation tests.
+**Current Janus status (2026-06-13):** Level 3. `server/internal/agility/` package computes all five metrics. DB migration 21 (`agility_metrics`, now populated per-exercise). `GET /api/agility/scorecard` fleet + per-host API. **Automated agility exercise harness with per-adapter negotiation evaluation** (WP-023): `RunNegotiationHarness` grades nginx/apache/ssh/Windows adapters against the active profile's PQC targets, with a labeled TTSA estimate. React UI (`AgilityDashboard.tsx`). `docs/AGILITY_SCORECARD.md` published. Missing for Level 4: live end-to-end negotiation drills (current harness is an offline capability evaluation) and TTSA measured under a real CRQC-deadline exercise.
 
 ---
 
@@ -116,7 +116,7 @@ Both conditions must hold at the target tier. Conditions are evaluated highest-t
 
 **Wave planning.** Level 3 migration safety requires wave plans with the six-item pre-activation readiness checklist (WAVE_PLANNING_GUIDE.md §4): all assets discovery-scanned, critical/high findings triaged, dry-run simulation passed, rollback plan documented, stakeholder approval recorded, monitoring alerts configured. The wave plan state machine (planned → active → completed; planned/active → cancelled) enforces sequencing. Wave plans do not drive automated execution — they are sequencing and audit artifacts.
 
-**Current Janus status (2026-06-12):** Level 3. Full mutation engine with HMAC verification and atomic rollback. `sandbox.Simulator` for dry runs. Wave plan CRUD with state machine and readiness checklist (WP-022). Audit logging. `docs/WAVE_PLANNING_GUIDE.md` published. Missing: canary deployment, dependency graph, golden repositories.
+**Current Janus status (2026-06-13):** Level 3. Full mutation engine with HMAC verification and atomic rollback. `sandbox.Simulator` for dry runs. Wave plan CRUD with state machine, readiness checklist, canary/maintenance/approval fields, **dependency graph with cycle detection + dependency-safe activation gating, and budget/effort rollup** (WP-022). Audit logging. `docs/WAVE_PLANNING_GUIDE.md` published. Missing for Level 4: canary *deployment automation* (fields exist; execution does not) and golden migration repositories for end-to-end validation.
 
 ---
 

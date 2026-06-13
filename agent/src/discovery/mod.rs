@@ -1,5 +1,6 @@
 pub mod binary;
 pub mod cbom;
+pub(crate) mod config_parse;
 pub mod dependency;
 pub(crate) mod network;
 mod plugin;
@@ -176,7 +177,10 @@ async fn check_llm_available(http_endpoint: &str) -> bool {
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(body) = resp.json::<serde_json::Value>().await {
-                return body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                return body
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
             }
             false
         }

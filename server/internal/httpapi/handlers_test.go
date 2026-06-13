@@ -23,11 +23,11 @@ var errDBDown = errors.New("connection refused")
 
 type handlerMockStore struct {
 	store.Store // embed nil — panics on any unconfigured method
-	findings   []store.Finding
-	components []store.Component
-	events     []store.FindingLifecycleEvent
-	certHealth *store.CertHealth
-	pingErr    error
+	findings    []store.Finding
+	components  []store.Component
+	events      []store.FindingLifecycleEvent
+	certHealth  *store.CertHealth
+	pingErr     error
 }
 
 func (m *handlerMockStore) Findings(_ context.Context, _ int) ([]store.Finding, error) {
@@ -53,6 +53,9 @@ func (m *handlerMockStore) GetCertHealth(_ context.Context) (*store.CertHealth, 
 }
 func (m *handlerMockStore) Ping(_ context.Context) error {
 	return m.pingErr
+}
+func (m *handlerMockStore) InsertAuditLog(_ context.Context, _ *store.AuditLog) error {
+	return nil
 }
 
 func newTestAPI(mock *handlerMockStore) *API {

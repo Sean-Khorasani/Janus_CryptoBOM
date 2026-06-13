@@ -4,7 +4,7 @@ include VERSION.env
 FULL_VERSION := $(JANUS_VERSION)+$(JANUS_BUILD_DATE).$(JANUS_BUILD_SEQUENCE)
 GO_VERSION_LDFLAGS := -X github.com/janus-cbom/janus/server/internal/version.Version=$(JANUS_VERSION) -X github.com/janus-cbom/janus/server/internal/version.BuildDate=$(JANUS_BUILD_DATE) -X github.com/janus-cbom/janus/server/internal/version.BuildSequence=$(JANUS_BUILD_SEQUENCE) -X github.com/janus-cbom/janus/server/internal/version.APIVersion=$(JANUS_API_VERSION) -X github.com/janus-cbom/janus/server/internal/version.AgentProtocolVersion=$(JANUS_AGENT_PROTOCOL_VERSION)
 
-.PHONY: ui server agent test race bootstrap-check fmt-check lint proto-check build release-linux compose-check linux-gate vuln
+.PHONY: ui server agent test race bootstrap-check fmt-check lint proto-check build release-linux compose-check linux-gate vuln verify-claims release-evidence interop-lab
 
 ui:
 	cd ui && npm ci && VITE_JANUS_VERSION=$(FULL_VERSION) VITE_JANUS_REQUIRED_API_VERSION=$(JANUS_UI_REQUIRED_API_VERSION) npm run build
@@ -50,6 +50,19 @@ lint:
 proto-check:
 	bash scripts/proto/verify.sh
 
+# WP-025: fail the build if documentation over-claims maturity/certification, or
+# if any capability-maturity dimension lacks a current-status declaration.
+verify-claims:
+	python3 scripts/verify-claims.py
+
+# WP-025: generate a release-evidence bundle (gate outcomes + maturity snapshot).
+release-evidence:
+	bash scripts/release-evidence.sh
+
+# WP-027: regenerate the interoperability lab report from live policy targets.
+interop-lab:
+	python3 scripts/interop-lab-report.py
+
 build: ui server agent
 
 compose-check:
@@ -62,5 +75,5 @@ vuln:
 	cd agent && cargo audit
 	cd ui && npm audit --audit-level=high --production
 
-linux-gate: bootstrap-check fmt-check lint proto-check test compose-check
+linux-gate: bootstrap-check fmt-check lint proto-check verify-claims test compose-check
 	@echo "Linux build gate passed."

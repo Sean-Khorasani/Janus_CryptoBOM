@@ -87,10 +87,10 @@ type Store interface {
 }
 
 type CertHealth struct {
-	Expired       int `json:"expired"`
-	Expiring30    int `json:"expiring_30_days"`
-	Expiring90    int `json:"expiring_90_days"`
-	TotalTracked  int `json:"total_tracked"`
+	Expired      int `json:"expired"`
+	Expiring30   int `json:"expiring_30_days"`
+	Expiring90   int `json:"expiring_90_days"`
+	TotalTracked int `json:"total_tracked"`
 }
 
 type Postgres struct {
@@ -357,36 +357,40 @@ type LLMProvenance struct {
 }
 
 type AgilityMetrics struct {
-	MetricID                   string     `json:"metric_id"`
-	HostUUID                   string     `json:"host_uuid"`
-	MeasurementDate            time.Time  `json:"measurement_date"`
-	TTSADays                   *float64   `json:"ttsa_days,omitempty"`
-	HardcodeIndex              float64    `json:"hardcode_index"`
-	NegotiationCoverage        float64    `json:"negotiation_coverage"`
-	ProfileAdoptionLatencyDays *float64   `json:"profile_adoption_latency_days,omitempty"`
-	BlastRadiusScore           float64    `json:"blast_radius_score"`
-	MeasuredAt                 time.Time  `json:"measured_at"`
+	MetricID                   string    `json:"metric_id"`
+	HostUUID                   string    `json:"host_uuid"`
+	MeasurementDate            time.Time `json:"measurement_date"`
+	TTSADays                   *float64  `json:"ttsa_days,omitempty"`
+	HardcodeIndex              float64   `json:"hardcode_index"`
+	NegotiationCoverage        float64   `json:"negotiation_coverage"`
+	ProfileAdoptionLatencyDays *float64  `json:"profile_adoption_latency_days,omitempty"`
+	BlastRadiusScore           float64   `json:"blast_radius_score"`
+	MeasuredAt                 time.Time `json:"measured_at"`
 }
 
 type WavePlan struct {
-	PlanID             string     `json:"plan_id"`
-	Name               string     `json:"name"`
-	Description        string     `json:"description"`
-	WaveNumber         int        `json:"wave_number"`
-	AssetIDs           []string   `json:"asset_ids"`
-	AlgorithmTargets   []string   `json:"algorithm_targets"`
-	StartDate          *time.Time `json:"start_date,omitempty"`
-	TargetDate         *time.Time `json:"target_date,omitempty"`
-	Status             string     `json:"status"`
-	CreatedBy          string     `json:"created_by"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	CanaryTargets      []string   `json:"canary_targets,omitempty" db:"canary_targets"`
-	MaintenanceWindow  string     `json:"maintenance_window,omitempty" db:"maintenance_window"`
-	ApprovalPolicy     string     `json:"approval_policy,omitempty" db:"approval_policy"`
-	BudgetHours        float64    `json:"budget_hours,omitempty" db:"budget_hours"`
-	ActualHours        float64    `json:"actual_hours,omitempty" db:"actual_hours"`
-	ComponentCount     int        `json:"component_count,omitempty" db:"component_count"`
+	PlanID            string     `json:"plan_id"`
+	Name              string     `json:"name"`
+	Description       string     `json:"description"`
+	WaveNumber        int        `json:"wave_number"`
+	AssetIDs          []string   `json:"asset_ids"`
+	AlgorithmTargets  []string   `json:"algorithm_targets"`
+	StartDate         *time.Time `json:"start_date,omitempty"`
+	TargetDate        *time.Time `json:"target_date,omitempty"`
+	Status            string     `json:"status"`
+	CreatedBy         string     `json:"created_by"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	CanaryTargets     []string   `json:"canary_targets,omitempty" db:"canary_targets"`
+	MaintenanceWindow string     `json:"maintenance_window,omitempty" db:"maintenance_window"`
+	ApprovalPolicy    string     `json:"approval_policy,omitempty" db:"approval_policy"`
+	BudgetHours       float64    `json:"budget_hours,omitempty" db:"budget_hours"`
+	ActualHours       float64    `json:"actual_hours,omitempty" db:"actual_hours"`
+	ComponentCount    int        `json:"component_count,omitempty" db:"component_count"`
+	// DependsOn lists plan_ids that must reach "completed" before this wave may
+	// be activated (WP-022 dependency graph). Used for cycle detection and
+	// dependency-safe activation ordering.
+	DependsOn []string `json:"depends_on,omitempty" db:"depends_on"`
 }
 
 type FindingLifecycleEvent struct {
@@ -837,6 +841,10 @@ ALTER TABLE wave_plans
 ADD COLUMN IF NOT EXISTS budget_hours FLOAT8 DEFAULT 0,
 ADD COLUMN IF NOT EXISTS actual_hours FLOAT8 DEFAULT 0,
 ADD COLUMN IF NOT EXISTS component_count INTEGER DEFAULT 0;
+`},
+	{28, "Wave plan dependency graph (WP-022)", `
+ALTER TABLE wave_plans
+ADD COLUMN IF NOT EXISTS depends_on JSONB NOT NULL DEFAULT '[]'::jsonb;
 `},
 }
 
@@ -2544,23 +2552,46 @@ func (p *Postgres) CreateWavePlan(ctx context.Context, plan *WavePlan) error {
 	}
 	assetIDs, _ := json.Marshal(plan.AssetIDs)
 	algTargets, _ := json.Marshal(plan.AlgorithmTargets)
+	dependsOn, _ := json.Marshal(nonNilSlice(plan.DependsOn))
 	canaryTargets := plan.CanaryTargets
 	if canaryTargets == nil {
 		canaryTargets = []string{}
 	}
+	// The migration-25 CHECK constraint only permits auto/operator/admin; the
+	// planner treats "" as "use the default", so coerce it to the column default
+	// here rather than sending '' (which would violate the constraint).
+	plan.ApprovalPolicy = defaultApprovalPolicy(plan.ApprovalPolicy)
 	_, err := p.pool.Exec(ctx, `
 INSERT INTO wave_plans (plan_id, name, description, wave_number, asset_ids, algorithm_targets,
   start_date, target_date, status, created_by, created_at, updated_at,
   canary_targets, maintenance_window, approval_policy,
-  budget_hours, actual_hours, component_count)
-VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,now(),now(),$11,$12,$13,$14,$15,$16)
+  budget_hours, actual_hours, component_count, depends_on)
+VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,now(),now(),$11,$12,$13,$14,$15,$16,$17::jsonb)
 ON CONFLICT (plan_id) DO NOTHING`,
 		plan.PlanID, plan.Name, plan.Description, plan.WaveNumber,
 		string(assetIDs), string(algTargets),
 		plan.StartDate, plan.TargetDate, plan.Status, plan.CreatedBy,
 		canaryTargets, plan.MaintenanceWindow, plan.ApprovalPolicy,
-		plan.BudgetHours, plan.ActualHours, plan.ComponentCount)
+		plan.BudgetHours, plan.ActualHours, plan.ComponentCount, string(dependsOn))
 	return err
+}
+
+// nonNilSlice returns an empty slice for nil so JSON marshals to [] not null.
+func nonNilSlice(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// defaultApprovalPolicy coerces an empty approval policy to the wave_plans
+// column default ("operator"), satisfying the CHECK constraint that only
+// permits auto/operator/admin.
+func defaultApprovalPolicy(p string) string {
+	if p == "" {
+		return "operator"
+	}
+	return p
 }
 
 func (p *Postgres) GetWavePlans(ctx context.Context) ([]WavePlan, error) {
@@ -2568,7 +2599,8 @@ func (p *Postgres) GetWavePlans(ctx context.Context) ([]WavePlan, error) {
 SELECT plan_id, name, description, wave_number, asset_ids, algorithm_targets,
   start_date, target_date, status, created_by, created_at, updated_at,
   COALESCE(canary_targets, '{}'), COALESCE(maintenance_window, ''), COALESCE(approval_policy, 'operator'),
-  COALESCE(budget_hours, 0), COALESCE(actual_hours, 0), COALESCE(component_count, 0)
+  COALESCE(budget_hours, 0), COALESCE(actual_hours, 0), COALESCE(component_count, 0),
+  COALESCE(depends_on, '[]'::jsonb)
 FROM wave_plans ORDER BY wave_number, created_at`)
 	if err != nil {
 		return nil, err
@@ -2577,16 +2609,17 @@ FROM wave_plans ORDER BY wave_number, created_at`)
 	var plans []WavePlan
 	for rows.Next() {
 		var wp WavePlan
-		var assetIDs, algTargets []byte
+		var assetIDs, algTargets, dependsOn []byte
 		if err := rows.Scan(&wp.PlanID, &wp.Name, &wp.Description, &wp.WaveNumber,
 			&assetIDs, &algTargets, &wp.StartDate, &wp.TargetDate,
 			&wp.Status, &wp.CreatedBy, &wp.CreatedAt, &wp.UpdatedAt,
 			&wp.CanaryTargets, &wp.MaintenanceWindow, &wp.ApprovalPolicy,
-			&wp.BudgetHours, &wp.ActualHours, &wp.ComponentCount); err != nil {
+			&wp.BudgetHours, &wp.ActualHours, &wp.ComponentCount, &dependsOn); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(assetIDs, &wp.AssetIDs)
 		_ = json.Unmarshal(algTargets, &wp.AlgorithmTargets)
+		_ = json.Unmarshal(dependsOn, &wp.DependsOn)
 		plans = append(plans, wp)
 	}
 	return plans, rows.Err()
@@ -2595,20 +2628,22 @@ FROM wave_plans ORDER BY wave_number, created_at`)
 func (p *Postgres) UpdateWavePlan(ctx context.Context, plan *WavePlan) error {
 	assetIDs, _ := json.Marshal(plan.AssetIDs)
 	algTargets, _ := json.Marshal(plan.AlgorithmTargets)
+	dependsOn, _ := json.Marshal(nonNilSlice(plan.DependsOn))
 	canaryTargets := plan.CanaryTargets
 	if canaryTargets == nil {
 		canaryTargets = []string{}
 	}
+	plan.ApprovalPolicy = defaultApprovalPolicy(plan.ApprovalPolicy)
 	_, err := p.pool.Exec(ctx, `
 UPDATE wave_plans SET name=$2, description=$3, wave_number=$4, asset_ids=$5::jsonb,
   algorithm_targets=$6::jsonb, start_date=$7, target_date=$8, status=$9,
   canary_targets=$10, maintenance_window=$11, approval_policy=$12,
-  budget_hours=$13, actual_hours=$14, component_count=$15, updated_at=now()
+  budget_hours=$13, actual_hours=$14, component_count=$15, depends_on=$16::jsonb, updated_at=now()
 WHERE plan_id=$1`,
 		plan.PlanID, plan.Name, plan.Description, plan.WaveNumber,
 		string(assetIDs), string(algTargets), plan.StartDate, plan.TargetDate, plan.Status,
 		canaryTargets, plan.MaintenanceWindow, plan.ApprovalPolicy,
-		plan.BudgetHours, plan.ActualHours, plan.ComponentCount)
+		plan.BudgetHours, plan.ActualHours, plan.ComponentCount, string(dependsOn))
 	return err
 }
 
@@ -2667,4 +2702,3 @@ FROM tls_certificates`).Scan(&h.Expired, &h.Expiring30, &h.Expiring90, &h.TotalT
 	}
 	return &h, nil
 }
-

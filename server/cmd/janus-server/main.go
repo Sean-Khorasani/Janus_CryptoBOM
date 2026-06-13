@@ -47,11 +47,11 @@ func main() {
 	defer stop()
 
 	pg, err := store.NewPostgres(ctx, store.PostgresConfig{
-		DatabaseURL:      cfg.DatabaseURL,
-		MaxConns:         cfg.DBMaxConns,
-		MinConns:         cfg.DBMinConns,
-		MaxConnLifetime:  cfg.DBMaxConnLifetime,
-		MaxConnIdleTime:  cfg.DBMaxConnIdleTime,
+		DatabaseURL:     cfg.DatabaseURL,
+		MaxConns:        cfg.DBMaxConns,
+		MinConns:        cfg.DBMinConns,
+		MaxConnLifetime: cfg.DBMaxConnLifetime,
+		MaxConnIdleTime: cfg.DBMaxConnIdleTime,
 	})
 	if err != nil {
 		slog.Error("connect postgres", "error", err)
@@ -73,7 +73,9 @@ func main() {
 	wsHub := ws.New()
 	grpcSvc := grpcserver.New(pg, engine, orch, wsHub)
 
-	grpcOptions := []grpc.ServerOption{}
+	grpcOptions := []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(cfg.GRPCMaxRecvBytes),
+	}
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
@@ -120,11 +122,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	httpHandler := httpapi.New(pg, orch, engine, cfg.CommandSigningKey, cfg.DisableAuth, wsHub)
+	httpHandler, api := httpapi.New(pg, orch, engine, cfg.CommandSigningKey, cfg.DisableAuth, wsHub, cfg)
 
 	// Initialize HSM client if configured (F13)
 	_ = os.Getenv("JANUS_HSM_MODULE_PATH") // reserved for HSM integration
-	_ = hsm.NewSoftHSM2 // ensure package is used
+	_ = hsm.NewSoftHSM2                    // ensure package is used
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -152,11 +154,43 @@ func main() {
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Graceful shutdown (OPS-001). Bound the whole drain by the configured
+	// window so a rolling update cannot hang indefinitely.
+	gracePeriod := time.Duration(cfg.GracefulShutdownSeconds) * time.Second
+	deadline := time.Now().Add(gracePeriod)
+	slog.Info("draining", "grace_period", gracePeriod.String())
+
+	// 1. Flip readiness to "draining" so new requests get 503 and load
+	//    balancers stop routing traffic; in-flight requests keep going.
+	api.BeginDraining()
+
+	// 2. Stop accepting new gRPC streams and wait for in-flight telemetry
+	//    stream handlers to return (their payloads persist before returning).
 	grpcServer.GracefulStop()
+
+	// 3. Drain pending critical-finding webhook dispatches.
+	if remaining := time.Until(deadline); remaining > 0 {
+		if ok := grpcSvc.WaitWebhooks(remaining); !ok {
+			slog.Warn("webhook dispatch drain timed out; some notifications may be incomplete")
+		}
+	}
+
+	// 4. Shut down the HTTP server, letting in-flight requests finish up to the
+	//    remaining grace window.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), maxDuration(time.Until(deadline), time.Second))
+	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http shutdown", "error", err)
 	}
+	slog.Info("shutdown complete")
 }
 
+// maxDuration returns the larger of a and b. Used to guarantee a minimum HTTP
+// shutdown window even if the grace period has already been consumed by earlier
+// drain stages (OPS-001).
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}

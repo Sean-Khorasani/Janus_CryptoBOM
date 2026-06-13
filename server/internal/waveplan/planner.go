@@ -45,6 +45,24 @@ func (p *Planner) Create(ctx context.Context, plan *store.WavePlan, createdBy st
 	if err := validate(plan); err != nil {
 		return err
 	}
+	// Validate dependency references against existing plans (WP-022). A fresh
+	// plan cannot form a cycle (existing plans cannot reference its new ID), so
+	// we only need to reject references to non-existent plans here.
+	if len(plan.DependsOn) > 0 {
+		existing, err := p.store.GetWavePlans(ctx)
+		if err != nil {
+			return err
+		}
+		known := make(map[string]bool, len(existing))
+		for _, e := range existing {
+			known[e.PlanID] = true
+		}
+		for _, dep := range plan.DependsOn {
+			if !known[dep] {
+				return fmt.Errorf("depends_on references unknown wave plan %q", dep)
+			}
+		}
+	}
 	plan.PlanID = uuid.NewString()
 	plan.Status = StatusPlanned
 	plan.CreatedBy = createdBy
@@ -81,8 +99,35 @@ func (p *Planner) UpdateStatus(ctx context.Context, planID, newStatus string) er
 	if err := checkTransition(plan.Status, newStatus); err != nil {
 		return err
 	}
+	// Dependency-safe activation (WP-022): a wave may only become active once
+	// every wave it depends on has reached "completed".
+	if newStatus == StatusActive {
+		if blockers := incompleteDependencies(plan, plans); len(blockers) > 0 {
+			return fmt.Errorf("cannot activate: %d dependency wave(s) not yet completed: %v", len(blockers), blockers)
+		}
+	}
 	plan.Status = newStatus
 	return p.store.UpdateWavePlan(ctx, plan)
+}
+
+// incompleteDependencies returns the plan_ids of dependencies that have not yet
+// reached "completed". Unknown references are ignored here (surfaced by the
+// graph endpoint instead).
+func incompleteDependencies(plan *store.WavePlan, all []store.WavePlan) []string {
+	status := make(map[string]string, len(all))
+	for _, p := range all {
+		status[p.PlanID] = p.Status
+	}
+	var blockers []string
+	for _, dep := range plan.DependsOn {
+		if dep == plan.PlanID {
+			continue
+		}
+		if st, ok := status[dep]; ok && st != StatusCompleted {
+			blockers = append(blockers, dep)
+		}
+	}
+	return blockers
 }
 
 // Delete removes a wave plan. Only planned or cancelled plans can be deleted.

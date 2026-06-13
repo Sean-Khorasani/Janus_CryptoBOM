@@ -60,6 +60,10 @@ type Server struct {
 	orch    *orchestrator.Orchestrator
 	circuit *webhookCircuit
 	wsHub   *ws.Hub
+	// webhookWg tracks in-flight fire-and-forget webhook dispatches so a
+	// graceful shutdown can wait for them to finish instead of dropping
+	// critical-finding notifications mid-flight (OPS-001).
+	webhookWg sync.WaitGroup
 }
 
 func New(store store.Store, policy *policy.Engine, orch *orchestrator.Orchestrator, wsHub *ws.Hub) *Server {
@@ -72,6 +76,24 @@ func New(store store.Store, policy *policy.Engine, orch *orchestrator.Orchestrat
 			failures:      make(map[string]int),
 			cooldownUntil: make(map[string]time.Time),
 		},
+	}
+}
+
+// WaitWebhooks blocks until all in-flight webhook dispatches complete or the
+// timeout elapses, whichever comes first. It returns true if all dispatches
+// drained cleanly and false if the timeout was hit (OPS-001). Call this after
+// the gRPC server's GracefulStop so no new dispatches are started while waiting.
+func (s *Server) WaitWebhooks(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		s.webhookWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -140,7 +162,11 @@ func (s *Server) StreamTelemetry(stream pb.JanusTelemetry_StreamTelemetryServer)
 			}
 		}
 		if hasCritical {
-			go s.dispatchWebhooks(payload)
+			s.webhookWg.Add(1)
+			go func() {
+				defer s.webhookWg.Done()
+				s.dispatchWebhooks(payload)
+			}()
 		}
 
 		slog.Info("telemetry received",
