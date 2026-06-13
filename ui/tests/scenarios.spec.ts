@@ -69,8 +69,10 @@ test.describe("Tier 4: Real-World Application Scenarios", () => {
     await libraryNode.first().click();
     const highlightedEdge = page.locator('.edge-highlighted, [data-highlighted="true"]');
     await expect(highlightedEdge.first()).toBeVisible();
+    await expect(page.locator('h2:has-text("Findings for")')).toBeVisible();
+    await expect(page.locator('tr:has-text("RSA-1024 Quantum Vulnerable Key")')).toHaveCount(0);
 
-    await page.locator('button:has-text("CBOM"), button:has-text("Overview")').first().click();
+    await page.getByRole("button", { name: "Clear report scope" }).click();
     await expect(page.locator('tr:has-text("RSA-1024 Quantum Vulnerable Key")').first()).toBeVisible();
   });
 

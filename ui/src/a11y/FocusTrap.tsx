@@ -22,7 +22,7 @@ interface FocusTrapProps {
   active: boolean;
   children: React.ReactNode;
   /** Ref of element to focus on activation (defaults to first focusable child) */
-  initialFocusRef?: React.RefObject<HTMLElement>;
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
   /** Called when Escape is pressed inside the trap */
   onEscape?: () => void;
 }

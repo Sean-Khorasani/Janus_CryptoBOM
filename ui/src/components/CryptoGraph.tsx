@@ -6,9 +6,20 @@ interface CryptoGraphProps {
   components: ComponentRecord[];
   findings: Finding[];
   statuses: Record<string, string>;
+  onSelectionChange?: (selection: GraphSelection | null) => void;
 }
 
-export function CryptoGraph({ assets, components, findings, statuses }: CryptoGraphProps) {
+export type GraphSelection = {
+  type: "host" | "component" | "algorithm";
+  label: string;
+  hostUuid?: string;
+  telemetryId?: string;
+  bomRef?: string;
+  filePath?: string;
+  algorithm?: string;
+};
+
+export function CryptoGraph({ assets, components, findings, statuses, onSelectionChange }: CryptoGraphProps) {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [draggedNode, setDraggedNode] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -27,13 +38,25 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
 
   // 1. Build Nodes
   const hostNodes = useMemo(() => {
-    return assets.map((a) => ({
+    return assets.slice(0, 12).map((a) => ({
       id: `host-${a.host_uuid}`,
       type: "host" as const,
       label: a.hostname,
       data: a
     }));
   }, [assets]);
+
+  const selectionForNode = (node: typeof allNodes[0]): GraphSelection => {
+    if (node.type === "host") {
+      const asset = node.data as Asset;
+      return { type: "host", label: asset.hostname, hostUuid: asset.host_uuid };
+    }
+    if (node.type === "component") {
+      const component = node.data as ComponentRecord;
+      return { type: "component", label: component.file_path || component.name, hostUuid: component.host_uuid, telemetryId: component.telemetry_id, bomRef: component.bom_ref, filePath: component.file_path };
+    }
+    return { type: "algorithm", label: node.data as string, algorithm: node.data as string };
+  };
 
   const componentNodes = useMemo(() => {
     const limitedComponents = components.slice(0, 8);
@@ -198,10 +221,11 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
           <p className="text-xs text-[#697469] mt-0.5 dark:text-[#8fa991]">
             Click to highlight connections. Drag nodes to customize layout.
           </p>
+          {assets.length > hostNodes.length && <p className="text-xs text-[#b45309]">Showing {hostNodes.length} of {assets.length} agents. Use Agent Inventory to select the full fleet.</p>}
         </div>
         {selectedNode && (
           <button
-            onClick={() => setSelectedNode(null)}
+            onClick={() => { setSelectedNode(null); onSelectionChange?.(null); }}
             className="text-xs text-[#2f6fed] hover:underline dark:text-[#60a5fa]"
             type="button"
             aria-label="Clear graph highlight"
@@ -222,7 +246,7 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
           className="crypto-graph h-full w-full select-none"
           width="100%"
           height="100%"
-          onClick={() => setSelectedNode(null)}
+          onClick={() => { setSelectedNode(null); onSelectionChange?.(null); }}
           role="graphics-document"
           aria-label="Graph visualization"
         >
@@ -298,6 +322,7 @@ export function CryptoGraph({ assets, components, findings, statuses }: CryptoGr
                 onClick={(e) => {
                   e.stopPropagation();
                   setSelectedNode(node.id);
+                  onSelectionChange?.(selectionForNode(node));
                 }}
                 onMouseDown={(e) => handleMouseDown(e, node.id)}
                 role="graphics-symbol"

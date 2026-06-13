@@ -52,12 +52,9 @@ test.describe("Feature 4: Export & Reporting Buttons (R5)", () => {
     expect(download.suggestedFilename()).toContain(".json");
   });
 
-  test("Tier 1.5: \"Open HTML Report\" link is visible and has correct href", async ({ page }) => {
+  test("Tier 1.5: \"Open HTML Report\" authenticated new-tab button is visible", async ({ page }) => {
     await page.goto("/");
-    const link = page.locator('a:has-text("Report"), a:has-text("HTML Report"), a[href*="report.html"]');
-    await expect(link.first()).toBeVisible();
-    const href = await link.first().getAttribute("href");
-    expect(href).toMatch(/report\.html$/);
+    await expect(page.getByRole("button", { name: "Open HTML report (opens in new tab)" }).first()).toBeVisible();
   });
 
   // Tier 2 - Boundary & Corner Cases

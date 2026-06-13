@@ -70,6 +70,9 @@ test.describe("Feature: Fleet Command Console (R9)", () => {
     await page.route("**/api/agent/diagnostics**", async (route) => {
       await route.fulfill({ status: 200, json: { logs: "Starting Janus Cryptographic Agent Daemon\nExclusions configured" } });
     });
+    await page.route("**/api/agents/asset-101/commands", async (route) => {
+      await route.fulfill({ status: 202, json: { status: "queued", command_id: "scan-command-101" } });
+    });
   });
 
   test("Should navigate to Fleet Command and display cards and assets grid", async ({ page }) => {
@@ -85,7 +88,7 @@ test.describe("Feature: Fleet Command Console (R9)", () => {
     await expect(page.locator('td:has-text("host-finance-app")')).toBeVisible();
   });
 
-  test("Should trigger force scan simulation on click", async ({ page }) => {
+  test("Should queue a real force scan command", async ({ page }) => {
     await page.goto("/");
     await page.locator('button:has-text("Fleet Command")').click();
 
@@ -96,10 +99,8 @@ test.describe("Feature: Fleet Command Console (R9)", () => {
     // Verify toast is displayed
     const toast = page.locator('[data-testid="fleet-toast"]');
     await expect(toast).toBeVisible();
-    await expect(toast).toContainText("Force scan command dispatched");
-
-    // Scan progress should change and scan button should be disabled during scan
-    await expect(scanBtn).toBeDisabled();
+    await expect(toast).toContainText("Scan command queued");
+    await expect(scanBtn).toBeEnabled();
   });
 
   test("Should open agent diagnostics log viewer", async ({ page }) => {

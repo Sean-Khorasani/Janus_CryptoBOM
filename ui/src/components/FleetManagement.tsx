@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Activity, Terminal, Settings, Play, CheckCircle, RefreshCw, X, Sliders, Server, Cpu, HardDrive, Shield } from "lucide-react";
 import { Asset } from "../hooks/useApi";
 import { FocusTrap } from "../a11y/FocusTrap";
+import { AgentFleetInventory } from "./AgentFleetInventory";
 
 interface FleetManagementProps {
   assets: Asset[];
@@ -219,44 +220,14 @@ export function FleetManagement({
   const handleForceScan = (assetId: string) => {
     const asset = assets.find(a => a.host_uuid === assetId);
     if (!asset) return;
-
-    showToast(`Force scan command dispatched to agent on host ${asset.hostname}`);
-
-    let currentPhase = 0;
-    const phases = [
-      { name: "Static Source Analysis", path: "./src/core/crypto.go", progress: 12 },
-      { name: "Binary PE/ELF Inspection", path: "./bin/app.exe", progress: 35 },
-      { name: "Dependency Analysis", path: "./package-lock.json", progress: 68 },
-      { name: "Runtime/Memory Scan", path: "Loaded modules: bcrypt.dll", progress: 85 },
-      { name: "Active TLS Handshake Probing", path: "Testing 127.0.0.1:443", progress: 95 },
-      { name: "Idle", path: "", progress: 100 },
-    ];
-
-    const interval = setInterval(() => {
-      if (currentPhase >= phases.length) {
-        clearInterval(interval);
-        return;
-      }
-      const step = phases[currentPhase];
-      setAssets(prev =>
-        prev.map(a => {
-          if (a.host_uuid === assetId) {
-            return {
-              ...a,
-              status: step.name,
-              scan_progress: step.progress,
-              current_scan_path: step.path,
-              cpu_usage: step.name === "Idle" ? 0.2 : 4.8 + Math.random() * 5,
-              mem_usage: step.name === "Idle" ? 18.2 : 24.5 + Math.random() * 3,
-              total_files_scanned: a.total_files_scanned + Math.floor(Math.random() * 80) + 10,
-              last_seen: new Date().toISOString(),
-            };
-          }
-          return a;
-        })
-      );
-      currentPhase++;
-    }, 1200);
+    fetch(`/api/agents/${assetId}/commands`, {
+      method: "POST",
+      headers: getAuthHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ command: "scan-now" })
+    }).then(async response => {
+      if (!response.ok) throw new Error(await response.text());
+      showToast(`Scan command queued for ${asset.hostname}; progress will update after agent acknowledgement.`);
+    }).catch(error => showToast(`Failed to queue scan: ${error.message}`));
   };
 
   const handleViewLogs = (asset: Asset) => {
@@ -269,7 +240,7 @@ export function FleetManagement({
             setLogs(res.logs.split("\n"));
           } else {
             setLogs([
-              `[${new Date().toISOString()}] [INFO] Starting Janus Cryptographic Agent Daemon v0.1.0`,
+              `[${new Date().toISOString()}] [INFO] Starting Janus Cryptographic Agent Daemon`,
               `[${new Date().toISOString()}] [INFO] Exclusions configured: ${excludeDirs}`,
               `[${new Date().toISOString()}] [INFO] Remote gRPC Controller connected at 127.0.0.1:9443`,
               `[${new Date().toISOString()}] [INFO] Awaiting control commands from central supervisor...`,
@@ -281,7 +252,7 @@ export function FleetManagement({
         });
     } else {
       const mockLogs = [
-        `[${new Date().toISOString()}] [INFO] Starting Janus Cryptographic Agent Daemon v0.1.0`,
+        `[${new Date().toISOString()}] [INFO] Starting Janus Cryptographic Agent Daemon`,
         `[${new Date().toISOString()}] [INFO] Successfully parsed configuration file`,
         `[${new Date().toISOString()}] [INFO] Host UUID registered: ${asset.host_uuid}`,
         `[${new Date().toISOString()}] [INFO] Exclusions configured: ${excludeDirs}`,
@@ -398,6 +369,7 @@ export function FleetManagement({
 
   return (
     <div className="space-y-6">
+      <AgentFleetInventory />
       {/* Toast Alert */}
       {toastMessage && (
         <div

@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
+  globalSetup: "./tests/global-setup.ts",
   testDir: "./tests",
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
@@ -11,14 +12,18 @@ export default defineConfig({
     baseURL: "http://localhost:5173",
     trace: "on-first-retry",
     headless: true,
+    storageState: "test-results/auth-state.json",
+  },
+  webServer: {
+    command: "npm run dev",
+    url: "http://localhost:5173",
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
   },
   projects: [
     {
-      name: "msedge",
-      use: {
-        ...devices["Desktop Edge"],
-        channel: "msedge",
-      },
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
     },
   ],
 });
