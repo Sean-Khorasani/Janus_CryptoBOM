@@ -102,7 +102,7 @@ backup_dir = ".janus-backups"
 ### 3.1 Docker Compose
 
 ```yaml
-# infra/docker-compose.yml
+# docker-compose.yml
 services:
   postgres:
     image: postgres:16-alpine
@@ -115,11 +115,11 @@ services:
       test: ["CMD-SHELL", "pg_isready -U janus -d janus"]
 
   janus-server:
-    build: { context: ../, dockerfile: server/Dockerfile }
-    ports: ["8080:8080", "9443:50051"]
+    build: { context: ., dockerfile: server/Dockerfile }
+    ports: ["8080:8080", "9443:9443"]
     environment:
       JANUS_DATABASE_URL: "postgres://janus:janus@postgres:5432/janus?sslmode=disable"
-      JANUS_GRPC_ADDR: "0.0.0.0:50051"
+      JANUS_GRPC_ADDR: "0.0.0.0:9443"
       JANUS_HTTP_ADDR: "0.0.0.0:8080"
       JANUS_COMMAND_SIGNING_KEY: "change-me-in-production-32-byte-hex-key"
       JANUS_LOG_LEVEL: "info"
@@ -129,9 +129,9 @@ services:
     depends_on: { postgres: { condition: service_healthy } }
 
   janus-agent:
-    build: { context: ../agent, dockerfile: Dockerfile }
+    build: { context: ./agent, dockerfile: Dockerfile }
     volumes:
-      - ../:/scan:ro
+      - ./:/scan:ro
       - agent-data:/data
     depends_on: [janus-server]
 
