@@ -4,6 +4,7 @@ import { Finding, Overview, ComponentRecord, Asset } from "../hooks/useApi";
 import { Empty, FindingTable } from "./FindingsGrid";
 import { CryptoGraph, GraphSelection } from "./CryptoGraph";
 import { HomeAgentStatus } from "./HomeAgentStatus";
+import { HonestCoverage } from "./HonestCoverage";
 
 // ---------------------------------------------------------------------------
 // Cert Health types & helpers
@@ -80,14 +81,14 @@ function CertHealthCard({ certHealth }: { certHealth: CertHealth }) {
   );
 }
 
-export function Metric({ icon, label, value, accent }: { icon: React.ReactNode; label: string; value: string; accent: string }) {
+export function Metric({ icon, label, value, accent, hint }: { icon: React.ReactNode; label: string; value: string; accent: string; hint?: string }) {
   return (
-    <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
+    <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]" title={hint}>
       <div className="mb-3 flex items-center justify-between">
         <div className={`flex h-9 w-9 items-center justify-center rounded ${accent} text-white`} aria-hidden="true">{icon}</div>
       </div>
       <div className="text-2xl font-semibold dark:text-[#e8ede9]">{value}</div>
-      <div className="mt-1 text-sm text-[#697469] dark:text-[#8fa991]">{label}</div>
+      <div className="mt-1 text-sm text-[#697469] dark:text-[#8fa991]">{label}{hint ? <span className="ml-1 cursor-help text-[#9aa69c]" title={hint} aria-hidden="true">ⓘ</span> : null}</div>
     </section>
   );
 }
@@ -216,18 +217,20 @@ export function OverviewView({ overview, score, findings, components, assets, st
       ))}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric icon={<Gauge aria-hidden="true" />} label="Safety Score" value={`${score}/100`} accent="bg-[#11845b]" />
+        <Metric icon={<Gauge aria-hidden="true" />} label="Safety Score" value={`${score}/100`} accent="bg-[#11845b]" hint="100 minus weighted open findings: critical ×18, high ×8, other ×2. Findings marked remediated, false-positive, or accepted are excluded, so triaging raises the score." />
         <Metric icon={<Database aria-hidden="true" />} label="Tracked Assets" value={overview.assets.toLocaleString()} accent="bg-[#2f6fed]" />
         <Metric icon={<Layers3 aria-hidden="true" />} label="CBOM Components" value={overview.components.toLocaleString()} accent="bg-[#8b5cf6]" />
         <Metric icon={<AlertTriangle aria-hidden="true" />} label="Critical Warnings" value={overview.critical_findings.toLocaleString()} accent="bg-[#d33f49]" />
-        {(overview as any).stalled_agents > 0 && (
-          <Metric icon={<AlertTriangle aria-hidden="true" />} label="Stalled Agents" value={(overview as any).stalled_agents.toLocaleString()} accent="bg-[#b42318]" />
+        {(overview.stalled_agents ?? 0) > 0 && (
+          <Metric icon={<AlertTriangle aria-hidden="true" />} label="Stalled Agents" value={(overview.stalled_agents ?? 0).toLocaleString()} accent="bg-[#b42318]" />
         )}
       </div>
 
       {certHealth !== null && <CertHealthCard certHealth={certHealth} />}
 
       <HomeAgentStatus assets={assets} onOpenFleet={onOpenFleet} />
+
+      <HonestCoverage assets={assets} components={components} />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* Left Column: Interactive Crypto Exposure Graph & Algorithm Exposure Distribution */}
@@ -292,12 +295,11 @@ export function OverviewView({ overview, score, findings, components, assets, st
                 </span>
               ) : (
                 (() => {
-                  const anyAssetHasFindings = assets.some(asset => findings.some(f => f.host_uuid === asset.host_uuid || f.asset_ref === asset.hostname));
-                  return assets.map((asset, idx) => {
-                    let assetFindings = findings.filter(f => f.host_uuid === asset.host_uuid || f.asset_ref === asset.hostname);
-                    if (!anyAssetHasFindings && idx === 0) {
-                      assetFindings = findings;
-                    }
+                  // Map findings to each asset honestly by host_uuid/hostname. The
+                  // previous code dumped ALL findings onto assets[0] when nothing
+                  // matched, producing misleading per-asset numbers (B1) — removed.
+                  return assets.map((asset) => {
+                    const assetFindings = findings.filter(f => f.host_uuid === asset.host_uuid || f.asset_ref === asset.hostname);
                     const total = assetFindings.length;
                     const remediated = assetFindings.filter(f => {
                       const s = statuses[f.finding_id];

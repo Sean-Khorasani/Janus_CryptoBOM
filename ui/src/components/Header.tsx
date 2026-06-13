@@ -1,15 +1,30 @@
 import { Activity, FileText, ShieldCheck, Lock, LogOut } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { FocusTrap } from "../a11y/FocusTrap";
+import { clearSession, notifyAuthChanged } from "../auth";
+import { openAuthenticatedResource } from "../authenticatedResource";
+import { uiVersion } from "../version";
 
 interface HeaderProps {
   error: string;
+  authenticated: boolean;
+  live?: boolean;
+  lastUpdated?: number | null;
 }
 
-export function Header({ error }: HeaderProps) {
+function freshnessLabel(lastUpdated?: number | null): string {
+  if (!lastUpdated) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - lastUpdated) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}m ago`;
+}
+
+export function Header({ error, authenticated, live, lastUpdated }: HeaderProps) {
   const [user, setUser] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(null);
-  const [isLoginOpen, setIsLoginOpen] = useState(false);
+  const [isLoginOpen, setIsLoginOpen] = useState(!authenticated);
   const [usernameInput, setUsernameInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -23,6 +38,10 @@ export function Header({ error }: HeaderProps) {
       setRole(savedRole);
     }
   }, []);
+
+  useEffect(() => {
+    setIsLoginOpen(!authenticated);
+  }, [authenticated]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -42,6 +61,7 @@ export function Header({ error }: HeaderProps) {
       localStorage.setItem("janus_role", data.role);
       setUser(usernameInput);
       setRole(data.role);
+      notifyAuthChanged();
       setIsLoginOpen(false);
       setUsernameInput("");
       setPasswordInput("");
@@ -51,11 +71,10 @@ export function Header({ error }: HeaderProps) {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("janus_token");
-    localStorage.removeItem("janus_user");
-    localStorage.removeItem("janus_role");
+    clearSession();
     setUser(null);
     setRole(null);
+    notifyAuthChanged();
   };
 
   return (
@@ -67,12 +86,24 @@ export function Header({ error }: HeaderProps) {
           </div>
           <div>
             <h1 className="text-xl font-semibold tracking-normal">Janus CryptoBOM</h1>
-            <p className="text-sm text-[#697469] dark:text-[#8fa991]">Cryptographic exposure graph and PQC migration control</p>
+            <p className="text-sm text-[#697469] dark:text-[#8fa991]">Cryptographic exposure graph and PQC migration control <span className="font-mono text-xs">v{uiVersion}</span></p>
           </div>
         </div>
-        <div className="flex items-center gap-2 rounded-md border border-[#dfe5dc] bg-[#f7f8f5] px-3 py-2 text-sm dark:border-[#2a3a30] dark:bg-[#0d1210]">
-          <Activity size={16} className="text-[#11845b] dark:text-[#3da06a]" aria-hidden="true" />
-          <span>{error ? "API offline" : "Live controller"}</span>
+        <div
+          className="flex items-center gap-2 rounded-md border border-[#dfe5dc] bg-[#f7f8f5] px-3 py-2 text-sm dark:border-[#2a3a30] dark:bg-[#0d1210]"
+          title={error ? error : live ? "Real-time updates connected" : "Polling for updates"}
+        >
+          <Activity
+            size={16}
+            className={error ? "text-[#d33f49]" : live ? "text-[#11845b] dark:text-[#3da06a]" : "text-[#f59e0b]"}
+            aria-hidden="true"
+          />
+          <span>
+            {error ? "Controller offline" : live ? "Live" : "Polling"}
+            {!error && lastUpdated ? (
+              <span className="ml-1 text-xs text-[#697469] dark:text-[#8fa991]">· {freshnessLabel(lastUpdated)}</span>
+            ) : null}
+          </span>
         </div>
 
         <div className="flex items-center gap-3">
@@ -105,22 +136,23 @@ export function Header({ error }: HeaderProps) {
             </button>
           )}
 
-          <a
-            href="/api/report.html"
-            target="_blank"
-            rel="noreferrer"
-            className="flex h-9 items-center gap-2 rounded-md border border-[#dfe5dc] bg-white px-3 text-sm text-[#17211c] hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#e8ede9] dark:hover:bg-[#22302a]"
-            aria-label="Open HTML report (opens in new tab)"
-          >
-            <FileText size={16} aria-hidden="true" />
-            Report
-          </a>
+          {authenticated && (
+            <button
+              type="button"
+              onClick={() => openAuthenticatedResource("/api/report.html", "text/html").catch(error => setLoginError(`Report failed: ${error.message}`))}
+              className="flex h-9 items-center gap-2 rounded-md border border-[#dfe5dc] bg-white px-3 text-sm text-[#17211c] hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#e8ede9] dark:hover:bg-[#22302a]"
+              aria-label="Open HTML report (opens in new tab)"
+            >
+              <FileText size={16} aria-hidden="true" />
+              Report
+            </button>
+          )}
         </div>
       </div>
 
       {/* Login Modal */}
       {isLoginOpen && (
-        <FocusTrap active={isLoginOpen} onEscape={() => setIsLoginOpen(false)} initialFocusRef={cancelRef}>
+        <FocusTrap active={isLoginOpen} onEscape={() => authenticated && setIsLoginOpen(false)} initialFocusRef={authenticated ? cancelRef : undefined}>
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm dark:bg-black/55"
             role="dialog"
@@ -168,14 +200,16 @@ export function Header({ error }: HeaderProps) {
                   />
                 </div>
                 <div className="flex gap-2 justify-end pt-2">
-                  <button
-                    ref={cancelRef}
-                    type="button"
-                    onClick={() => setIsLoginOpen(false)}
-                    className="rounded border border-[#dfe5dc] px-3 py-1.5 text-xs dark:border-[#2a3a30] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]"
-                  >
-                    Cancel
-                  </button>
+                  {authenticated && (
+                    <button
+                      ref={cancelRef}
+                      type="button"
+                      onClick={() => setIsLoginOpen(false)}
+                      className="rounded border border-[#dfe5dc] px-3 py-1.5 text-xs dark:border-[#2a3a30] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]"
+                    >
+                      Cancel
+                    </button>
+                  )}
                   <button
                     type="submit"
                     className="rounded bg-[#17211c] text-white px-4 py-1.5 text-xs font-bold dark:bg-[#2a3a32] dark:hover:bg-[#3a4a42]"

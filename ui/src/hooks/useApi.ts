@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { authChangedEvent, clearSession } from "../auth";
+import { requiredApiVersion } from "../version";
+import { useWebSocket } from "./useWebSocket";
 
 export type Overview = {
   assets: number;
@@ -8,6 +11,7 @@ export type Overview = {
   high_findings: number;
   open_migrations: number;
   algorithm_histogram: Record<string, number>;
+  stalled_agents?: number;
 };
 
 export type Asset = {
@@ -24,6 +28,15 @@ export type Asset = {
   mem_usage: number;
   status: string;
   total_files_scanned: number;
+  agent_version: string;
+  observed_ip: string;
+  dns_name: string;
+  first_registered_at: string;
+  last_registered_at: string;
+  last_scan_id: string;
+  last_scan_finished?: string;
+  last_scan_severity: number;
+  open_findings: number;
 };
 
 export type Finding = {
@@ -38,6 +51,30 @@ export type Finding = {
   migration_profile: string;
   created_at: string;
   confidence: number;
+  status: string;
+  telemetry_id?: string;
+  hostname?: string;
+  agent_version?: string;
+  scan_finished?: string;
+};
+
+export type ScanRun = {
+  scan_id: string;
+  host_uuid: string;
+  hostname: string;
+  agent_version: string;
+  os_name: string;
+  os_version: string;
+  observed_ip: string;
+  scan_started: string;
+  scan_finished: string;
+  received_at: string;
+  status: string;
+  component_count: number;
+  finding_count: number;
+  critical_count: number;
+  high_count: number;
+  max_severity: number;
 };
 
 export type ComponentRecord = {
@@ -100,21 +137,26 @@ function migrationProfileFor(targetService: string) {
   return "hybrid-tls13-mlkem-mldsa";
 }
 
-function authedFetch(url: string, options?: RequestInit): Promise<Response> {
+async function authedFetch(url: string, options?: RequestInit): Promise<Response> {
   const token = localStorage.getItem("janus_token");
   const finalOpts = options || {};
   const headers = new Headers(finalOpts.headers || {});
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(url, { ...finalOpts, headers });
+  const response = await fetch(url, { ...finalOpts, headers });
+  if (response.status === 401) {
+    clearSession();
+    window.dispatchEvent(new Event(authChangedEvent));
+  }
+  return response;
 }
 
 function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
   return new Promise<Response>((resolve) => {
     const timer = setTimeout(() => {
       resolve(new Response("Timeout", { status: 504 }));
-    }, 1500);
+    }, 10000);
 
     authedFetch(url, options)
       .then((res) => {
@@ -138,7 +180,7 @@ export type PolicyProfile = {
   preferred_signature: string;
 };
 
-export function useApi() {
+export function useApi(enabled = true) {
   const [overview, setOverview] = useState<Overview>(emptyOverview);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [components, setComponents] = useState<ComponentRecord[]>([]);
@@ -149,10 +191,12 @@ export function useApi() {
   const [error, setError] = useState("");
 
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 
   const load = async () => {
     try {
-      const [overviewRes, assetsRes, componentsRes, findingsRes, migrationsRes, policiesRes] = await Promise.all([
+      const [healthRes, overviewRes, assetsRes, componentsRes, findingsRes, migrationsRes, policiesRes] = await Promise.all([
+        fetchWithTimeout("/api/health").catch(() => null),
         fetchWithTimeout("/api/overview").catch(() => null),
         fetchWithTimeout("/api/assets").catch(() => null),
         fetchWithTimeout("/api/components").catch(() => null),
@@ -160,28 +204,28 @@ export function useApi() {
         fetchWithTimeout("/api/migrations").catch(() => null),
         fetchWithTimeout("/api/policies").catch(() => null)
       ]);
+      const failed = [healthRes, overviewRes, assetsRes, componentsRes, findingsRes, migrationsRes, policiesRes]
+        .filter(response => !response || !response.ok);
+      if (healthRes?.ok) {
+        const health = await healthRes.json();
+        if (health.api_version !== requiredApiVersion) {
+          throw new Error(`Incompatible Janus server API ${health.api_version || "unknown"}; UI requires API ${requiredApiVersion}.`);
+        }
+      }
       if (overviewRes && overviewRes.ok) {
         try { setOverview(await overviewRes.json() || emptyOverview); } catch (e) {}
       }
       if (assetsRes && assetsRes.ok) {
         try { setAssets(await assetsRes.json() || []); } catch (e) {}
-      } else {
-        setAssets([]);
       }
       if (componentsRes && componentsRes.ok) {
         try { setComponents(await componentsRes.json() || []); } catch (e) {}
-      } else {
-        setComponents([]);
       }
       if (findingsRes && findingsRes.ok) {
         try { setFindings(await findingsRes.json() || []); } catch (e) {}
-      } else {
-        setFindings([]);
       }
       if (migrationsRes && migrationsRes.ok) {
         try { setMigrations(await migrationsRes.json() || []); } catch (e) {}
-      } else {
-        setMigrations([]);
       }
       if (policiesRes && policiesRes.ok) {
         try {
@@ -190,7 +234,14 @@ export function useApi() {
           setPolicies(p.available || []);
         } catch (e) {}
       }
-      setError("");
+      // Distinguish a fully unreachable controller from a partial outage so the
+      // status surface can say something useful (B5).
+      if (!healthRes || !healthRes.ok) {
+        setError("Controller unreachable; showing last known data.");
+      } else {
+        setError(failed.length > 0 ? `${failed.length} dashboard request${failed.length === 1 ? "" : "s"} failed; showing last known data.` : "");
+      }
+      setLastUpdated(Date.now());
     } catch (err) {
       setError(err instanceof Error ? err.message : "API unavailable");
     } finally {
@@ -198,11 +249,36 @@ export function useApi() {
     }
   };
 
+  // Debounced refetch so a burst of WebSocket events triggers a single reload.
+  const refetchTimer = useRef<number | undefined>(undefined);
+  const scheduleLoad = () => {
+    if (refetchTimer.current) window.clearTimeout(refetchTimer.current);
+    refetchTimer.current = window.setTimeout(load, 400);
+  };
+
+  // Real-time: refetch on relevant hub events. Polling remains the fallback so
+  // the dashboard stays fresh even if the socket cannot connect.
+  const liveEvents = new Set([
+    "telemetry_update", "finding_status", "migration_enqueued",
+    "migration_status", "policy_switched", "agent_progress", "agent_registered",
+  ]);
+  const { connected: live } = useWebSocket((event) => {
+    if (enabled && liveEvents.has(event.type)) scheduleLoad();
+  }, enabled);
+
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
     load();
-    const id = window.setInterval(load, 10000);
-    return () => window.clearInterval(id);
-  }, []);
+    // With the socket live, poll slowly as a safety net; without it, poll at 10s.
+    const id = window.setInterval(load, live ? 30000 : 10000);
+    return () => {
+      window.clearInterval(id);
+      if (refetchTimer.current) window.clearTimeout(refetchTimer.current);
+    };
+  }, [enabled, live]);
 
   const score = useMemo(() => {
     const penalty =
@@ -307,6 +383,8 @@ export function useApi() {
     error,
     score,
     loading,
+    live,
+    lastUpdated,
     enqueueMigration,
     switchPolicy,
     fetchFleetConfig,

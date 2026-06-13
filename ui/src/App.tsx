@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { AlertTriangle, FileSearch, Gauge, TerminalSquare, Shield, Sliders, Globe, Activity, Brain, TrendingUp, Layers } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, FileSearch, Gauge, TerminalSquare, Shield, Sliders, Activity, Brain, TrendingUp, Layers } from "lucide-react";
 import { useApi } from "./hooks/useApi";
 import { Header } from "./components/Header";
 import { OverviewView } from "./components/OverviewView";
@@ -13,7 +13,6 @@ import { AgilityDashboard } from "./components/AgilityDashboard";
 import { WavePlanning } from "./components/WavePlanning";
 import { SkipLink } from "./a11y/SkipLink";
 import { useI18n } from "./i18n";
-import type { Locale } from "./i18n/types";
 import { authChangedEvent, hasSession } from "./auth";
 
 const findingStatusesStorageKey = "janus_finding_statuses";
@@ -90,6 +89,8 @@ function App() {
     error,
     score,
     loading,
+    live,
+    lastUpdated,
     enqueueMigration,
     switchPolicy,
     fetchFleetConfig,
@@ -99,7 +100,7 @@ function App() {
     updateFindingStatus,
   } = useApi(authenticated);
   const [tab, setTab] = useState<"overview" | "cbom" | "compliance" | "policy" | "migrations" | "fleet" | "llm" | "agility" | "waves">("overview");
-  const { t, locale, setLocale, locales } = useI18n();
+  const { t } = useI18n();
 
   useEffect(() => {
     const updateAuthentication = () => setAuthenticated(hasSession());
@@ -156,6 +157,20 @@ function App() {
     localStorage.setItem("darkMode", theme === "dark" ? "true" : "false");
   }, [theme]);
 
+  // Triage-aware safety score (B2/rec 3): penalise only OPEN findings — those not
+  // marked remediated / false-positive / accepted — so the score moves as the
+  // backlog is worked. Falls back to the server-aggregate score before findings load.
+  const effectiveScore = useMemo(() => {
+    if (findings.length === 0) return score;
+    const triaged = new Set(["remediated", "false-positive", "accepted"]);
+    const open = findings.filter(f => !triaged.has(statuses[f.finding_id] || f.status || ""));
+    const crit = open.filter(f => f.severity >= 5).length;
+    const high = open.filter(f => f.severity === 4).length;
+    const other = open.length - crit - high;
+    const penalty = crit * 18 + high * 8 + other * 2;
+    return Math.max(0, Math.min(100, 100 - penalty));
+  }, [findings, statuses, score]);
+
   const tabs = [
     { id: "overview" as const, label: t("nav.overview"), icon: <Gauge size={16} /> },
     { id: "cbom" as const, label: t("nav.cbom"), icon: <FileSearch size={16} /> },
@@ -163,15 +178,15 @@ function App() {
     { id: "policy" as const, label: t("nav.policy_studio"), icon: <Sliders size={16} /> },
     { id: "migrations" as const, label: t("nav.migrations"), icon: <TerminalSquare size={16} /> },
     { id: "fleet" as const, label: t("nav.fleet_command"), icon: <Activity size={16} /> },
-    { id: "agility" as const, label: "Agility", icon: <TrendingUp size={16} /> },
-    { id: "waves" as const, label: "Wave Plans", icon: <Layers size={16} /> },
-    { id: "llm" as const, label: "LLM Analysis", icon: <Brain size={16} /> },
+    { id: "agility" as const, label: t("nav.agility", "Agility"), icon: <TrendingUp size={16} /> },
+    { id: "waves" as const, label: t("nav.waves", "Wave Plans"), icon: <Layers size={16} /> },
+    { id: "llm" as const, label: t("nav.llm", "LLM Analysis"), icon: <Brain size={16} /> },
   ];
 
   return (
     <main className="min-h-screen bg-[#f7f8f5] text-[#17211c] dark:bg-[#0d1210] dark:text-[#e8ede9]">
       <SkipLink targetId="main-content" />
-      <Header error={error} authenticated={authenticated} />
+      <Header error={error} authenticated={authenticated} live={live} lastUpdated={lastUpdated} />
 
       {authenticated && <section id="main-content" className="mx-auto max-w-7xl px-5 py-5">
         {error && (
@@ -196,22 +211,8 @@ function App() {
           </nav>
 
           <div className="flex items-center gap-3">
-            {/* Locale switcher */}
-            <div className="relative">
-              <select
-                value={locale}
-                onChange={(e) => setLocale(e.target.value as Locale)}
-                aria-label="Select language / انتخاب زبان / 选择语言 / Seleccionar idioma"
-                className="h-9 rounded border border-[#dfe5dc] bg-white px-2 text-xs font-medium text-[#4d594f] hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#6b7e6f] dark:hover:bg-[#22302a] appearance-none cursor-pointer"
-              >
-                {locales.map((l) => (
-                  <option key={l.code} value={l.code}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
-              <Globe size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[#697469] dark:text-[#8fa991]" aria-hidden="true" />
-            </div>
+            {/* Locale switcher hidden for now: English-only until RTL + full
+                translation coverage land (see PROJECT-REVIEW.md rec 2 / B4). */}
 
             <button
               onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
@@ -238,7 +239,7 @@ function App() {
               <div role="tabpanel" id="tabpanel-overview" aria-labelledby="tab-overview">
                 <OverviewView
                   overview={overview}
-                  score={score}
+                  score={effectiveScore}
                   findings={findings}
                   components={components}
                   assets={assets}
