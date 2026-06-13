@@ -55,6 +55,8 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/hosts/", api.hostFindings)       // GET /api/hosts/{uuid}/findings
 	mux.HandleFunc("/api/migrations", api.migrations)
 	mux.HandleFunc("/api/report.html", api.reportHTML)
+	mux.HandleFunc("/api/reports/", api.reportFindings)      // GET /api/reports/{scan_id}/findings (UX-003)
+	mux.HandleFunc("/api/scan-config/schema", api.scanConfigSchema) // GET scan-parameter schema (UX-004)
 	mux.HandleFunc("/api/certificates/csr", api.createCSR)
 
 	// Require operator or admin role to enqueue migrations
