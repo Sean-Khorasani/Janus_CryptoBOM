@@ -838,6 +838,12 @@ ADD COLUMN IF NOT EXISTS component_count INTEGER DEFAULT 0;
 `},
 }
 
+// SchemaVersion returns the number of schema migrations defined in this build.
+// It is used for informational reporting (e.g. the release-check endpoint).
+func SchemaVersion() int {
+	return len(migrations)
+}
+
 func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration, observedIP string) error {
 	caps, err := json.Marshal(reg.Capabilities)
 	if err != nil {
@@ -2493,21 +2499,31 @@ func (p *Postgres) CreateWavePlan(ctx context.Context, plan *WavePlan) error {
 	}
 	assetIDs, _ := json.Marshal(plan.AssetIDs)
 	algTargets, _ := json.Marshal(plan.AlgorithmTargets)
+	canaryTargets := plan.CanaryTargets
+	if canaryTargets == nil {
+		canaryTargets = []string{}
+	}
 	_, err := p.pool.Exec(ctx, `
 INSERT INTO wave_plans (plan_id, name, description, wave_number, asset_ids, algorithm_targets,
-  start_date, target_date, status, created_by, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,now(),now())
+  start_date, target_date, status, created_by, created_at, updated_at,
+  canary_targets, maintenance_window, approval_policy,
+  budget_hours, actual_hours, component_count)
+VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,now(),now(),$11,$12,$13,$14,$15,$16)
 ON CONFLICT (plan_id) DO NOTHING`,
 		plan.PlanID, plan.Name, plan.Description, plan.WaveNumber,
 		string(assetIDs), string(algTargets),
-		plan.StartDate, plan.TargetDate, plan.Status, plan.CreatedBy)
+		plan.StartDate, plan.TargetDate, plan.Status, plan.CreatedBy,
+		canaryTargets, plan.MaintenanceWindow, plan.ApprovalPolicy,
+		plan.BudgetHours, plan.ActualHours, plan.ComponentCount)
 	return err
 }
 
 func (p *Postgres) GetWavePlans(ctx context.Context) ([]WavePlan, error) {
 	rows, err := p.pool.Query(ctx, `
 SELECT plan_id, name, description, wave_number, asset_ids, algorithm_targets,
-  start_date, target_date, status, created_by, created_at, updated_at
+  start_date, target_date, status, created_by, created_at, updated_at,
+  COALESCE(canary_targets, '{}'), COALESCE(maintenance_window, ''), COALESCE(approval_policy, 'operator'),
+  COALESCE(budget_hours, 0), COALESCE(actual_hours, 0), COALESCE(component_count, 0)
 FROM wave_plans ORDER BY wave_number, created_at`)
 	if err != nil {
 		return nil, err
@@ -2519,7 +2535,9 @@ FROM wave_plans ORDER BY wave_number, created_at`)
 		var assetIDs, algTargets []byte
 		if err := rows.Scan(&wp.PlanID, &wp.Name, &wp.Description, &wp.WaveNumber,
 			&assetIDs, &algTargets, &wp.StartDate, &wp.TargetDate,
-			&wp.Status, &wp.CreatedBy, &wp.CreatedAt, &wp.UpdatedAt); err != nil {
+			&wp.Status, &wp.CreatedBy, &wp.CreatedAt, &wp.UpdatedAt,
+			&wp.CanaryTargets, &wp.MaintenanceWindow, &wp.ApprovalPolicy,
+			&wp.BudgetHours, &wp.ActualHours, &wp.ComponentCount); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(assetIDs, &wp.AssetIDs)
@@ -2532,12 +2550,20 @@ FROM wave_plans ORDER BY wave_number, created_at`)
 func (p *Postgres) UpdateWavePlan(ctx context.Context, plan *WavePlan) error {
 	assetIDs, _ := json.Marshal(plan.AssetIDs)
 	algTargets, _ := json.Marshal(plan.AlgorithmTargets)
+	canaryTargets := plan.CanaryTargets
+	if canaryTargets == nil {
+		canaryTargets = []string{}
+	}
 	_, err := p.pool.Exec(ctx, `
 UPDATE wave_plans SET name=$2, description=$3, wave_number=$4, asset_ids=$5::jsonb,
-  algorithm_targets=$6::jsonb, start_date=$7, target_date=$8, status=$9, updated_at=now()
+  algorithm_targets=$6::jsonb, start_date=$7, target_date=$8, status=$9,
+  canary_targets=$10, maintenance_window=$11, approval_policy=$12,
+  budget_hours=$13, actual_hours=$14, component_count=$15, updated_at=now()
 WHERE plan_id=$1`,
 		plan.PlanID, plan.Name, plan.Description, plan.WaveNumber,
-		string(assetIDs), string(algTargets), plan.StartDate, plan.TargetDate, plan.Status)
+		string(assetIDs), string(algTargets), plan.StartDate, plan.TargetDate, plan.Status,
+		canaryTargets, plan.MaintenanceWindow, plan.ApprovalPolicy,
+		plan.BudgetHours, plan.ActualHours, plan.ComponentCount)
 	return err
 }
 
