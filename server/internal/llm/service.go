@@ -286,7 +286,7 @@ func (s *Service) callLLMForVerdict(ctx context.Context, job *store.LLMAnalysisJ
 		EvidenceCitations: raw.EvidenceCitations,
 		AbstentionReason:  raw.AbstentionReason,
 		Model:             model,
-		PromptVersion:     "1.0",
+		PromptVersion:     VerdictPromptVersion,
 	}
 
 	prov := &store.LLMProvenance{
@@ -295,8 +295,8 @@ func (s *Service) callLLMForVerdict(ctx context.Context, job *store.LLMAnalysisJ
 		FindingID:     job.FindingID,
 		Provider:      "openai",
 		Model:         model,
-		PromptName:    promptName,
-		PromptVersion: "1.0",
+		PromptName:    VerdictPromptName,
+		PromptVersion: VerdictPromptVersion,
 		InputHash:     inputHash,
 		OutputHash:    outputHash,
 		TokensIn:      apiResp.Usage.PromptTokens,
