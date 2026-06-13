@@ -382,6 +382,9 @@ type WavePlan struct {
 	CanaryTargets      []string   `json:"canary_targets,omitempty" db:"canary_targets"`
 	MaintenanceWindow  string     `json:"maintenance_window,omitempty" db:"maintenance_window"`
 	ApprovalPolicy     string     `json:"approval_policy,omitempty" db:"approval_policy"`
+	BudgetHours        float64    `json:"budget_hours,omitempty" db:"budget_hours"`
+	ActualHours        float64    `json:"actual_hours,omitempty" db:"actual_hours"`
+	ComponentCount     int        `json:"component_count,omitempty" db:"component_count"`
 }
 
 type FindingLifecycleEvent struct {
@@ -826,6 +829,12 @@ ALTER TABLE wave_plans
 	{26, "Finding reopen tracking columns (WP-013)", `
 ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS reopen_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE crypto_findings ADD COLUMN IF NOT EXISTS reopened_at TIMESTAMPTZ;
+`},
+	{27, "Wave plan budget and effort tracking (WP-022)", `
+ALTER TABLE wave_plans
+ADD COLUMN IF NOT EXISTS budget_hours FLOAT8 DEFAULT 0,
+ADD COLUMN IF NOT EXISTS actual_hours FLOAT8 DEFAULT 0,
+ADD COLUMN IF NOT EXISTS component_count INTEGER DEFAULT 0;
 `},
 }
 

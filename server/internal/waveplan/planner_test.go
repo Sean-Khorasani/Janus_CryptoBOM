@@ -229,3 +229,58 @@ func TestWavePlanDefaultApprovalPolicy(t *testing.T) {
 		t.Errorf("expected approval_policy to remain empty, got %q", m.plans[0].ApprovalPolicy)
 	}
 }
+
+func TestWavePlanBudgetValidation(t *testing.T) {
+	// Negative budget_hours must be rejected.
+	t.Run("negative budget_hours rejected", func(t *testing.T) {
+		p, _ := newTestPlanner()
+		plan := &store.WavePlan{Name: "Test Wave", WaveNumber: 1, BudgetHours: -1.0}
+		if err := p.Create(context.Background(), plan, "admin"); err == nil {
+			t.Error("expected error for negative budget_hours")
+		}
+	})
+	// Negative actual_hours must be rejected.
+	t.Run("negative actual_hours rejected", func(t *testing.T) {
+		p, _ := newTestPlanner()
+		plan := &store.WavePlan{Name: "Test Wave", WaveNumber: 1, ActualHours: -0.5}
+		if err := p.Create(context.Background(), plan, "admin"); err == nil {
+			t.Error("expected error for negative actual_hours")
+		}
+	})
+	// Zero must pass.
+	t.Run("zero budget and actual pass", func(t *testing.T) {
+		p, _ := newTestPlanner()
+		plan := &store.WavePlan{Name: "Test Wave", WaveNumber: 1, BudgetHours: 0, ActualHours: 0}
+		if err := p.Create(context.Background(), plan, "admin"); err != nil {
+			t.Errorf("expected zero budget/actual to pass, got: %v", err)
+		}
+	})
+	// Positive values must pass.
+	t.Run("positive budget and actual pass", func(t *testing.T) {
+		p, _ := newTestPlanner()
+		plan := &store.WavePlan{Name: "Test Wave", WaveNumber: 1, BudgetHours: 40.0, ActualHours: 12.5}
+		if err := p.Create(context.Background(), plan, "admin"); err != nil {
+			t.Errorf("expected positive budget/actual to pass, got: %v", err)
+		}
+	})
+}
+
+func TestWavePlanActualHoursCanExceedBudget(t *testing.T) {
+	// actual_hours > budget_hours is valid — it's a tracking field, not a cap.
+	p, m := newTestPlanner()
+	plan := &store.WavePlan{
+		Name:        "Over-budget wave",
+		WaveNumber:  2,
+		BudgetHours: 20.0,
+		ActualHours: 35.0,
+	}
+	if err := p.Create(context.Background(), plan, "admin"); err != nil {
+		t.Fatalf("actual_hours > budget_hours should be allowed, got: %v", err)
+	}
+	if m.plans[0].ActualHours != 35.0 {
+		t.Errorf("expected actual_hours=35.0, got %f", m.plans[0].ActualHours)
+	}
+	if m.plans[0].BudgetHours != 20.0 {
+		t.Errorf("expected budget_hours=20.0, got %f", m.plans[0].BudgetHours)
+	}
+}

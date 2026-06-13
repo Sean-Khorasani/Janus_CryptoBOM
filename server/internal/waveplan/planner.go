@@ -136,6 +136,12 @@ func validate(plan *store.WavePlan) error {
 	if !validApprovalPolicies[plan.ApprovalPolicy] {
 		return fmt.Errorf("approval_policy must be one of auto, operator, admin (got %q)", plan.ApprovalPolicy)
 	}
+	if plan.BudgetHours < 0 {
+		return errors.New("budget_hours must be >= 0")
+	}
+	if plan.ActualHours < 0 {
+		return errors.New("actual_hours must be >= 0")
+	}
 	return nil
 }
 
