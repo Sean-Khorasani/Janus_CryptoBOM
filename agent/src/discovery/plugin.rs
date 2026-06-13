@@ -187,7 +187,6 @@ fn write_and_verify_limit(path: &std::path::Path, value: &str) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn apply_resource_limits(cmd: &mut Command, mem_mb: u64, _cpu_percent: u8) {
-    use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::System::JobObjects::{
         CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,

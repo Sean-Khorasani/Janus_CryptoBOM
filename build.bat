@@ -83,9 +83,17 @@ if errorlevel 1 (
 
 echo [3/3] Building UI (Node/Vite)...
 cd "%PROJECT_ROOT%\ui"
+echo   Installing UI dependencies (npm install)...
+call npm install
+if errorlevel 1 (
+    echo UI dependency install failed!
+    cd "%PROJECT_ROOT%"
+    exit /b 1
+)
 call npm run build
 if errorlevel 1 (
     echo UI build failed!
+    cd "%PROJECT_ROOT%"
     exit /b 1
 )
 
