@@ -2,7 +2,6 @@ use super::ScanResult;
 use crate::{
     config::AgentConfig,
     proto::{CbomComponent, CryptoAlgorithm, CryptoRole, Evidence},
-    prompts::{PromptRegistry, PromptTemplate},
 };
 use anyhow::Result;
 use regex::Regex;
@@ -249,186 +248,16 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
     out
 }
 
-fn default_classify_template() -> PromptTemplate {
-    PromptTemplate {
-        prompt: concat!(
-            "You are a cryptography security expert. Analyze the following code snippet ",
-            "which contains a reference to the cryptographic algorithm '{{algorithm}}'. ",
-            "Classify the usage intent into exactly one of the following categories: ",
-            "'protect', 'verify', 'negotiate', 'test'. ",
-            "Reply with a JSON object exactly matching this format: ",
-            "{\"intent\": \"one-of-the-categories\", \"confidence\": 0.9}\n",
-            "Code Snippet (from {{source_file}}):\n{{snippet}}"
-        ).to_string(),
-        model: "gpt-4o-mini".to_string(),
-        temperature: 0.0,
-        version: None,
-    }
-}
-
-fn default_remediate_template() -> PromptTemplate {
-    PromptTemplate {
-        prompt: concat!(
-            "You are a cryptography security expert. Rewrite the following code snippet from ",
-            "'{{source_file}}' to migrate from the quantum-vulnerable algorithm '{{algorithm}}' ",
-            "to a secure post-quantum or modern standard (e.g., ML-KEM, ML-DSA, SHA-256). ",
-            "The response must return ONLY a unified diff patch. ",
-            "Do not include markdown code block formatting (like ```diff), just the raw diff text. ",
-            "Remediation patch target file: {{source_file}}\nCode Snippet:\n{{snippet}}"
-        ).to_string(),
-        model: "gpt-4o-mini".to_string(),
-        temperature: 0.0,
-        version: None,
-    }
-}
-
-fn analyze_snippet_llm_sync(http_endpoint: &str, tmpl: &PromptTemplate, name: &str, source_file: &str, snippet: &str) -> Result<String> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-
-    let host_port = http_endpoint
-        .strip_prefix("http://")
-        .unwrap_or(http_endpoint)
-        .split('/')
-        .next()
-        .unwrap_or("127.0.0.1:8080");
-    let prompt = tmpl.render(&[("algorithm", name), ("source_file", source_file), ("snippet", snippet)]);
-
-    let body_json = serde_json::json!({
-        "model": tmpl.model,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "temperature": tmpl.temperature
-    }).to_string();
-
-    let addr: std::net::SocketAddr = host_port.parse()
-        .or_else(|_| std::net::ToSocketAddrs::to_socket_addrs(&host_port).map(|mut i| i.next().unwrap()))
-        .map_err(|e| anyhow::anyhow!("resolve {}: {}", host_port, e))?;
-    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-    let req = format!(
-        "POST /api/llm/proxy HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\r\n\
-         {}",
-        host_port,
-        body_json.len(),
-        body_json
-    );
-    stream.write_all(req.as_bytes())?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-
-    if let Some(idx) = response.find("\r\n\r\n") {
-        let body = &response[idx + 4..];
-        let val: serde_json::Value = serde_json::from_str(body)?;
-
-        if let Some(choices) = val.get("choices") {
-            if let Some(content) = choices[0]["message"]["content"].as_str() {
-                let clean = content.replace("```json", "").replace("```", "").trim().to_string();
-                let parsed: serde_json::Value = serde_json::from_str(&clean)?;
-                if let Some(intent) = parsed.get("intent").and_then(|i| i.as_str()) {
-                    return Ok(intent.to_string());
-                }
-            }
-        }
-    }
-
-    anyhow::bail!("failed to parse LLM response")
-}
-
-pub fn generate_remediation_patch_llm(
-    http_endpoint: &str,
-    tmpl: &PromptTemplate,
-    name: &str,
-    source_file: &str,
-    snippet: &str,
-) -> Result<String> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-
-    let host_port = http_endpoint
-        .strip_prefix("http://")
-        .unwrap_or(http_endpoint)
-        .split('/')
-        .next()
-        .unwrap_or("127.0.0.1:8080");
-
-    let prompt = tmpl.render(&[("algorithm", name), ("source_file", source_file), ("snippet", snippet)]);
-
-    let body_json = serde_json::json!({
-        "model": tmpl.model,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "temperature": 0.0
-    }).to_string();
-
-    let addr: std::net::SocketAddr = host_port.parse()
-        .or_else(|_| std::net::ToSocketAddrs::to_socket_addrs(&host_port).map(|mut i| i.next().unwrap()))
-        .map_err(|e| anyhow::anyhow!("resolve {}: {}", host_port, e))?;
-    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-    let req = format!(
-        "POST /api/llm/proxy HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\r\n\
-         {}",
-        host_port,
-        body_json.len(),
-        body_json
-    );
-    stream.write_all(req.as_bytes())?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-
-    if let Some(idx) = response.find("\r\n\r\n") {
-        let body = &response[idx + 4..];
-        let val: serde_json::Value = serde_json::from_str(body)?;
-        if let Some(choices) = val.get("choices") {
-            if let Some(content) = choices[0]["message"]["content"].as_str() {
-                let clean = content
-                    .replace("```diff", "")
-                    .replace("```patch", "")
-                    .replace("```", "")
-                    .trim()
-                    .to_string();
-                return Ok(clean);
-            }
-        }
-    }
-
-    anyhow::bail!("failed to parse LLM patch response")
-}
-
-pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
+/// The agent NEVER initiates LLM analysis. Scanning is fully deterministic; the
+/// agent reports findings + bounded evidence, and the SERVER runs any LLM analysis
+/// on explicit admin request (see IMPLEMENTATION_PLAN.md LLM-017/LLM-018). The
+/// legacy per-match `analyze_snippet_llm_sync` / `generate_remediation_patch_llm`
+/// calls to `/api/llm/proxy` were removed from this path — they made every crypto
+/// match a synchronous LLM round-trip during the scan, which was both wrong
+/// (agent-initiated) and pathologically slow.
+pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
     let patterns = patterns()?;
     let mut out = ScanResult::default();
-
-    // Load prompt templates once per scan (not per match) to avoid repeated disk reads.
-    let classify_tmpl = if use_llm {
-        PromptRegistry::new(&cfg.prompts_dir).load_or_default("classify-intent", default_classify_template())
-    } else {
-        default_classify_template()
-    };
-    let remediate_tmpl = if use_llm {
-        PromptRegistry::new(&cfg.prompts_dir).load_or_default("remediate-patch", default_remediate_template())
-    } else {
-        default_remediate_template()
-    };
 
     // Candidate patches are collected and written once next to the report —
     // a passive scan must never write into the scanned tree.
@@ -514,49 +343,17 @@ pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
                         intent.clone()
                     };
 
-                    // Attempt LLM intent classification when requested. The LLM may only
-                    // relabel intent within the closed enum and may only LOWER confidence,
-                    // never raise it above the deterministic tier — snippets are untrusted
-                    // input (a scanned repo can prompt-inject the classifier), so its output
-                    // is an annotation, not an authority.
-                    let (algo_status, algo_conf) = if use_llm && !is_test_file {
-                        match analyze_snippet_llm_sync(
-                            &cfg.http_endpoint(),
-                            &classify_tmpl,
-                            pat.name,
-                            &entry.path().display().to_string(),
-                            &snippet,
-                        ) {
-                            Ok(llm_intent) if is_known_intent(&llm_intent) => {
-                                let llm_conf =
-                                    intent_adjusted_confidence(method, &llm_intent).min(algo_conf);
-                                (llm_intent, llm_conf)
-                            }
-                            _ => (algo_status, algo_conf),
-                        }
-                    } else {
-                        (algo_status, algo_conf)
-                    };
+                    // Intent and confidence are deterministic. LLM intent reclassification
+                    // moved server-side (admin-initiated) — the agent does not call it.
 
                     let is_qv = is_quantum_vulnerable(pat.name);
 
                     if is_qv && !is_test_file {
                         let path_str = entry.path().display().to_string();
                         let line_num = line_idx + 1;
-                        let patch = if use_llm {
-                            match generate_remediation_patch_llm(
-                                &cfg.http_endpoint(),
-                                &remediate_tmpl,
-                                pat.name,
-                                &path_str,
-                                &snippet,
-                            ) {
-                                Ok(p) => p,
-                                Err(_) => build_static_patch(&path_str, line_num, line, pat.name),
-                            }
-                        } else {
-                            build_static_patch(&path_str, line_num, line, pat.name)
-                        };
+                        // Static, deterministic candidate patch only. LLM-generated patches
+                        // are produced server-side on admin request, never during the scan.
+                        let patch = build_static_patch(&path_str, line_num, line, pat.name);
                         pending_patches.push(patch);
                     }
 
@@ -805,7 +602,9 @@ fn infer_usage_intent(line: &str) -> String {
     "observed".to_string()
 }
 
-/// Closed intent vocabulary — LLM output outside this set is discarded (injection defense).
+/// Closed intent vocabulary. Retained for the server-side LLM contract and tests;
+/// the agent no longer performs LLM intent classification during scans.
+#[allow(dead_code)]
 fn is_known_intent(intent: &str) -> bool {
     matches!(intent, "protect" | "verify" | "parse" | "negotiate" | "test" | "observed")
 }
