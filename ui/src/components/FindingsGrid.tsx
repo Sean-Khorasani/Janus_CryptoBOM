@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
-import { X, ChevronDown, ChevronUp } from "lucide-react";
-import { Finding, ComponentRecord } from "../hooks/useApi";
+import { X, ChevronDown, ChevronUp, Clock } from "lucide-react";
+import { Finding, ComponentRecord, Asset } from "../hooks/useApi";
 import { FocusTrap } from "../a11y/FocusTrap";
+import { openAuthenticatedResource } from "../authenticatedResource";
+import { FindingTimeline } from "./FindingTimeline";
 
 export function SeverityBadge({ severity }: { severity: number }) {
   const label = severity >= 5 ? "Critical" : severity === 4 ? "High" : severity === 3 ? "Medium" : severity === 2 ? "Low" : "Info";
@@ -152,12 +154,14 @@ SSLCipherSuite HIGH:!aNULL:!MD5`
 interface FindingTableProps {
   findings: Finding[];
   components: ComponentRecord[];
+  assets?: Asset[];
   statuses: Record<string, string>;
   updateStatus: (id: string, status: string) => void;
 }
 
-export function FindingTable({ findings, components, statuses, updateStatus }: FindingTableProps) {
+export function FindingTable({ findings, components, assets = [], statuses, updateStatus }: FindingTableProps) {
   const [selected, setSelected] = useState<Finding | null>(null);
+  const [timelineFindingId, setTimelineFindingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [sortCol, setSortCol] = useState<"severity" | "algorithm" | null>(null);
@@ -187,6 +191,7 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
     const comp = components.find(c => c.bom_ref === currentSelected.asset_ref);
     return comp ? comp.file_path : null;
   }, [currentSelected, components]);
+  const currentSelectedAgent = useMemo(() => currentSelected ? assets.find(a => a.host_uuid === currentSelected.host_uuid) : undefined, [assets, currentSelected]);
 
   const handleSort = (col: "severity" | "algorithm") => {
     if (sortCol !== col) {
@@ -321,13 +326,14 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
           >
             Download CBOM JSON
           </button>
-          <a
-            href="/report.html"
+          <button
+            type="button"
+            onClick={() => void openAuthenticatedResource("/api/report.html", "text/html")}
             className="flex h-9 items-center justify-center px-3 rounded border border-[#dfe5dc] bg-white text-xs font-medium text-[#4d594f] hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]"
-            aria-label="Open HTML report"
+            aria-label="Open HTML report (opens in new tab)"
           >
             Open HTML Report
-          </a>
+          </button>
         </div>
       </div>
 
@@ -364,6 +370,7 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
                 Algorithm {sortCol === "algorithm" ? (sortDir === "asc" ? <ChevronUp size={12} className="inline" /> : <ChevronDown size={12} className="inline" />) : null}
               </th>
               <th className="py-2 pr-3" scope="col">Rule</th>
+              <th className="py-2" scope="col"><span className="sr-only">History</span></th>
             </tr>
           </thead>
           <tbody>
@@ -410,6 +417,20 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
                   <td className="py-2 pr-3 max-w-[240px] truncate dark:text-[#8fa991]">{finding.asset_ref}</td>
                   <td className="py-2 pr-3 dark:text-[#e8ede9]">{finding.algorithm || "unknown"}</td>
                   <td className="py-2 pr-3 font-mono text-xs dark:text-[#8fa991]">{finding.policy_rule_id}</td>
+                  <td className="py-2">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTimelineFindingId(finding.finding_id);
+                      }}
+                      className="flex h-7 w-7 items-center justify-center rounded border border-[#dfe5dc] bg-white text-[#697469] hover:bg-[#edf1ea] hover:text-[#17211c] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#6b7e6f] dark:hover:bg-[#22302a] dark:hover:text-[#e8ede9]"
+                      aria-label={`View history for finding ${finding.title}`}
+                      title="View history"
+                    >
+                      <Clock size={13} aria-hidden="true" />
+                    </button>
+                  </td>
                 </tr>
               );
             })}
@@ -448,6 +469,13 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
         </div>
       )}
 
+      {timelineFindingId && (
+        <FindingTimeline
+          findingId={timelineFindingId}
+          onClose={() => setTimelineFindingId(null)}
+        />
+      )}
+
       {currentSelected && resolution && (
         <FocusTrap active={!!currentSelected} onEscape={() => setSelected(null)}>
           <div className="finding-drawer fixed inset-y-0 inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-sm transition-opacity dark:bg-black/55" data-testid="finding-drawer" onClick={() => setSelected(null)} role="dialog" aria-modal="true" aria-labelledby="finding-drawer-title">
@@ -471,6 +499,17 @@ export function FindingTable({ findings, components, statuses, updateStatus }: F
               </div>
 
               <div className="space-y-4 flex-1">
+                <div className="rounded border border-[#dfe5dc] bg-[#f7f8f5] p-3 text-xs dark:border-[#2a3a30] dark:bg-[#0d1210]">
+                  <div className="mb-2 font-semibold uppercase tracking-wider text-[#697469] dark:text-[#8fa991]">Scan Provenance</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div><strong>Agent:</strong> {currentSelectedAgent?.hostname || currentSelected.hostname || currentSelected.host_uuid}</div>
+                    <div><strong>Agent version:</strong> {currentSelectedAgent?.agent_version || currentSelected.agent_version || "unknown"}</div>
+                    <div><strong>OS:</strong> {currentSelectedAgent ? `${currentSelectedAgent.os_name} ${currentSelectedAgent.os_version}` : "unknown"}</div>
+                    <div><strong>IP / DNS:</strong> {currentSelectedAgent?.observed_ip || "unknown"} / {currentSelectedAgent?.dns_name || "unknown"}</div>
+                    <div><strong>Scan ID:</strong> <span className="font-mono">{currentSelected.telemetry_id || currentSelectedAgent?.last_scan_id || "unknown"}</span></div>
+                    <div><strong>Observed:</strong> {formatDate(currentSelected.scan_finished || currentSelected.created_at)}</div>
+                  </div>
+                </div>
                 <div>
                   <span className="block text-xs font-semibold text-[#697469] uppercase tracking-wider mb-1 dark:text-[#8fa991]">Impacted Asset</span>
                   <span className="font-mono text-sm block bg-[#f7f8f5] p-2 rounded border border-[#dfe5dc] max-w-full overflow-x-auto dark:bg-[#0d1210] dark:border-[#2a3a30] dark:text-[#e8ede9]">{currentSelected.asset_ref}</span>

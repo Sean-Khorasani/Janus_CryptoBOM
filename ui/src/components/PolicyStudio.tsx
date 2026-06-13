@@ -1,6 +1,208 @@
 import { useState } from "react";
 import { PolicyProfile } from "../hooks/useApi";
-import { Shield, CheckCircle, AlertCircle } from "lucide-react";
+import { Shield, CheckCircle, AlertCircle, ChevronDown, ChevronUp } from "lucide-react";
+import { SeverityBadge, Empty } from "./FindingsGrid";
+
+// ---------------------------------------------------------------------------
+// Compliance Rules types
+// ---------------------------------------------------------------------------
+
+interface ControlRule {
+  rule_id: string;
+  title: string;
+  description: string;
+  rationale: string;
+  framework_refs: string[];
+  effective_date: string;
+  expiry_date?: string;
+  severity: number;
+  remediation_hint: string;
+}
+
+interface ControlPack {
+  pack_id: string;
+  name: string;
+  version: string;
+  effective_date: string;
+  rules: ControlRule[];
+}
+
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem("janus_token");
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+// ---------------------------------------------------------------------------
+// Compliance Rules Panel
+// ---------------------------------------------------------------------------
+
+function ComplianceRulesPanel() {
+  const [open, setOpen] = useState(false);
+  const [pack, setPack] = useState<ControlPack | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedRule, setSelectedRule] = useState<ControlRule | null>(null);
+
+  const loadRules = () => {
+    if (pack !== null) {
+      setOpen(!open);
+      return;
+    }
+    setOpen(true);
+    setLoading(true);
+    setError(null);
+    fetch("/api/policy/rules", { headers: getAuthHeaders() })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+        return res.json();
+      })
+      .then((data: ControlPack) => {
+        setPack(data);
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to load rules");
+      })
+      .finally(() => setLoading(false));
+  };
+
+  return (
+    <div className="rounded-md border border-[#dfe5dc] bg-white dark:border-[#2a3a30] dark:bg-[#1a2620]">
+      {/* Collapsible header */}
+      <button
+        type="button"
+        onClick={loadRules}
+        className="flex w-full items-center justify-between px-5 py-4 text-left"
+        aria-expanded={open}
+      >
+        <div className="flex items-center gap-3">
+          <Shield size={18} className="text-[#11845b] dark:text-[#3da06a]" aria-hidden="true" />
+          <div>
+            <span className="text-sm font-bold text-[#17211c] dark:text-[#e8ede9]">Control Pack</span>
+            {pack && (
+              <span className="ml-2 text-xs text-[#697469] dark:text-[#8fa991]">
+                {pack.name} · v{pack.version} · effective {pack.effective_date}
+              </span>
+            )}
+          </div>
+        </div>
+        {open
+          ? <ChevronUp size={16} className="text-[#697469] dark:text-[#8fa991]" aria-hidden="true" />
+          : <ChevronDown size={16} className="text-[#697469] dark:text-[#8fa991]" aria-hidden="true" />
+        }
+      </button>
+
+      {open && (
+        <div className="border-t border-[#dfe5dc] px-5 pb-5 pt-4 dark:border-[#2a3a30]">
+          {loading && (
+            <div className="py-6 text-center text-sm text-[#697469] dark:text-[#8fa991]">
+              Loading control pack...
+            </div>
+          )}
+          {error && !loading && (
+            <div className="flex items-center gap-2 rounded-md border border-[#efb7a5] bg-[#fff4ee] px-3 py-2 text-sm text-[#8b2d16] dark:border-[#f87171] dark:bg-[#2d1518] dark:text-[#f87171]">
+              <AlertCircle size={15} aria-hidden="true" />
+              <span>{error}</span>
+            </div>
+          )}
+          {!loading && !error && pack && pack.rules.length === 0 && (
+            <Empty label="No rules in control pack" />
+          )}
+          {!loading && !error && pack && pack.rules.length > 0 && (
+            <div className="overflow-auto">
+              <table className="w-full min-w-[640px] text-left text-sm">
+                <thead className="border-b border-[#dfe5dc] text-xs uppercase text-[#697469] dark:border-[#2a3a30] dark:text-[#8fa991]">
+                  <tr>
+                    <th className="py-2 pr-3" scope="col">Rule ID</th>
+                    <th className="py-2 pr-3" scope="col">Title</th>
+                    <th className="py-2 pr-3" scope="col">Severity</th>
+                    <th className="py-2" scope="col">Framework Refs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pack.rules.map((rule) => (
+                    <tr
+                      key={rule.rule_id}
+                      className="border-b border-[#edf1ea] hover:bg-[#edf1ea]/40 cursor-pointer transition-colors dark:border-[#2a3a30] dark:hover:bg-[#22302a]/40"
+                      onClick={() => setSelectedRule(selectedRule?.rule_id === rule.rule_id ? null : rule)}
+                      tabIndex={0}
+                      onKeyDown={(e) => { if (e.key === "Enter") setSelectedRule(selectedRule?.rule_id === rule.rule_id ? null : rule); }}
+                      role="button"
+                      aria-expanded={selectedRule?.rule_id === rule.rule_id}
+                      aria-label={`Rule ${rule.rule_id}: ${rule.title}`}
+                    >
+                      <td className="py-2 pr-3 font-mono text-xs text-[#17211c] dark:text-[#e8ede9]">{rule.rule_id}</td>
+                      <td className="py-2 pr-3 max-w-[260px]">
+                        <span className="font-medium text-[#17211c] dark:text-[#e8ede9]">{rule.title}</span>
+                      </td>
+                      <td className="py-2 pr-3"><SeverityBadge severity={rule.severity} /></td>
+                      <td className="py-2">
+                        <div className="flex flex-wrap gap-1">
+                          {(rule.framework_refs ?? []).map((ref) => (
+                            <span
+                              key={ref}
+                              className="rounded bg-[#edf1ea] px-1.5 py-0.5 font-mono text-[10px] text-[#4d594f] dark:bg-[#22302a] dark:text-[#6b7e6f]"
+                            >
+                              {ref}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Rule detail expansion */}
+          {selectedRule && (
+            <div className="mt-4 rounded-md border border-[#dfe5dc] bg-[#f7f8f5] p-4 dark:border-[#2a3a30] dark:bg-[#0d1210]">
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <h4 className="text-sm font-bold text-[#17211c] dark:text-[#e8ede9]">{selectedRule.title}</h4>
+                <button
+                  type="button"
+                  onClick={() => setSelectedRule(null)}
+                  className="rounded p-0.5 text-[#697469] hover:bg-[#edf1ea] dark:text-[#8fa991] dark:hover:bg-[#22302a]"
+                  aria-label="Close rule details"
+                >
+                  <ChevronUp size={14} aria-hidden="true" />
+                </button>
+              </div>
+              <div className="space-y-3 text-xs text-[#4d594f] dark:text-[#6b7e6f]">
+                <div>
+                  <span className="block font-semibold uppercase tracking-wider text-[#697469] dark:text-[#8fa991] mb-0.5">Description</span>
+                  <p>{selectedRule.description}</p>
+                </div>
+                {selectedRule.rationale && (
+                  <div>
+                    <span className="block font-semibold uppercase tracking-wider text-[#697469] dark:text-[#8fa991] mb-0.5">Rationale</span>
+                    <p>{selectedRule.rationale}</p>
+                  </div>
+                )}
+                {selectedRule.remediation_hint && (
+                  <div>
+                    <span className="block font-semibold uppercase tracking-wider text-[#697469] dark:text-[#8fa991] mb-0.5">Remediation Hint</span>
+                    <p className="italic">{selectedRule.remediation_hint}</p>
+                  </div>
+                )}
+                <div className="flex items-center gap-3 pt-1">
+                  <span className="text-[#697469] dark:text-[#8fa991]">Effective: {selectedRule.effective_date}</span>
+                  {selectedRule.expiry_date && (
+                    <span className="text-[#697469] dark:text-[#8fa991]">Expires: {selectedRule.expiry_date}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface PolicyStudioProps {
   activePolicy: string;
@@ -170,6 +372,9 @@ export function PolicyStudio({ activePolicy, policies, switchPolicy }: PolicyStu
           <span>{success}</span>
         </div>
       )}
+
+      {/* Compliance Rules Panel */}
+      <ComplianceRulesPanel />
 
       {/* Policy Profile Creator Form */}
       <div className="rounded-md border border-[#dfe5dc] bg-white p-6 max-w-xl dark:border-[#2a3a30] dark:bg-[#1a2620]">

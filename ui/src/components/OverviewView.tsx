@@ -1,8 +1,84 @@
 import React from "react";
-import { AlertTriangle, Database, Gauge, GitBranch, Layers3 } from "lucide-react";
+import { AlertTriangle, Database, Gauge, GitBranch, Layers3, ShieldAlert } from "lucide-react";
 import { Finding, Overview, ComponentRecord, Asset } from "../hooks/useApi";
 import { Empty, FindingTable } from "./FindingsGrid";
-import { CryptoGraph } from "./CryptoGraph";
+import { CryptoGraph, GraphSelection } from "./CryptoGraph";
+import { HomeAgentStatus } from "./HomeAgentStatus";
+
+// ---------------------------------------------------------------------------
+// Cert Health types & helpers
+// ---------------------------------------------------------------------------
+
+interface CertHealth {
+  total_tracked: number;
+  expired: number;
+  expiring_30_days: number;
+  expiring_90_days: number;
+}
+
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem("janus_token");
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+function CertHealthCard({ certHealth }: { certHealth: CertHealth }) {
+  return (
+    <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-[#17211c] dark:text-[#e8ede9]">Certificate Health</h2>
+        <ShieldAlert size={17} className="text-[#2f6fed]" aria-hidden="true" />
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded border border-[#edf1ea] bg-[#f7f8f5] p-3 dark:border-[#2a3a30] dark:bg-[#0d1210]">
+          <div className="text-xl font-bold text-[#17211c] dark:text-[#e8ede9]">
+            {certHealth.total_tracked}
+          </div>
+          <div className="mt-0.5 text-xs text-[#697469] dark:text-[#8fa991]">Total Tracked</div>
+        </div>
+        <div className="rounded border border-[#edf1ea] bg-[#f7f8f5] p-3 dark:border-[#2a3a30] dark:bg-[#0d1210]">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xl font-bold text-[#17211c] dark:text-[#e8ede9]">
+              {certHealth.expired ?? 0}
+            </span>
+            {(certHealth.expired ?? 0) > 0 && (
+              <span className="rounded bg-[#d33f49] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                !</span>
+            )}
+          </div>
+          <div className="mt-0.5 text-xs text-[#697469] dark:text-[#8fa991]">Expired</div>
+        </div>
+        <div className="rounded border border-[#edf1ea] bg-[#f7f8f5] p-3 dark:border-[#2a3a30] dark:bg-[#0d1210]">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xl font-bold text-[#17211c] dark:text-[#e8ede9]">
+              {certHealth.expiring_30_days ?? 0}
+            </span>
+            {(certHealth.expiring_30_days ?? 0) > 0 && (
+              <span className="rounded bg-[#e07a2f] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                !</span>
+            )}
+          </div>
+          <div className="mt-0.5 text-xs text-[#697469] dark:text-[#8fa991]">Expiring in 30d</div>
+        </div>
+        <div className="rounded border border-[#edf1ea] bg-[#f7f8f5] p-3 dark:border-[#2a3a30] dark:bg-[#0d1210]">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xl font-bold text-[#17211c] dark:text-[#e8ede9]">
+              {certHealth.expiring_90_days ?? 0}
+            </span>
+            {(certHealth.expiring_90_days ?? 0) > 0 && (
+              <span className="rounded bg-[#ffd166] px-1.5 py-0.5 text-[10px] font-bold text-[#3a2a00]">
+                !</span>
+            )}
+          </div>
+          <div className="mt-0.5 text-xs text-[#697469] dark:text-[#8fa991]">Expiring in 90d</div>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 export function Metric({ icon, label, value, accent }: { icon: React.ReactNode; label: string; value: string; accent: string }) {
   return (
@@ -24,9 +100,27 @@ interface OverviewViewProps {
   assets: Asset[];
   statuses: Record<string, string>;
   updateStatus: (id: string, status: string) => void;
+  onOpenFleet: (hostUuid?: string) => void;
 }
 
-export function OverviewView({ overview, score, findings, components, assets, statuses, updateStatus }: OverviewViewProps) {
+export function OverviewView({ overview, score, findings, components, assets, statuses, updateStatus, onOpenFleet }: OverviewViewProps) {
+  const [graphSelection, setGraphSelection] = React.useState<GraphSelection | null>(null);
+  const [certHealth, setCertHealth] = React.useState<CertHealth | null>(null);
+
+  React.useEffect(() => {
+    fetch("/api/sla/metrics", { headers: getAuthHeaders() })
+      .then((res) => {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then((data: { cert_health?: CertHealth } | null) => {
+        if (data?.cert_health && (data.cert_health.total_tracked ?? 0) >= 0) {
+          setCertHealth(data.cert_health);
+        }
+      })
+      .catch(() => { /* non-critical, silently ignore */ });
+  }, []);
+
   const activeScans = assets.filter(
     (asset) =>
       asset.status &&
@@ -67,6 +161,24 @@ export function OverviewView({ overview, score, findings, components, assets, st
 
   const histogram = Object.entries(histData);
   const max = Math.max(1, ...histogram.map(([, v]) => v));
+  const contextualFindings = React.useMemo(() => {
+    if (!graphSelection) return findings;
+    if (graphSelection.type === "host") {
+      const latestScan = components.filter(c => c.host_uuid === graphSelection.hostUuid).sort((a, b) => b.scan_finished_unix - a.scan_finished_unix)[0]?.telemetry_id;
+      return findings.filter(f => f.host_uuid === graphSelection.hostUuid && (!latestScan || !f.telemetry_id || f.telemetry_id === latestScan));
+    }
+    if (graphSelection.type === "component") {
+      return findings.filter(f => f.host_uuid === graphSelection.hostUuid && (f.asset_ref === graphSelection.bomRef || f.asset_ref === graphSelection.filePath));
+    }
+    return findings.filter(f => f.algorithm === graphSelection.algorithm);
+  }, [components, findings, graphSelection]);
+  const findingsTitle = graphSelection?.type === "host"
+    ? `Latest findings from ${graphSelection.label}`
+    : graphSelection?.type === "component"
+      ? `Findings for ${graphSelection.label}`
+      : graphSelection?.type === "algorithm"
+        ? `${graphSelection.label} findings`
+        : "Highest Priority Findings";
 
   return (
     <div className="space-y-5">
@@ -113,10 +225,14 @@ export function OverviewView({ overview, score, findings, components, assets, st
         )}
       </div>
 
+      {certHealth !== null && <CertHealthCard certHealth={certHealth} />}
+
+      <HomeAgentStatus assets={assets} onOpenFleet={onOpenFleet} />
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* Left Column: Interactive Crypto Exposure Graph & Algorithm Exposure Distribution */}
         <div className="space-y-4">
-          <CryptoGraph assets={assets} components={components} findings={findings} statuses={statuses} />
+          <CryptoGraph assets={assets} components={components} findings={findings} statuses={statuses} onSelectionChange={setGraphSelection} />
 
           <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
             <div className="mb-4 flex items-center justify-between">
@@ -158,10 +274,13 @@ export function OverviewView({ overview, score, findings, components, assets, st
         <div className="space-y-4">
           <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-base font-semibold dark:text-[#e8ede9]">Highest Priority Findings</h2>
+              <div>
+                <h2 className="text-base font-semibold dark:text-[#e8ede9]">{findingsTitle}</h2>
+                {graphSelection && <button type="button" onClick={() => setGraphSelection(null)} className="text-xs text-[#2f6fed] hover:underline">Clear report scope</button>}
+              </div>
               <AlertTriangle size={18} className="text-[#d33f49]" aria-hidden="true" />
             </div>
-            <FindingTable findings={findings} components={components} statuses={statuses} updateStatus={updateStatus} />
+            <FindingTable findings={contextualFindings} components={components} assets={assets} statuses={statuses} updateStatus={updateStatus} />
           </section>
 
           <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
