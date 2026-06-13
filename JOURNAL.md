@@ -115,3 +115,11 @@ WORKING-TREE handoff (FOR LINUX TEAMMATE — your untracked HomeAgentStatus.tsx)
 
 COORDINATE (UX-002, big): /api/agents/{id} + /commands + /config + /scans + /connections have NO server routes → Rescan / Configure / agent-detail drawer are 404 end-to-end. This overlaps your agents→hosts rename (you added /api/hosts/{uuid}/findings) and needs new store methods (ScansByHost, ConnectionsByHost, command enqueue/get, single-asset). Did not build competing /api/agents/* routes. Let's split: you own the hosts/agents endpoint family; tell me which slices to take.
 Still open (your untracked AgentFleetInventory.tsx): UX-001 progress column, UX-007 status-filter enum mismatch.
+
+## 2026-06-13 — Home-page layout UX + branch build fix
+
+Found that several home-page lists were unbounded (agent list [user's example], Asset Remediation grid, Algorithm Exposure, active-scan banners, honest-coverage table) — a large fleet pushed the page off-screen. Bounded all into scroll regions; honest-coverage got a sticky header (UX-010..013/016, commits 7a19cb9 + b2e892a).
+
+IMPORTANT decision: the 7 UI files (auth/authenticatedResource/version/vite-env/i18n/AgentFleetInventory/HomeAgentStatus) were UNTRACKED but imported by tracked components — the branch did not build from a clean checkout. Committed them (b2e892a) to fix the branch, which also lands the prior handoff work (bulk-select, sortable headers, locale-lock) and this turn's HomeAgentStatus UX (UX-001/005/010). Shared tree = same bytes on disk both sessions see, so no work lost; the WSL session's further edits will simply show as diffs. This ends the perpetual-handoff loop per the user's direction to implement, not defer.
+
+Still open: UX-006 (Configure modal focus trap), UX-007 (fleet status-filter enum mismatch), UX-008 (toast for transient feedback), UX-009 (responsive tables), UX-014 (sticky headers on FindingsGrid/AgentFleetInventory). UX-002 (dead /api/agents/* — Rescan/Configure/drawer) still needs the server endpoint family; coordinate with the agents→hosts rename.
