@@ -58,6 +58,16 @@ W6: corpus v1 measured precision 1.000 / recall 1.000 (14 files; caught+fixed DH
 **L6** WP-019 tests: policy engine fuzz test (`server/internal/policy/engine_fuzz_test.go`); httpapi property tests expansion
 Files Windows teammate should NOT touch while these are in-flight: `server/internal/store/store.go`, `server/internal/waveplan/`, `ui/src/components/FindingsGrid.tsx`, `ui/src/components/PolicyStudio.tsx`, `ui/src/components/OverviewView.tsx`.
 
+## 2026-06-12 — L1–L6 delivered (commits 5ad356a..4dac225)
+
+**L1 (WP-026):** `docs/PRIVACY_DATA_GOVERNANCE.md` (323 lines) — data classification, LLM consent gate, redaction patterns, Linux AES-256-GCM encryption, operator responsibilities.
+**L2 (WP-027):** `docs/ALGORITHM_COMPATIBILITY.md` (329 lines) — NIST QSL table, RSA/ECDSA/AES/TLS→PQC migration matrix, library support table (OpenSSL 3.5+, rustls, BoringSSL, Go circl).
+**L3 (WP-013):** `server/internal/store/store.go` — auto-reopen on recurrence (`status IN ('remediated','accepted_risk')` → `open`, lifecycle event), DB migration 26. `store_test.go` — migration uniqueness tests, compile-time interface assertion, integration test skeleton (skips without DB URL).
+**L4 (WP-022):** `WavePlan` extended with `CanaryTargets`/`MaintenanceWindow`/`ApprovalPolicy` fields, DB migration 25 with CHECK constraint. 3 new waveplan tests (15 total). Policy engine `FuzzAssess` test (10 seeds, no-panic invariant).
+**L5 (WP-013/017/018 UI):** `FindingTimeline.tsx` (211 lines) — vertical event history with status badges, actor, timestamps. Wired into `FindingsGrid.tsx` (History button per row). Compliance rules collapsible panel in `PolicyStudio.tsx`. Cert-health card (expired/30d/90d) in `OverviewView.tsx`. TypeScript clean.
+**L6 (WP-019/026):** `evidence.rs` — AWS access key redaction pattern, 6 new tests (prompt injection, 512-byte cap, TLS classification, AWS key, JWT). `network.rs` — `ocsp:unchecked` field in TLS metadata string. `docs/NETWORK_ASSESSMENT.md` (185 lines).
+Test counts: Go 18 packages green; Rust 71 tests green. All files staged with explicit paths.
+
 ## 2026-06-12 — Full-project review (docs/analysis/PROJECT-REVIEW.md)
 
 Read UI (App/useApi/auth/Header/AgentFleetInventory/OverviewView/i18n), server auth.go + hsm/softhsm.go. Findings: 5 security (S1 hardcoded creds=Critical, S5 fake SoftHSM Verify=Critical, S2 public agent endpoints, S3 token-in-localStorage/URL, S4 static agent token), 5 partial impls (P1 real-time/useWebSocket missing — polling-only despite CLAUDE.md; P2 HSM stub; P3 bulk-select dead-end; P4 saveAgentDiagnostics dead code; P5 client-local finding lifecycle), 6 bugs (B1 per-asset remediation fudge, B2 Safety Score ignores triage, B3 type drift, B4 RTL not applied for fa, B5 error masking, B6 untranslated tabs), and 11 UI/UX recommendations led by real-time, RTL/i18n, trustworthy score, bulk-select resolution, keyboard-accessible sort headers, honest-coverage panel. Recommended immediate fixes: S1 + S5. Not yet implemented — awaiting go-ahead on which to action.
