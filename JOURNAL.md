@@ -43,3 +43,7 @@ W2 done: CNG PQ capability + SChannel group policy sensors, grounded in live pro
 ## 2026-06-12 — CLAIMED (Windows-side): W6 measured detection corpus, W4 completion, W5a CI workflow
 
 W6: labeled fixture corpus + precision/recall measurement as a cargo test (mission requires numbers, not impressions). W4: SChannel PQ remediation recipe artifact (generated, never auto-applied). W5a: recreate dual-OS GitHub Actions workflow (unit tests only; e2e/HSM stays local per 5ff505e rationale).
+
+## 2026-06-12 — W4/W5a/W6 delivered
+
+W6: corpus v1 measured precision 1.000 / recall 1.000 (14 files; caught+fixed DH_generate_key FN). W4: schannel-pq-remediation.ps1 recipe generator (gated, reversible, precondition-checked). W5a: .github/workflows/ci.yml restored for ubuntu+windows unit tests. Verified: agent 61/61, server all-ok on this machine. Remaining for either side: W5b e2e-on-CI (needs postgres service container), corpus adversarial expansion (Linux side invited, blind cases), 5 research domains, GAP-ANALYSIS/ROADMAP, server CBOM/QRisk.
