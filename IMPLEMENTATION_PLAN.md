@@ -699,7 +699,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-014  
 **Scope:** Add bounded protocol probes, trust and hostname validation, chain/expiry/revocation analysis, SNI/STARTTLS coverage, negotiated-group evidence, and target-specific post-migration checks.  
 **Acceptance criteria:** Results distinguish reachability, untrusted TLS, protocol weakness, classical-only, and proven hybrid PQC.  
-**Verification:** Controlled TLS/PKI interoperability lab and packet-level assertions.
+**Verification:** Controlled TLS/PKI interoperability lab and packet-level assertions.  
+**Current status (2026-06-12):** **Partially implemented.** `agent/src/discovery/network.rs` probes TLS 1.x and STARTTLS (SMTP/LDAP/PostgreSQL/MySQL); produces 9 `TlsAssessmentCategory` variants with calibrated confidence values; collects cert subject/issuer/not_after/cipher/protocol into `BoundedEvidencePackage`. TLS metadata string now includes `ocsp:unchecked` fourth field (structural placeholder for WP-016 follow-on). `docs/NETWORK_ASSESSMENT.md` added (185 lines) documenting evidence schema, finding categories, and limitations. Missing: live OCSP stapling, CRL distribution point checks, CT log verification, TLS 1.0/1.1 detection, full chain validation.
 
 ## WP-017 Replace Heuristic Compliance With Versioned Controls
 
@@ -725,7 +726,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-002 through WP-018  
 **Scope:** Add unit, property, fuzz, race, integration, migration-adapter, HA, performance, chaos, and security tests. Maintain threat models for controller, agent, plugins, migration, and supply chain.  
 **Acceptance criteria:** Critical paths meet defined coverage and fault-injection gates; external penetration testing has no unresolved critical/high findings.  
-**Verification:** Release evidence package with test results, SBOMs, signatures, and remediation status.
+**Verification:** Release evidence package with test results, SBOMs, signatures, and remediation status.  
+**Current status (2026-06-12):** **Partially implemented.** Go server: 18 test packages green (agility, config, httpapi, llm, orchestrator, policy, sandbox, scanconfig, store, waveplan — 37+ tests). Rust agent: 71 tests green across discovery, mutation, storage, evidence modules. New additions: `server/internal/policy/engine_fuzz_test.go` (FuzzAssess with 10 seeds), `server/internal/store/store_test.go` (migration version uniqueness, compile-time interface assertions, integration test skeleton). Missing: race tests (`-race` flag), chaos tests, HA failover tests, performance baselines, formal threat models, penetration test evidence.
 
 ## WP-020 Add HA, Tenancy, And Scale Architecture
 
@@ -751,7 +753,7 @@ Current gaps that drive this plan:
 **Scope:** Add business owners, data-retention/HNDL risk, dependency graph, interoperability constraints, target states, exception workflow, waves, canaries, maintenance windows, approvals, budgets, and rollback SLA.  
 **Acceptance criteria:** Operators can move from inventory to an approved, risk-ranked, dependency-safe migration program.  
 **Verification:** End-to-end reference programs for web PKI, internal PKI, SSH, code signing, and application crypto.  
-**Current status (2026-06-12):** **Scaffolded.** `server/internal/waveplan/` package implements: wave plan CRUD, state machine (planned→active→completed; planned/active→cancelled), pre-activation readiness checklist, validation (name required, wave_number≥1, target≥start). DB migration 22: `wave_plans` table. REST API: `GET/POST /api/waves`, `PUT/DELETE /api/waves/{id}` (operator+admin role). React UI: `ui/src/components/WavePlanning.tsx`. 12 tests passing. Missing: canary/maintenance-window/approval-policy fields, budget tracking, dependency graph.
+**Current status (2026-06-12):** **Extended.** `WavePlan` struct now has `CanaryTargets []string`, `MaintenanceWindow string`, `ApprovalPolicy string` (validated: auto/operator/admin/empty). DB migration 25 adds these columns with `CHECK` constraint on approval_policy. 15 tests passing (3 new: approval policy validation, canary targets, default policy). Missing: budget tracking, dependency graph, automated exercise harness.
 
 ## WP-023 Measure And Enforce Crypto Agility
 
@@ -786,7 +788,7 @@ Current gaps that drive this plan:
 **Scope:** Classify telemetry/source snippets, minimize collection, require explicit LLM/memory-scan consent, redact secrets, enforce residency/retention policies, defend against prompt injection, and provide customer-controlled model endpoints.  
 **Acceptance criteria:** Sensitive source or memory content cannot leave an endpoint without an explicit, auditable policy; operators can prove deletion and residency.  
 **Verification:** Data-flow threat model, redaction corpus, prompt-injection tests, and privacy control audit.  
-**Current status (2026-06-12):** **Partially implemented.** `agent/src/evidence.rs` now has `DataClassification` enum (CryptoMetadata, CodeSnippet, ConfigContent, NetworkEndpoint, KeyFingerprint) added to `BoundedEvidencePackage`; all constructors populate it; `redact_secrets()` strips PEM private keys, password/secret/api_key assignments using regex patterns; 5 new tests for classification and redaction. Missing: PRIVACY_DATA_GOVERNANCE.md, prompt-injection defense, residency/retention enforcement, customer-controlled model endpoints (security phase).
+**Current status (2026-06-12):** **Substantially implemented.** `agent/src/evidence.rs` has `DataClassification` enum, all constructors populated, `redact_secrets()` covers 5 patterns (PEM, password, secret, api_key/apikey, AWS access key `AKIA...`). 11 tests cover classification, redaction, 512-byte cap, prompt injection input hardening, and network endpoint classification. `docs/PRIVACY_DATA_GOVERNANCE.md` written (323 lines): 10 sections covering data flows, classification, LLM consent (`BinaryLLMPolicy`), redaction (caller-must-invoke pattern), Linux AES-256-GCM encryption, key derivation, residency, and operator responsibilities. Missing: residency/retention enforcement in DB, customer-controlled model endpoints (security phase).
 
 ## WP-027 Build Interoperability And Certification Lab
 
@@ -794,7 +796,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-009, WP-015, WP-016, WP-021  
 **Scope:** Maintain repeatable interoperability matrices for TLS, PKI, HSM/KMS, SSH, code signing, libraries, and hybrid/PQC algorithm variants across supported platforms and vendors.  
 **Acceptance criteria:** Supported migration targets have published compatibility evidence, performance baselines, failure modes, and rollback procedures.  
-**Verification:** Automated lab reports attached to each release and adapter certification.
+**Verification:** Automated lab reports attached to each release and adapter certification.  
+**Current status (2026-06-12):** **Partially implemented.** `docs/ALGORITHM_COMPATIBILITY.md` (329 lines): NIST Quantum Security Level reference table, source-to-PQC migration matrix (RSA/ECDSA/ECDH/AES/SHA/TLS/PKCS7), key size comparisons, library support table (OpenSSL 3.5+ native, oqs-provider for 3.3/3.4, rustls, BoringSSL, libOQS, Go circl), migration sequencing guidance. Targets drawn from live `policies/nist-pqc-2026.yaml` and `policies/cnsa-2.0.yaml`. Missing: automated lab reports, performance baselines, failure-mode documentation, adapter certification process.
 
 ## Recommended Execution Order
 
