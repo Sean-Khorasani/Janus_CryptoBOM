@@ -11,6 +11,74 @@ use std::sync::Arc;
 use rustls::{ClientConfig, ClientConnection};
 use rustls::pki_types::ServerName;
 
+/// Structured TLS assessment category for a network probe result.
+///
+/// Stored in `Evidence.source_type` so downstream tools and the policy engine can
+/// distinguish why a finding was raised without parsing free-form strings.
+///
+/// Priority order for classification (highest first):
+///   `Unreachable` / `NoTls` / `TlsHandshakeFailed` (error states)
+///   → `TlsHybridPqc` (best crypto)
+///   → `TlsCertExpired` / `TlsCertSelfSigned` (cert issues on otherwise-OK TLS)
+///   → `TlsTls13Classical` / `TlsTls12Weak` / `TlsClassicalOnly` (protocol quality)
+#[derive(Debug)]
+enum TlsAssessmentCategory {
+    /// TCP connect failed or timed out. May indicate firewall, not necessarily a crypto issue.
+    Unreachable,
+    /// TCP connected, no TLS layer (cleartext / plaintext protocol).
+    NoTls,
+    /// TCP connected, TLS handshake failed before parameters could be observed.
+    TlsHandshakeFailed,
+    /// TLS OK, cipher suite < TLS 1.3, no PQC groups negotiated.
+    TlsClassicalOnly,
+    /// TLS 1.2 with cipher suite lacking forward secrecy, or using weak algorithms.
+    TlsTls12Weak,
+    /// TLS 1.3, classical key groups only — no hybrid PQC group negotiated.
+    TlsTls13Classical,
+    /// TLS 1.3, hybrid PQC group negotiated (e.g. X25519MLKEM768). Protocol-level definitive.
+    TlsHybridPqc,
+    /// TLS connected, but the end-entity certificate has expired.
+    TlsCertExpired,
+    /// TLS connected, but the certificate chain cannot be validated (hostname/chain mismatch).
+    ///
+    /// NOTE: `NoCertificateVerification` deliberately skips chain validation for reconnaissance,
+    /// so this variant cannot be observed during normal probing.
+    #[allow(dead_code)]
+    TlsCertInvalidChain,
+    /// TLS connected, certificate is self-signed (subject == issuer, both non-empty).
+    TlsCertSelfSigned,
+}
+
+impl TlsAssessmentCategory {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "tls-unreachable",
+            Self::NoTls => "tls-no-tls",
+            Self::TlsHandshakeFailed => "tls-handshake-failed",
+            Self::TlsClassicalOnly => "tls-classical-only",
+            Self::TlsTls12Weak => "tls-tls12-weak",
+            Self::TlsTls13Classical => "tls-tls13-classical",
+            Self::TlsHybridPqc => "tls-hybrid-pqc",
+            Self::TlsCertExpired => "tls-cert-expired",
+            Self::TlsCertInvalidChain => "tls-cert-invalid-chain",
+            Self::TlsCertSelfSigned => "tls-cert-self-signed",
+        }
+    }
+
+    fn confidence(&self) -> f64 {
+        match self {
+            // Protocol negotiation is definitive
+            Self::TlsHybridPqc | Self::NoTls => 0.95,
+            // Protocol quality observed clearly
+            Self::TlsTls13Classical | Self::TlsTls12Weak | Self::TlsClassicalOnly => 0.90,
+            // Certificate state clearly observed
+            Self::TlsCertExpired | Self::TlsCertInvalidChain | Self::TlsCertSelfSigned => 0.85,
+            // Could be firewall / transient network issue, not necessarily a crypto problem
+            Self::Unreachable | Self::TlsHandshakeFailed => 0.50,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct NetworkScanResult {
     pub observations: Vec<NetworkObservation>,
@@ -85,6 +153,7 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
 
     for target in &cfg.network_targets {
         if target.ends_with(":80") {
+            let category = TlsAssessmentCategory::NoTls;
             out.observations.push(NetworkObservation {
                 endpoint: target.clone(),
                 protocol: "http".to_string(),
@@ -98,14 +167,55 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                 pqc_hybrid: false,
                 cleartext: true,
             });
-            out.evidence.push(evidence(target, "cleartext-port-observed", target.as_bytes(), 0.8));
+            out.evidence.push(evidence(
+                target,
+                category.as_str(),
+                "cleartext-port-observed",
+                target.as_bytes(),
+                category.confidence(),
+            ));
             continue;
         }
 
         match native_probe(target, config_arc.clone()).await {
-            Ok((obs, raw, peer_certs)) => {
+            Ok((obs, _raw, peer_certs, tls_metadata)) => {
+                // Classify the probe result into a TlsAssessmentCategory.
+                // Priority: hybrid-PQC > cert issues > TLS version quality.
+                let cert_not_after = obs.certificate_not_after_unix;
+                let is_expired = cert_not_after > 0 && cert_not_after < now();
+                let is_self_signed = !obs.certificate_subject.is_empty()
+                    && !obs.certificate_issuer.is_empty()
+                    && obs.certificate_subject == obs.certificate_issuer;
+                let is_tls13 = obs.tls_version.to_ascii_lowercase().contains("tls1_3")
+                    || obs.tls_version.to_ascii_lowercase().contains("tlsv1.3")
+                    || obs.tls_version == "TLSv1.3";
+
+                let category = if obs.pqc_hybrid {
+                    TlsAssessmentCategory::TlsHybridPqc
+                } else if is_expired {
+                    TlsAssessmentCategory::TlsCertExpired
+                } else if is_self_signed {
+                    TlsAssessmentCategory::TlsCertSelfSigned
+                } else if is_tls13 {
+                    TlsAssessmentCategory::TlsTls13Classical
+                } else if obs.tls_version.to_ascii_lowercase().contains("tls1_2")
+                    || obs.tls_version.to_ascii_lowercase().contains("tlsv1.2")
+                {
+                    TlsAssessmentCategory::TlsTls12Weak
+                } else {
+                    TlsAssessmentCategory::TlsClassicalOnly
+                };
+
                 out.observations.push(obs);
-                out.evidence.push(evidence(target, "rustls-handshake", &raw, 0.90));
+                // Store the structured TLS metadata (version|cipher|alpn) in the evidence
+                // raw_artifact_sha256 field rather than a hash — per DISC-03 design.
+                out.evidence.push(evidence_with_tls_metadata(
+                    target,
+                    category.as_str(),
+                    "rustls-handshake",
+                    &tls_metadata,
+                    category.confidence(),
+                ));
 
                 // Intermediate CA Auditing
                 // Check all certificates in the chain beyond the end-entity (i.e. index >= 1)
@@ -188,8 +298,25 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                 }
             }
             Err(err) => {
+                // Distinguish connection failures (Unreachable) from TLS handshake failures.
+                let err_str = err.to_string();
+                let category = if err_str.contains("Connection timeout")
+                    || err_str.contains("os error")
+                    || err_str.contains("connection refused")
+                    || err_str.contains("network unreachable")
+                {
+                    TlsAssessmentCategory::Unreachable
+                } else {
+                    TlsAssessmentCategory::TlsHandshakeFailed
+                };
                 let raw = format!("probe-error:{err}");
-                out.evidence.push(evidence(target, "rustls-handshake-error", raw.as_bytes(), 0.3));
+                out.evidence.push(evidence(
+                    target,
+                    category.as_str(),
+                    "rustls-handshake-error",
+                    raw.as_bytes(),
+                    category.confidence(),
+                ));
             }
         }
     }
@@ -267,7 +394,20 @@ async fn negotiate_starttls(stream: &mut TcpStream, port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(NetworkObservation, Vec<u8>, Vec<rustls::pki_types::CertificateDer<'static>>)> {
+/// Returns `(observation, raw_tls_bytes, peer_certs, tls_metadata_str)`.
+///
+/// `tls_metadata_str` is formatted as `"version|cipher|alpn"` where each field is the
+/// negotiated value or `"unknown"` if unavailable.  This is stored verbatim in
+/// `Evidence.raw_artifact_sha256` for the success case (per DISC-03 design).
+async fn native_probe(
+    target: &str,
+    config: Arc<ClientConfig>,
+) -> Result<(
+    NetworkObservation,
+    Vec<u8>,
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    String,
+)> {
     let host = target.split(':').next().unwrap_or(target);
     let port = target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(443);
     
@@ -306,13 +446,22 @@ async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(Networ
     }
 
     // Complete the transaction with the peer to extract parameters
-    let protocol = conn.protocol_version()
-        .map(|v| format!("{:?}", v))
+    let protocol = conn
+        .protocol_version()
+        .map(|v| format!("{v:?}"))
         .unwrap_or_else(|| "unknown".to_string());
-        
-    let cipher_suite = conn.negotiated_cipher_suite()
+
+    let cipher_suite = conn
+        .negotiated_cipher_suite()
         .map(|cs| format!("{:?}", cs.suite()))
-        .unwrap_or_default();
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // ALPN protocol negotiated (e.g. "h2", "http/1.1")
+    let alpn = conn
+        .alpn_protocol()
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .unwrap_or("unknown")
+        .to_string();
 
     let mut cert_subject = String::new();
     let mut cert_issuer = String::new();
@@ -351,6 +500,19 @@ async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(Networ
         pqc_hybrid = hybrid;
     }
 
+    // Structured TLS metadata string: version|cipher|alpn|ocsp:<status>
+    // Stored verbatim in Evidence.raw_artifact_sha256 for the success path (DISC-03).
+    //
+    // ocsp_status is appended as a fourth pipe-delimited field.  Consumers reading
+    // only the first three fields ([0], [1], [2]) are unaffected by this addition.
+    //
+    // TODO(WP-016): implement live OCSP check — fetch OCSP responder URL from the
+    // end-entity certificate's Authority Information Access extension, submit a
+    // stapled or live OCSP request, and replace "unchecked" with "good", "revoked",
+    // or "error:<reason>".
+    let ocsp_status = "unchecked";
+    let tls_metadata = format!("{protocol}|{cipher_suite}|{alpn}|ocsp:{ocsp_status}");
+
     let obs = NetworkObservation {
         endpoint: target.to_string(),
         protocol: "tls".to_string(),
@@ -365,7 +527,7 @@ async fn native_probe(target: &str, config: Arc<ClientConfig>) -> Result<(Networ
         cleartext: false,
     };
 
-    Ok((obs, raw_bytes, peer_certs))
+    Ok((obs, raw_bytes, peer_certs, tls_metadata))
 }
 
 pub(crate) fn extract_named_group(bytes: &[u8]) -> Option<u16> {
@@ -558,9 +720,9 @@ pub(crate) fn parse_x509_der(der: &[u8]) -> (String, String, i64, String) {
             for y in 1970..year {
                 days += if is_leap_year(y) { 366 } else { 365 };
             }
-            for m in 1..month as usize {
-                days += days_in_month[m];
-                if m == 2 && is_leap_year(year) {
+            for (idx, &d) in days_in_month.iter().enumerate().take(month as usize).skip(1) {
+                days += d;
+                if idx == 2 && is_leap_year(year) {
                     days += 1;
                 }
             }
@@ -670,16 +832,51 @@ fn parse_x509_pubkey(der: &[u8]) -> Option<(String, u32)> {
     None
 }
 
-fn evidence(target: &str, tool: &str, raw: &[u8], confidence: f64) -> Evidence {
+/// Build an `Evidence` record for a network probe.
+///
+/// `source_type` should be a `TlsAssessmentCategory::as_str()` value.
+/// `artifact` is hashed into `raw_artifact_sha256` — pass the raw TLS bytes normally,
+/// or a TLS metadata string (version|cipher|alpn) for the structured success case.
+fn evidence(
+    target: &str,
+    source_type: &str,
+    tool: &str,
+    artifact: &[u8],
+    confidence: f64,
+) -> Evidence {
     let mut h = Sha256::new();
-    h.update(raw);
+    h.update(artifact);
     Evidence {
         evidence_id: Uuid::new_v4().to_string(),
-        source_type: "network".to_string(),
+        source_type: source_type.to_string(),
         source_tool: tool.to_string(),
         target: target.to_string(),
         collection_time_unix: now(),
         raw_artifact_sha256: hex::encode(h.finalize()),
+        confidence,
+        sensitivity_class: "handshake-metadata".to_string(),
+    }
+}
+
+/// Build an `Evidence` record where `raw_artifact_sha256` carries a structured TLS
+/// metadata string (`"version|cipher|alpn"`) rather than a real hash.
+///
+/// This is intentional per DISC-03: the wire field is repurposed to carry richer
+/// probe evidence while keeping the proto schema unchanged.
+fn evidence_with_tls_metadata(
+    target: &str,
+    source_type: &str,
+    tool: &str,
+    tls_metadata: &str,
+    confidence: f64,
+) -> Evidence {
+    Evidence {
+        evidence_id: Uuid::new_v4().to_string(),
+        source_type: source_type.to_string(),
+        source_tool: tool.to_string(),
+        target: target.to_string(),
+        collection_time_unix: now(),
+        raw_artifact_sha256: tls_metadata.to_string(),
         confidence,
         sensitivity_class: "handshake-metadata".to_string(),
     }
@@ -696,4 +893,109 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tls_metadata_tests {
+    #[test]
+    fn tls_metadata_includes_ocsp_status_field() {
+        // Verify the metadata format includes the fourth ocsp field.
+        // This is a unit test of the format contract — not a live probe.
+        let protocol = "TLSv1.3";
+        let cipher_suite = "TLS13_AES_256_GCM_SHA384";
+        let alpn = "h2";
+        let ocsp_status = "unchecked";
+        let tls_metadata = format!("{protocol}|{cipher_suite}|{alpn}|ocsp:{ocsp_status}");
+
+        let parts: Vec<&str> = tls_metadata.splitn(4, '|').collect();
+        assert_eq!(parts.len(), 4, "metadata must have 4 pipe-delimited fields");
+        assert_eq!(parts[0], "TLSv1.3");
+        assert_eq!(parts[1], "TLS13_AES_256_GCM_SHA384");
+        assert_eq!(parts[2], "h2");
+        assert_eq!(parts[3], "ocsp:unchecked");
+    }
+
+    #[test]
+    fn tls_metadata_first_three_fields_unaffected() {
+        // Consumers reading only the first three fields by index are unaffected by
+        // the addition of the ocsp field.
+        let metadata = "TLSv1.3|TLS13_CHACHA20_POLY1305_SHA256|http/1.1|ocsp:unchecked";
+        let parts: Vec<&str> = metadata.split('|').collect();
+        assert_eq!(parts[0], "TLSv1.3");
+        assert_eq!(parts[1], "TLS13_CHACHA20_POLY1305_SHA256");
+        assert_eq!(parts[2], "http/1.1");
+    }
+}
+
+#[cfg(test)]
+mod tls_category_tests {
+    use super::TlsAssessmentCategory;
+
+    #[test]
+    fn hybrid_pqc_and_no_tls_have_highest_confidence() {
+        assert!((TlsAssessmentCategory::TlsHybridPqc.confidence() - 0.95).abs() < 1e-9);
+        assert!((TlsAssessmentCategory::NoTls.confidence() - 0.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn protocol_quality_categories_confidence() {
+        for cat in &[
+            TlsAssessmentCategory::TlsTls13Classical,
+            TlsAssessmentCategory::TlsTls12Weak,
+            TlsAssessmentCategory::TlsClassicalOnly,
+        ] {
+            assert!(
+                (cat.confidence() - 0.90).abs() < 1e-9,
+                "expected 0.90 for {:?}",
+                cat.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn cert_issue_categories_confidence() {
+        for cat in &[
+            TlsAssessmentCategory::TlsCertExpired,
+            TlsAssessmentCategory::TlsCertInvalidChain,
+            TlsAssessmentCategory::TlsCertSelfSigned,
+        ] {
+            assert!(
+                (cat.confidence() - 0.85).abs() < 1e-9,
+                "expected 0.85 for {:?}",
+                cat.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn error_categories_have_lowest_confidence() {
+        for cat in &[
+            TlsAssessmentCategory::Unreachable,
+            TlsAssessmentCategory::TlsHandshakeFailed,
+        ] {
+            assert!(
+                (cat.confidence() - 0.50).abs() < 1e-9,
+                "expected 0.50 for {:?}",
+                cat.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn as_str_values_are_stable() {
+        assert_eq!(TlsAssessmentCategory::Unreachable.as_str(), "tls-unreachable");
+        assert_eq!(TlsAssessmentCategory::NoTls.as_str(), "tls-no-tls");
+        assert_eq!(
+            TlsAssessmentCategory::TlsHandshakeFailed.as_str(),
+            "tls-handshake-failed"
+        );
+        assert_eq!(
+            TlsAssessmentCategory::TlsHybridPqc.as_str(),
+            "tls-hybrid-pqc"
+        );
+        assert_eq!(
+            TlsAssessmentCategory::TlsCertSelfSigned.as_str(),
+            "tls-cert-self-signed"
+        );
+    }
 }
