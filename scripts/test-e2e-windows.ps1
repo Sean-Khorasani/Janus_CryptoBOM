@@ -18,7 +18,7 @@ if (!(Test-Path $ServerExe)) { throw "Server executable not found: $ServerExe" }
 if (!(Test-Path $AgentExe)) { throw "Agent executable not found: $AgentExe" }
 
 if (Get-Command docker -ErrorAction SilentlyContinue) {
-  docker compose -f (Join-Path $Root "infra\docker-compose.yml") up -d postgres
+  docker compose -f (Join-Path $Root "docker-compose.yml") up -d postgres
 } else {
   Write-Warning "Docker not found. Ensure PostgreSQL is running at postgres://janus:janus@localhost:5432/janus?sslmode=disable"
 }
@@ -27,6 +27,11 @@ $env:JANUS_DATABASE_URL = "postgres://janus:janus@localhost:5432/janus?sslmode=d
 $env:JANUS_GRPC_ADDR = "127.0.0.1:9443"
 $env:JANUS_HTTP_ADDR = "127.0.0.1:8080"
 $env:JANUS_COMMAND_SIGNING_KEY = "local-development-command-signing-key"
+# Credentials are now env-configured (S1) — no compiled-in passwords. Provide the
+# dev login the test scripts expect.
+$env:JANUS_ADMIN_PASSWORD = "janus-admin-pass"
+$env:JANUS_OPERATOR_PASSWORD = "janus-operator-pass"
+$env:JANUS_VIEWER_PASSWORD = "janus-viewer-pass"
 
 $server = Start-Process -FilePath $ServerExe -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 4
