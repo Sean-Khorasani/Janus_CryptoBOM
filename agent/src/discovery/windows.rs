@@ -39,7 +39,58 @@ pub async fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
         }
     }
     carve_key_artifacts(cfg, &mut out);
+    // W4: when SChannel is PQ-capable-but-disabled, emit the reviewable remediation
+    // recipe next to the report. Generated only — applying it is an operator decision.
+    let pq_disabled = out.components.iter().find(|c| {
+        c.component_type == "windows-tls-group-policy"
+            && c.algorithms.iter().any(|a| a.status == "schannel-pq-group-disabled")
+    });
+    if let Some(c) = pq_disabled {
+        let curves = c.algorithms.first().map(|a| a.curve.clone()).unwrap_or_default();
+        let recipe = schannel_pq_recipe(&c.version, &curves);
+        let report_dir = std::path::Path::new(&cfg.report_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let _ = std::fs::write(report_dir.join("schannel-pq-remediation.ps1"), recipe);
+    }
     Ok(out)
+}
+
+/// Reviewable PowerShell recipe enabling the IANA-registered hybrid group
+/// X25519MLKEM768 in SChannel's curve order. Dry-run by default; -Apply gated;
+/// preconditions checked; rollback is the inverse cmdlet. Never executed by the agent.
+fn schannel_pq_recipe(build: &str, current_curves: &str) -> String {
+    format!(
+        r#"# janus remediation recipe: enable SChannel hybrid PQ key exchange
+# Finding: schannel-pq-group-disabled (build {build}; curve order: {current_curves})
+# REVIEW REQUIRED — run without arguments for a dry run; -Apply to make the change.
+# Rollback: Disable-TlsEccCurve -Name X25519MLKEM768
+param([switch]$Apply)
+$ErrorActionPreference = 'Stop'
+
+# Precondition 1: CNG must expose ML-KEM (PQ-capable OS build).
+$cap = reg query "HKLM\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\Microsoft Primitive Provider\UM" /s /v Functions 2>$null
+if (-not ($cap | Select-String -SimpleMatch 'ML-KEM')) {{
+    Write-Error 'CNG does not register ML-KEM on this build — OS update required before enabling hybrid TLS groups.'
+}}
+# Precondition 2: group must not already be enabled.
+$curves = Get-TlsEccCurve
+if ($curves -contains 'X25519MLKEM768') {{
+    Write-Output 'X25519MLKEM768 already enabled — nothing to do.'
+    exit 0
+}}
+Write-Output "Current curve order: $($curves -join ', ')"
+Write-Output 'Planned change: Enable-TlsEccCurve -Name X25519MLKEM768 -Position 0'
+if ($Apply) {{
+    Enable-TlsEccCurve -Name X25519MLKEM768 -Position 0
+    Write-Output "New curve order: $((Get-TlsEccCurve) -join ', ')"
+    Write-Output 'Validate with an outbound TLS 1.3 handshake to a hybrid-capable peer, then monitor negotiation failures; rollback: Disable-TlsEccCurve -Name X25519MLKEM768'
+}} else {{
+    Write-Output 'Dry run only. Re-run with -Apply after review.'
+}}
+"#
+    )
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -265,6 +316,7 @@ fn parse_tls_group_policy(raw: &str) -> CbomComponent {
 /// Key/cert artifact carving over scan roots: records hash + metadata ONLY (file name,
 /// size, header type) — never key material. PEM headers are classified from the first
 /// bytes; PFX/JKS by extension.
+#[allow(dead_code)] // invoked from the Windows-only scan(); parsers stay cross-platform for tests
 fn carve_key_artifacts(cfg: &AgentConfig, out: &mut ScanResult) {
     use std::path::Path;
     for root in &cfg.scan_roots {
@@ -1078,6 +1130,16 @@ HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\Micro
         let a = algorithm_from_windows_line("ML-DSA-65", CryptoRole::CertSignature, 0, "certutil");
         assert!(!a.quantum_vulnerable);
         assert_eq!(a.name, "ML-DSA");
+    }
+
+    #[test]
+    fn schannel_recipe_is_gated_and_reversible() {
+        let r = schannel_pq_recipe("26200", "curve25519,NistP256,NistP384");
+        assert!(r.contains("param([switch]$Apply)"), "must be dry-run by default");
+        assert!(r.contains("Disable-TlsEccCurve"), "must document rollback");
+        assert!(r.contains("ML-KEM"), "must check CNG capability precondition");
+        assert!(r.contains("X25519MLKEM768"));
+        assert!(r.starts_with("# janus remediation recipe"));
     }
 
     #[test]
