@@ -125,10 +125,13 @@ if $TARGET_ALL; then
     TARGET_DESC="ALL agents"
 elif [[ -n "$TARGET_AGENT" ]]; then
     # Accept either exact hostname match or host_uuid prefix/exact match.
-    AGENT_WHERE="(hostname = '$(echo "$TARGET_AGENT" | sed "s/'/''/g")' OR host_uuid = '$(echo "$TARGET_AGENT" | sed "s/'/''/g")' OR host_uuid LIKE '$(echo "$TARGET_AGENT" | sed "s/'/''/g")%')"
+    # SQL-escape single quotes via bash parameter expansion (doubles each ').
+    AGENT_ESC=${TARGET_AGENT//\'/\'\'}
+    AGENT_WHERE="(hostname = '${AGENT_ESC}' OR host_uuid = '${AGENT_ESC}' OR host_uuid LIKE '${AGENT_ESC}%')"
     TARGET_DESC="agent matching '${TARGET_AGENT}'"
 elif [[ -n "$TARGET_PATTERN" ]]; then
-    AGENT_WHERE="hostname LIKE '$(echo "$TARGET_PATTERN" | sed "s/'/''/g")'"
+    PATTERN_ESC=${TARGET_PATTERN//\'/\'\'}
+    AGENT_WHERE="hostname LIKE '${PATTERN_ESC}'"
     TARGET_DESC="agents matching hostname pattern '${TARGET_PATTERN}'"
 fi
 

@@ -45,7 +45,7 @@ fmt-check:
 lint:
 	cd server && go vet -mod=readonly ./...
 	cd agent && cargo clippy --locked --all-targets -- -D warnings
-	find scripts Test -type f -name '*.sh' -print0 | xargs -0 shellcheck
+	find scripts tests -type f -name '*.sh' -print0 | xargs -0 shellcheck
 
 proto-check:
 	bash scripts/proto/verify.sh
