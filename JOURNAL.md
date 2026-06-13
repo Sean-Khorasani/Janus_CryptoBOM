@@ -148,3 +148,19 @@ Implementing this batch end-to-end (best design, cross-platform). Scope and file
 - Plan statuses updated. UX-009 marked Partial (bounded scroll done; full responsive card layout still future). All server changes build + pass store/httpapi tests; UI builds clean (tsc+vite).
 
 Open residual: UX-009 full responsive card layout for narrow screens. Everything else in the UX-001..016 audit is Implemented/Fixed.
+
+## 2026-06-13 — AUTH-003 + OPS-001 delivered (Linux/WSL-side)
+
+**AUTH-003** (CSR access control): `/api/certificates/csr` removed from the public allowlist in `auth.go`; route wrapped with `RequireRole(operator,admin)` in `server.go`; `createCSR` now writes a `CSR_GENERATE` audit log with actor identity. Tests `auth_csr_test.go`: unauthenticated → 401 (AuthMiddleware), viewer → 403, operator clears the guard. Mock store gained a no-op `InsertAuditLog`.
+
+**OPS-001** (graceful shutdown): `JANUS_GRACEFUL_SHUTDOWN_SECONDS` (default 30, clamped 1–300) in `config.go`. `httpapi.New` now returns `(http.Handler, *API)` — **signature change, only caller is main.go** — exposing `api.BeginDraining()`. Health reports `{"status":"draining"}` + 503 while draining; new non-health requests get 503 via `drainGuard` middleware (Retry-After: 5). `grpcserver.Server` gained a `webhookWg sync.WaitGroup` (dispatch goroutine wrapped) + `WaitWebhooks(timeout) bool`. main.go shutdown sequence: BeginDraining → grpc GracefulStop → drain webhooks → HTTP Shutdown, all bounded by the grace window. Tests: `httpapi/drain_test.go` (health draining + drainGuard), `grpcserver/drain_test.go` (clean drain + timeout, race-clean).
+
+**OPS-001 agent side — NO change needed (and comms.rs left untouched as in-flight WIP).** Telemetry rides gRPC, not HTTP: `comms.rs` loads queued payloads from SQLite, streams them, and only calls `db.delete_payload` AFTER the stream succeeds (comms.rs:170-172). On server shutdown the stream errors, the `?` returns early, payloads stay queued → retried on reconnect. The HTTP heartbeat's `.error_for_status()?` already turns a 503 into retry-next-cycle (heartbeats are ephemeral, not persisted). gRPC `GracefulStop` waits for the in-flight stream handler to finish persisting before returning. So the no-lost-telemetry guarantee already holds.
+
+CLAUDE.md env table updated with `JANUS_GRACEFUL_SHUTDOWN_SECONDS`. Server: vet clean, binary builds, 11 test packages pass. **Windows side: note the `httpapi.New` 2-value return** if you touch main.go.
+
+## 2026-06-13 — UX backlog cleared (UX-009 done + final sweep)
+
+- UX-009 (a11b5f2): responsive card layout for the fleet inventory on small screens (table is lg-only; cards below) — no more forced 1200px horizontal scroll. Last open UX item.
+- Final sweep: cross-referenced every UI /api/* call against registered routes → ZERO unrouted endpoints remain. Checked MigrationConsole/PolicyStudio/ComplianceMatrix/CbomViewer/WavePlanning/AgilityDashboard for unbounded lists: CbomViewer already slices to 12; the migrations/compliance/policy lists are single-purpose full-tab views where page-scroll is the right pattern (bounding = nested scrollbars), so deliberately unchanged.
+- Status: ALL catalogued UX-001..016 are Implemented/Fixed. No open UI/UX items remain.
