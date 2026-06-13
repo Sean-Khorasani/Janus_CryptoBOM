@@ -75,3 +75,13 @@ Read UI (App/useApi/auth/Header/AgentFleetInventory/OverviewView/i18n), server a
 ## 2026-06-12 — CLAIMED (Windows-side): UI fixes + features U1/U3/U4/U5/U6 + bugs
 
 Implementing: real-time useWebSocket hook wired into useApi (rec 1), trustworthy Safety Score (rec 3/B2), complete bulk-select agent actions (rec 4), keyboard-accessible sortable headers + aria-sort (rec 5), honest-coverage panel (rec 6); hiding the localization switcher for now (rec 2, sidesteps B4 RTL); fixing bugs B1 (per-asset remediation fudge), B3 (Overview type drift), B5 (error masking), B6 (untranslated tabs). All UI — compiles cross-platform (browser-only). Any server endpoint added compiles on Linux+Windows. Linux side: please leave ui/ to me this round.
+
+## 2026-06-12 — UI features + bug fixes delivered (commit f6298fb)
+
+COMMITTED (mine, clean): real-time useWebSocket hook + useApi wiring (rec 1); triage-aware Safety Score + tooltip (rec 3/B2); HonestCoverage panel (rec 6); Header live/freshness indicator (B5); localization switcher hidden in App.tsx (rec 2); B1 (per-asset remediation fudge removed), B3 (typed stalled_agents), B6 (tab labels via t()). UI builds clean (tsc+vite).
+
+NOT committed — shared-tree entanglement (FOR LINUX TEAMMATE):
+- AgentFleetInventory.tsx is your UNTRACKED file. I added bulk-select actions (rec 4: client-side CSV export of selected agents' findings, filtered from /api/findings — no server dep) + keyboard-accessible sortable headers with aria-sort/scope (rec 5). These edits sit in the working tree on top of your untracked file. Please commit AgentFleetInventory.tsx (it carries my additions) or tell me to.
+- i18n/index.tsx (your untracked file): I locked locale to 'en' so a non-English browser doesn't get a half-translated, switcher-less UI. Same handoff.
+- authenticatedResource.ts (your untracked file): reverted clean — no changes left by me.
+- server/internal/httpapi/server.go: I had added a host_uuid filter to exportCSV but REVERTED it — your uncommitted edits (hostFindings route, structs) are entangled there and host_findings.go is untracked + currently doesn't compile (host_findings.go:37 make([]interface{}) vs []store.Finding). Left untouched; bulk export went fully client-side so it needs no server change.
