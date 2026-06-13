@@ -673,7 +673,7 @@ fn patterns() -> Result<Vec<Pattern>> {
         (r"\bRSA(_|\b|\.|::|With|with)", "RSA", "RSA", CryptoRole::Signature),
         (r"\bECDSA\b|\becdsa\b", "ECDSA", "ECC", CryptoRole::Signature),
         (r"\bECDH(E)?\b|\becdh\b", "ECDHE", "ECC", CryptoRole::KeyExchange),
-        (r"\bDiffieHellman\b|\bDH_generate\b|\bdiffie[-_]?hellman\b", "DH", "DH", CryptoRole::KeyExchange),
+        (r"\bDiffieHellman\b|\bDH_generate|\bdiffie[-_]?hellman\b", "DH", "DH", CryptoRole::KeyExchange),
         (r"\bDSA(?:_|\b)", "DSA", "DSA", CryptoRole::Signature),
         (r"(?i)\bed25519(?:_|\b)|\bEdDSA\b|\bed448(?:_|\b)", "Ed25519", "ECC", CryptoRole::Signature),
         (r"(?i)\bx25519(?:_|\b)|\bcurve25519(?:_|\b)|\bx448(?:_|\b)", "X25519", "ECC", CryptoRole::KeyExchange),
@@ -1119,6 +1119,102 @@ mod detection_quality_tests {
         assert!(is_test_path(Path::new("crate/tests/integration.rs")));
         assert!(is_test_path(Path::new("pkg/__tests__/x.spec.ts")));
         assert!(!is_test_path(Path::new("src/contest/scanner.rs")));
+    }
+}
+
+/// Labeled detection corpus with measured precision/recall (DETECTION-IMPROVEMENTS.md §2.2-3).
+/// A file counts as a POSITIVE when the scan yields a quantum-vulnerable finding with
+/// status != test-only and confidence >= 0.5. The corpus was authored adversarially
+/// against known FP/FN classes; extend it whenever detection logic changes and record
+/// the printed numbers in the analysis doc.
+#[cfg(test)]
+mod detection_corpus {
+    use super::*;
+    use crate::config::AgentConfig;
+
+    // (relative path, content, expect_qv_finding)
+    const CORPUS: &[(&str, &str, bool)] = &[
+        // True positives — must be flagged
+        ("app/Jca.java", r#"Cipher c = Cipher.getInstance("RSA/ECB/PKCS1Padding");"#, true),
+        ("app/hash.js", r#"const h = crypto.createHash('md5');"#, true),
+        ("app/sign.go", "sig, err := ecdsa.SignASN1(rand.Reader, priv, digest)", true),
+        ("app/kex.c", "DH_generate_key(dh);", true),
+        ("app/legacy.py", r#"h = hashlib.new("sha1")"#, true),
+        ("conf/tls.conf", "ciphers = \"ECDHE-RSA-AES256-GCM-SHA384\"\n", true),
+        ("app/sshkey.rs", "let sig = ed25519_sign(&msg, &key);", true),
+        ("app/kx.ts", "const shared = x25519_derive(base, peer);", true),
+        // True negatives — must NOT be flagged (each targets a known FP class)
+        ("app/comment.go", "// RSA is no longer used here\nfunc nothing() {}", false),
+        ("app/log.js", r#"log.info("uses RSA somewhere");"#, false),
+        ("tests/rsa_test.go", "k, _ := rsa.GenerateKey(rand.Reader, 2048)", false),
+        ("app/pq.rs", "let kp = ML_DSA_keygen();", false),
+        ("conf/hybrid.conf", "Groups = X25519MLKEM768\n", false),
+        ("app/aes.go", "alg := AES_256", false),
+    ];
+
+    #[test]
+    fn corpus_precision_recall() {
+        let dir = std::env::temp_dir().join(format!("janus-corpus-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (rel, content, _) in CORPUS {
+            let p = dir.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, content).unwrap();
+        }
+        let cfg = AgentConfig {
+            scan_roots: vec![dir.display().to_string()],
+            report_path: dir.join("report.html").display().to_string(),
+            ..AgentConfig::default()
+        };
+        let result = scan(&cfg, false).unwrap();
+
+        let flagged: Vec<String> = result
+            .components
+            .iter()
+            .filter(|c| {
+                c.algorithms.iter().any(|a| {
+                    a.quantum_vulnerable && a.status != "test-only" && a.confidence >= 0.5
+                })
+            })
+            .map(|c| c.file_path.replace('\\', "/"))
+            .collect();
+        let is_flagged =
+            |rel: &str| flagged.iter().any(|f| f.ends_with(&rel.replace('\\', "/")));
+
+        let (mut tp, mut fp_, mut fn_) = (0u32, 0u32, 0u32);
+        for (rel, _, expect) in CORPUS {
+            match (expect, is_flagged(rel)) {
+                (true, true) => tp += 1,
+                (true, false) => {
+                    fn_ += 1;
+                    eprintln!("FN: {rel}");
+                }
+                (false, true) => {
+                    fp_ += 1;
+                    eprintln!("FP: {rel}");
+                }
+                (false, false) => {}
+            }
+        }
+        let precision = tp as f64 / (tp + fp_).max(1) as f64;
+        let recall = tp as f64 / (tp + fn_).max(1) as f64;
+        eprintln!(
+            "detection corpus v1: files={} tp={tp} fp={fp_} fn={fn_} precision={precision:.3} recall={recall:.3}",
+            CORPUS.len()
+        );
+
+        // The hybrid-PQ config must inventory as hybrid-pqc, never as classical X25519.
+        let hybrid = result
+            .components
+            .iter()
+            .find(|c| c.file_path.replace('\\', "/").ends_with("conf/hybrid.conf"))
+            .expect("hybrid.conf must produce an inventory component");
+        assert!(hybrid.algorithms.iter().any(|a| a.family == "hybrid-pqc"));
+        assert!(hybrid.algorithms.iter().all(|a| !a.quantum_vulnerable));
+
+        let _ = fs::remove_dir_all(&dir);
+        assert!(precision >= 0.99, "precision regressed: {precision}");
+        assert!(recall >= 0.99, "recall regressed: {recall}");
     }
 }
 

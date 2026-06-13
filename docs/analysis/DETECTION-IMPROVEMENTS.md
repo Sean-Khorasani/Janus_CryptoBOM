@@ -47,7 +47,7 @@ Current state: per-finding unified diffs from a line-level heuristic (now role-a
 3. **Placement**: build/CI PR-authoring is the preferred venue for source findings (§12); host mutation only for config classes already covered by `mutation.rs`'s backup→apply→validate→rollback pipeline.
 
 ## 4. Honest residuals
-- Precision/recall numbers are **not yet measured** — the fixture corpus (2.2-3) is the prerequisite; this session's improvements are justified by construction (each removes a provable FN/FP class), not by benchmark.
+- **Measured (2026-06-12): corpus v1 = 14 labeled files → precision 1.000, recall 1.000** (`cargo test corpus_precision_recall -- --nocapture` in `agent/`). The corpus immediately caught one real FN during authoring (`DH_generate_key` — trailing `\b` vs underscore, fixed). Caveats: 14 files is small and was authored by the same session that built the engine — treat 1.0/1.0 as an upper bound on this corpus, not a field estimate. Next step: grow it adversarially (wrappers, reflection, mixed-language files, real-world OSS excerpts) and have the Linux side add cases blind.
 - Wrappers, reflection, homegrown crypto, and string-built algorithm names remain undetected (known ceiling, §4.1).
 - D10 (cross-algorithm corroboration inflation) intentionally left pending calibration data.
 - `agent/src/policy.rs` (offline severity) and `server/internal/policy` were not re-reviewed this session; the verify-only urgency split (2.2-2) needs both.
