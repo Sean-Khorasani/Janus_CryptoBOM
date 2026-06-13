@@ -98,3 +98,20 @@ LLM-021 (agent never initiates LLM during scan) — DONE, committed 92d539a, 15 
 - Plan: 02f6b10 — refined requirement + normative flow + acceptance criteria under LLM-021/022.
 - Shared-tree note: ui/node_modules got overwritten cross-platform (Linux binaries) — ran npm install to restore Windows build; ui/package-lock.json left uncommitted (env artifact, differs per OS). The git-worktree split (ONBOARDING.md) would prevent this.
 - Residual for LLM-022: batch grouping is in-memory (verdicts persist in DB); a durable batches table is a future nicety. Optional bulk-verdicts endpoint would avoid the per-row verdict GETs on page load.
+
+## 2026-06-13 — UI/UX audit (UX-001..009)
+
+Deep UI/UX pass. Plan section "UI/UX Audit (UX-001..009)" added with severities + acceptance criteria.
+
+COMMITTED (mine, clean):
+- UX-001 server fix (11679d5): assetSelect zeroes scan_progress + current_scan_path for offline agents → fixes the user-reported "two offline agents show 100% and 0%" at the source for all consumers.
+- UX-003/004 (7edf24f): registered /api/reports/{scanId}/findings (store.ReportFindings) and /api/scan-config/schema (scanconfig.CurrentSchema) — both were unregistered → 404. Unbreaks Findings-JSON downloads and the Configure modal's Apply (was permanently disabled). New file report_routes.go; server.go diff = 2 route lines. Build + httpapi tests pass.
+- Plan UX section committed.
+
+WORKING-TREE handoff (FOR LINUX TEAMMATE — your untracked HomeAgentStatus.tsx):
+- UX-001 UI polish: live progress bar now renders only when isScanning (online + non-idle phase); offline shows "Not connected — no active scan", idle shows "Idle — no scan running". No more 0%/100% frozen bars.
+- UX-005: rescan status poll is now bounded (maxAttempts=120) so an offline-queued command no longer loops forever.
+- UI builds clean. Not committed (your untracked file) — please commit HomeAgentStatus.tsx with these, or hand to me.
+
+COORDINATE (UX-002, big): /api/agents/{id} + /commands + /config + /scans + /connections have NO server routes → Rescan / Configure / agent-detail drawer are 404 end-to-end. This overlaps your agents→hosts rename (you added /api/hosts/{uuid}/findings) and needs new store methods (ScansByHost, ConnectionsByHost, command enqueue/get, single-asset). Did not build competing /api/agents/* routes. Let's split: you own the hosts/agents endpoint family; tell me which slices to take.
+Still open (your untracked AgentFleetInventory.tsx): UX-001 progress column, UX-007 status-filter enum mismatch.
