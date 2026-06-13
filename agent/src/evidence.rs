@@ -1,4 +1,6 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// Sensitivity classification for evidence data (RESEARCH.md §4.4)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +32,28 @@ pub enum EvidenceSource {
     SideChannelPattern,
 }
 
+/// Classification of what type of data is in this evidence package.
+/// Drives LLM consent decisions and data retention policies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClassification {
+    /// Pure cryptographic metadata — algorithm names, key sizes, cipher suites.
+    /// No source code, no config values, no PII. Safe for all destinations.
+    CryptoMetadata,
+    /// Anonymized source snippet with crypto API usage context.
+    /// May contain file paths. Requires LLM consent if sent externally.
+    CodeSnippet,
+    /// Configuration file excerpt. May contain hostnames, ports, algorithm choices.
+    /// Requires consent before sending to external LLM.
+    ConfigContent,
+    /// Network endpoint metadata — hostname, port, TLS version, cipher suite.
+    /// No certificate private material. Low sensitivity.
+    NetworkEndpoint,
+    /// Hashed or truncated key material — only safe representations (hashes, truncated IDs).
+    /// Never the raw key. For key fingerprinting only.
+    KeyFingerprint,
+}
+
 /// A bounded, privacy-safe evidence package sent to LLM analysis.
 /// NEVER contains raw file contents. Context snippets are capped at MAX_CONTEXT_BYTES.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +73,8 @@ pub struct BoundedEvidencePackage {
     pub intent_labels: Vec<String>,
     pub sensitivity: SensitivityLabel,
     pub collection_timestamp: String, // ISO 8601
+    /// What kind of data this package contains — drives LLM consent and retention policy.
+    pub data_classification: DataClassification,
 }
 
 pub const MAX_CONTEXT_BYTES: usize = 512;
@@ -83,6 +109,7 @@ impl BoundedEvidencePackage {
             intent_labels,
             sensitivity: SensitivityLabel::Internal,
             collection_timestamp: now_iso8601(),
+            data_classification: DataClassification::CodeSnippet,
         }
     }
 
@@ -106,6 +133,7 @@ impl BoundedEvidencePackage {
             intent_labels: vec!["negotiate".to_string()],
             sensitivity: SensitivityLabel::Internal,
             collection_timestamp: now_iso8601(),
+            data_classification: DataClassification::NetworkEndpoint,
         }
     }
 
@@ -130,6 +158,7 @@ impl BoundedEvidencePackage {
             intent_labels: vec![],
             sensitivity: SensitivityLabel::Internal,
             collection_timestamp: now_iso8601(),
+            data_classification: DataClassification::CryptoMetadata,
         }
     }
 
@@ -158,6 +187,7 @@ impl BoundedEvidencePackage {
             intent_labels: vec![],
             sensitivity: SensitivityLabel::Internal,
             collection_timestamp: now_iso8601(),
+            data_classification: DataClassification::CryptoMetadata,
         }
     }
 
@@ -181,6 +211,31 @@ impl BoundedEvidencePackage {
         }
         Ok(())
     }
+}
+
+/// Redact known secret patterns from a source context string before including in evidence.
+/// Patterns: PEM private keys, and key-value lines containing password/secret/api_key.
+pub fn redact_secrets(input: &str) -> String {
+    static PATTERNS: OnceLock<(Regex, Regex, Regex, Regex)> = OnceLock::new();
+    let (pem, password, secret, apikey) = PATTERNS.get_or_init(|| {
+        (
+            // PEM private key blocks — (?s) enables dotall so . crosses newlines
+            Regex::new(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----")
+                .expect("pem regex"),
+            // password = value  or  password: value  (case-insensitive)
+            Regex::new(r"(?i)(password\s*[:=]\s*)\S+").expect("password regex"),
+            // secret = value  or  secret: value  (case-insensitive)
+            Regex::new(r"(?i)(secret\s*[:=]\s*)\S+").expect("secret regex"),
+            // api_key = value  or  apikey = value  (case-insensitive)
+            Regex::new(r"(?i)(api_?key\s*[:=]\s*)\S+").expect("apikey regex"),
+        )
+    });
+
+    let s = pem.replace_all(input, "[REDACTED]");
+    let s = password.replace_all(&s, "${1}[REDACTED]");
+    let s = secret.replace_all(&s, "${1}[REDACTED]");
+    let s = apikey.replace_all(&s, "${1}[REDACTED]");
+    s.into_owned()
 }
 
 /// Returns current time as a simple ISO 8601 UTC timestamp (seconds precision).
@@ -277,5 +332,76 @@ mod tests {
         let pkg =
             BoundedEvidencePackage::from_tls("f1", "RSA-2048", "TlsHandshake", 0.9, "host:443");
         assert_eq!(pkg.sensitivity, SensitivityLabel::Internal);
+    }
+
+    // --- WP-026: DataClassification tests ---
+
+    #[test]
+    fn from_source_produces_code_snippet_classification() {
+        let pkg = BoundedEvidencePackage::from_source(
+            "f-class-1",
+            "AES-128",
+            "RegexMatch",
+            0.8,
+            "src/lib.rs",
+            [5, 7],
+            "EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv);",
+            vec![],
+        );
+        assert_eq!(pkg.data_classification, DataClassification::CodeSnippet);
+    }
+
+    #[test]
+    fn from_tls_produces_network_endpoint_classification() {
+        let pkg =
+            BoundedEvidencePackage::from_tls("f-class-2", "TLS-1.2", "TlsHandshake", 0.95, "api.example.com:443");
+        assert_eq!(pkg.data_classification, DataClassification::NetworkEndpoint);
+    }
+
+    // --- WP-026: redact_secrets tests ---
+
+    #[test]
+    fn redact_secrets_removes_pem_private_key_block() {
+        let input = "some code before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xHn/ygWep4\n-----END RSA PRIVATE KEY-----\nsome code after";
+        let output = redact_secrets(input);
+        assert!(!output.contains("BEGIN RSA PRIVATE KEY"), "PEM block should be redacted");
+        assert!(!output.contains("MIIEpAIBAAK"), "key body should be redacted");
+        assert!(output.contains("[REDACTED]"), "should contain redaction marker");
+        assert!(output.contains("some code before"), "surrounding code should be preserved");
+        assert!(output.contains("some code after"), "surrounding code should be preserved");
+    }
+
+    #[test]
+    fn redact_secrets_removes_password_value() {
+        let input = "host = localhost\npassword = mypassword123\nport = 5432";
+        let output = redact_secrets(input);
+        assert!(!output.contains("mypassword123"), "password value should be redacted");
+        assert!(output.contains("password"), "key name should be preserved");
+        assert!(output.contains("[REDACTED]"), "should contain redaction marker");
+        assert!(output.contains("host = localhost"), "unrelated lines should be preserved");
+    }
+
+    #[test]
+    fn redact_secrets_leaves_clean_crypto_code_untouched() {
+        let input = "EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv)";
+        let output = redact_secrets(input);
+        assert_eq!(input, output, "clean crypto code should pass through unchanged");
+    }
+
+    #[test]
+    fn redact_secrets_removes_secret_value() {
+        let input = "secret: abcdef1234567890";
+        let output = redact_secrets(input);
+        assert!(!output.contains("abcdef1234567890"));
+        assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_removes_api_key_value() {
+        let input = "api_key = sk-proj-xxxxxxxxxxxxxxxx\napikey=anothertoken";
+        let output = redact_secrets(input);
+        assert!(!output.contains("sk-proj-xxxxxxxxxxxxxxxx"));
+        assert!(!output.contains("anothertoken"));
+        assert_eq!(output.matches("[REDACTED]").count(), 2);
     }
 }

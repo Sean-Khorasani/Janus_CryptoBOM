@@ -690,7 +690,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-006, WP-014  
 **Scope:** Replace token substitution with adapter/compiler-aware transformations, dependency updates, compatibility analysis, generated tests, human approval, and signed provenance. Treat LLM output as untrusted suggestions.  
 **Acceptance criteria:** No generated patch can enter execution without parse/build/test validation and approval policy.  
-**Verification:** Golden migration repositories and mutation testing.
+**Verification:** Golden migration repositories and mutation testing.  
+**Current status (2026-06-12):** **Partially implemented.** `server/internal/sandbox/simulator.go` now includes `CompatibilityAnalysis` and `DependencyUpdate` structs; `SimulationResult` has `HumanApprovalRequired: true` (hardcoded) and `CompatibilityAnalysis` field; `buildCompatibilityAnalysis()` generates breaking-change lists, dependency update hints (cargo/npm/go/pip), rollback risk, and hybrid TLS requirements based on algorithm migration path. `simulator_test.go` with 5+ tests. Missing: compiler-aware transform adapters, golden migration repos, mutation testing, signed provenance.
 
 ## WP-016 Make Network And PKI Assessment Evidence-Grade
 
@@ -784,7 +785,8 @@ Current gaps that drive this plan:
 **Depends on:** WP-003, WP-013, WP-014  
 **Scope:** Classify telemetry/source snippets, minimize collection, require explicit LLM/memory-scan consent, redact secrets, enforce residency/retention policies, defend against prompt injection, and provide customer-controlled model endpoints.  
 **Acceptance criteria:** Sensitive source or memory content cannot leave an endpoint without an explicit, auditable policy; operators can prove deletion and residency.  
-**Verification:** Data-flow threat model, redaction corpus, prompt-injection tests, and privacy control audit.
+**Verification:** Data-flow threat model, redaction corpus, prompt-injection tests, and privacy control audit.  
+**Current status (2026-06-12):** **Partially implemented.** `agent/src/evidence.rs` now has `DataClassification` enum (CryptoMetadata, CodeSnippet, ConfigContent, NetworkEndpoint, KeyFingerprint) added to `BoundedEvidencePackage`; all constructors populate it; `redact_secrets()` strips PEM private keys, password/secret/api_key assignments using regex patterns; 5 new tests for classification and redaction. Missing: PRIVACY_DATA_GOVERNANCE.md, prompt-injection defense, residency/retention enforcement, customer-controlled model endpoints (security phase).
 
 ## WP-027 Build Interoperability And Certification Lab
 
