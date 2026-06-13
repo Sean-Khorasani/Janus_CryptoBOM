@@ -39,3 +39,7 @@ W1 Windows agent depth (cert-store chain analysis, SChannel/CNG policy, PFX/JKS 
 ## 2026-06-12 — W1/W2 delivered (commit follows), W4/W5 status
 
 W2 done: CNG PQ capability + SChannel group policy sensors, grounded in live probe of build 26200.8655 (ML-KEM/ML-DSA present in CNG; SChannel curves classical-only -> canonical finding). W1 done: cert-store QV flagging, weak-key, combo sig-alg fix, PQ-cert recognition, self-signed typing, PFX/PEM/JKS carving (metadata-only). W3 done earlier (fixes in tree, unstaged). W4 partial: remediation hint embedded in the SChannel finding; full recipe artifacts (PowerShell/registry diff + mutation.rs validation) remain. W5 not started (e2e needs PostgreSQL; CI workflow recreation pending). Linux side: please run make linux-gate over discovery changes - windows.rs parsers compile cross-platform with tests.
+
+## 2026-06-12 — CLAIMED (Windows-side): W6 measured detection corpus, W4 completion, W5a CI workflow
+
+W6: labeled fixture corpus + precision/recall measurement as a cargo test (mission requires numbers, not impressions). W4: SChannel PQ remediation recipe artifact (generated, never auto-applied). W5a: recreate dual-OS GitHub Actions workflow (unit tests only; e2e/HSM stays local per 5ff505e rationale).
