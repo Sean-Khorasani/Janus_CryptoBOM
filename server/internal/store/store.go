@@ -1236,7 +1236,15 @@ func (p *Postgres) Assets(ctx context.Context) ([]Asset, error) {
 
 const assetSelect = `
 SELECT a.host_uuid, a.hostname, a.os_name, a.os_version, a.arch, a.execution_mode,
-       a.last_seen, a.scan_progress, a.current_scan_path, a.cpu_usage, a.mem_usage,
+       a.last_seen,
+       -- scan_progress / current_scan_path are LIVE values only meaningful while an
+       -- agent is connected and scanning. A disconnected agent freezes at its last
+       -- heartbeat (e.g. 100% from a finished scan, or 0% if never scanned), which the
+       -- UI would otherwise render as misleading "current work". Report them as zeroed
+       -- for offline agents so the inventory is honest at the source.
+       CASE WHEN a.last_seen < now() - interval '5 minutes' THEN 0 ELSE a.scan_progress END,
+       CASE WHEN a.last_seen < now() - interval '5 minutes' THEN '' ELSE a.current_scan_path END,
+       a.cpu_usage, a.mem_usage,
        CASE WHEN a.last_seen < now() - interval '5 minutes' THEN 'offline' ELSE a.status END,
        a.total_files_scanned, a.agent_version, a.observed_ip, a.dns_name,
        a.first_registered_at, a.last_registered_at,
