@@ -31,3 +31,7 @@ Decision log, dead ends, and open questions. Newest entries at the bottom of eac
 ## 2026-06-12 — Shared-working-tree coordination (Windows ⇄ WSL)
 
 Both teammates operate on this SAME directory (WSL symlink → one tree, one .git). Protocol agreed: foreign uncommitted changes are off-limits; stage by explicit path only; no branch switches or concurrent same-file sessions without announcing here; worktree split proposed (see ONBOARDING.md Team Tips). Note for the Linux side: the ~79 modified files on main predate this session and were left untouched; two unstaged one-line build fixes in your WIP are mine (plugin.rs:205 usize cast, interceptor.rs:245 FARPROC cast) — keep or fold into your work. Current branch: research/pqc-verification-and-analysis.
+
+## 2026-06-12 — CLAIMED (Windows-side Claude): items W1–W5
+
+W1 Windows agent depth (cert-store chain analysis, SChannel/CNG policy, PFX/JKS carving) · W2 CNG/SChannel PQ-capability detection (empirical, this machine) · W3 runtime/interceptor reconciliation (plugin.rs/interceptor.rs fixes are mine) · W4 SChannel remediation recipes + mutation.rs validation · W5 Windows e2e/CI/fixture measurement. Linux side: crypto-policies/eBPF/SSH depth, linux-gate, ubuntu CI. Neutral pool (first-come): research domains → REPORT-v2.md, GAP-ANALYSIS, ROADMAP, server CBOM/QRisk.
