@@ -607,23 +607,6 @@ func (a *API) exportCSV(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	// Optional host_uuid filter (comma-separated) scopes the export to a
-	// selection of agents — used by the fleet bulk-export action.
-	if raw := strings.TrimSpace(r.URL.Query().Get("host_uuid")); raw != "" {
-		allowed := make(map[string]bool)
-		for _, id := range strings.Split(raw, ",") {
-			if id = strings.TrimSpace(id); id != "" {
-				allowed[id] = true
-			}
-		}
-		filtered := findings[:0]
-		for _, f := range findings {
-			if allowed[f.HostUUID] {
-				filtered = append(filtered, f)
-			}
-		}
-		findings = filtered
-	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", `attachment; filename="janus-findings.csv"`)
 	w.WriteHeader(http.StatusOK)
