@@ -1,6 +1,7 @@
 import { Activity, ExternalLink, HelpCircle, RefreshCw, RotateCcw, Server, Settings, X } from "lucide-react";
 import { useState } from "react";
 import type { Asset } from "../hooks/useApi";
+import { FocusTrap } from "../a11y/FocusTrap";
 
 interface HomeAgentStatusProps {
   assets: Asset[];
@@ -293,6 +294,7 @@ export function HomeAgentStatus({ assets, onOpenFleet }: HomeAgentStatusProps) {
         </div>
       )}
       {configAgent && config && (
+        <FocusTrap active onEscape={() => setConfigAgent(null)}>
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label={`Configure ${configAgent.hostname}`}>
           <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded bg-white p-5 shadow-xl dark:bg-[#1a2620]">
             <div className="mb-4 flex justify-between"><div><h2 className="font-semibold">Configure {configAgent.hostname}</h2><p className="text-xs text-[#697469]">Apply saves server-side values; Restore discards edits and reloads the last saved values.</p></div><button onClick={() => setConfigAgent(null)} aria-label="Close configuration" title="Close without applying unsaved changes"><X /></button></div>
@@ -318,6 +320,7 @@ export function HomeAgentStatus({ assets, onOpenFleet }: HomeAgentStatusProps) {
             <div className="mt-5 flex justify-end gap-2"><button onClick={() => setConfigAgent(null)} className="rounded border px-3 py-2 text-xs">Close</button><button onClick={restoreConfig} className="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs"><RotateCcw size={12} />Restore</button><button onClick={saveConfig} disabled={!configSchema} className="rounded bg-[#17211c] px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">Apply</button></div>
           </div>
         </div>
+        </FocusTrap>
       )}
     </section>
   );
