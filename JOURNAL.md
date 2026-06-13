@@ -85,3 +85,7 @@ NOT committed — shared-tree entanglement (FOR LINUX TEAMMATE):
 - i18n/index.tsx (your untracked file): I locked locale to 'en' so a non-English browser doesn't get a half-translated, switcher-less UI. Same handoff.
 - authenticatedResource.ts (your untracked file): reverted clean — no changes left by me.
 - server/internal/httpapi/server.go: I had added a host_uuid filter to exportCSV but REVERTED it — your uncommitted edits (hostFindings route, structs) are entangled there and host_findings.go is untracked + currently doesn't compile (host_findings.go:37 make([]interface{}) vs []store.Finding). Left untouched; bulk export went fully client-side so it needs no server change.
+
+## 2026-06-12 — CLAIMED (Windows-side): all LLM-flow tasks (LLM-021/022)
+
+LLM-021 (agent never initiates LLM during scan) — DONE, committed 92d539a, 15 tests pass. LLM-022 (server batch+filter analyze endpoint, server-side evidence assembly, bounded-concurrency worker, findings-list selection UI + inline verdicts) — implementing now. Server LLM files (llm_analysis.go, llm/service.go, server.go) are clean == HEAD so I can edit/commit without entanglement; agent main.rs is your dirty WIP so I left scan() signature intact (flag ignored) rather than touch it. Plan updated with the normative flow + acceptance criteria.
