@@ -12,16 +12,18 @@ import (
 // LLMConfig holds server-side LLM provider configuration.
 // The API key is never stored as a value — only a file path or env var name is kept.
 type LLMConfig struct {
-	Enabled          bool
-	BaseURL          string // JANUS_LLM_BASE_URL, validated as https:// or http://localhost
-	APIKeyEnv        string // JANUS_LLM_API_KEY_ENV: name of env var holding the actual key
-	APIKeyFile       string // JANUS_LLM_API_KEY_FILE: path to file containing the key (takes precedence)
-	ModelAnalysis    string // JANUS_LLM_MODEL_ANALYSIS
-	ModelRemediation string // JANUS_LLM_MODEL_REMEDIATION
-	TimeoutSeconds   int    // JANUS_LLM_TIMEOUT_SECONDS
-	MaxRetries       int    // JANUS_LLM_MAX_RETRIES
-	MaxConcurrent    int    // JANUS_LLM_MAX_CONCURRENT
-	CapabilityMode   string // JANUS_LLM_CAPABILITY_MODE: "disabled" | "analysis_only" | "suggest_remediation"
+	Enabled              bool
+	BaseURL              string // JANUS_LLM_BASE_URL, validated as https:// or http://localhost
+	APIKeyEnv            string // JANUS_LLM_API_KEY_ENV: name of env var holding the actual key
+	APIKeyFile           string // JANUS_LLM_API_KEY_FILE: path to file containing the key (takes precedence)
+	ModelAnalysis        string // JANUS_LLM_MODEL_ANALYSIS
+	ModelRemediation     string // JANUS_LLM_MODEL_REMEDIATION
+	TimeoutSeconds       int    // JANUS_LLM_TIMEOUT_SECONDS
+	MaxRetries           int    // JANUS_LLM_MAX_RETRIES
+	MaxConcurrent        int    // JANUS_LLM_MAX_CONCURRENT
+	CapabilityMode       string // JANUS_LLM_CAPABILITY_MODE: "disabled" | "analysis_only" | "suggest_remediation"
+	MaxTokensPerRequest  int    // JANUS_LLM_MAX_TOKENS_PER_REQUEST: per-call output token cap (0 = no limit)
+	MaxRequestsPerMinute int    // JANUS_LLM_MAX_REQUESTS_PER_MINUTE: rate limit guard (0 = no limit)
 }
 
 // APIKey resolves the LLM API key at call time from file or env var.
@@ -175,17 +177,27 @@ func FromEnv() Config {
 		} else if maxConcurrent > 32 {
 			maxConcurrent = 32
 		}
+		maxTokens := intEnv("JANUS_LLM_MAX_TOKENS_PER_REQUEST", 0)
+		if maxTokens < 0 {
+			maxTokens = 0
+		}
+		maxRPM := intEnv("JANUS_LLM_MAX_REQUESTS_PER_MINUTE", 0)
+		if maxRPM < 0 {
+			maxRPM = 0
+		}
 		cfg.LLM = LLMConfig{
-			Enabled:          true,
-			BaseURL:          baseURL,
-			APIKeyEnv:        apiKeyEnv,
-			APIKeyFile:       os.Getenv("JANUS_LLM_API_KEY_FILE"),
-			ModelAnalysis:    env("JANUS_LLM_MODEL_ANALYSIS", "gpt-4o-mini"),
-			ModelRemediation: env("JANUS_LLM_MODEL_REMEDIATION", "gpt-4o"),
-			TimeoutSeconds:   timeout,
-			MaxRetries:       maxRetries,
-			MaxConcurrent:    maxConcurrent,
-			CapabilityMode:   env("JANUS_LLM_CAPABILITY_MODE", "analysis_only"),
+			Enabled:              true,
+			BaseURL:              baseURL,
+			APIKeyEnv:            apiKeyEnv,
+			APIKeyFile:           os.Getenv("JANUS_LLM_API_KEY_FILE"),
+			ModelAnalysis:        env("JANUS_LLM_MODEL_ANALYSIS", "gpt-4o-mini"),
+			ModelRemediation:     env("JANUS_LLM_MODEL_REMEDIATION", "gpt-4o"),
+			TimeoutSeconds:       timeout,
+			MaxRetries:           maxRetries,
+			MaxConcurrent:        maxConcurrent,
+			CapabilityMode:       env("JANUS_LLM_CAPABILITY_MODE", "analysis_only"),
+			MaxTokensPerRequest:  maxTokens,
+			MaxRequestsPerMinute: maxRPM,
 		}
 	}
 

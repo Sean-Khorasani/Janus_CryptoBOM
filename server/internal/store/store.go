@@ -82,6 +82,7 @@ type Store interface {
 	RecordLifecycleEvent(ctx context.Context, evt *FindingLifecycleEvent) error
 	ListLifecycleEvents(ctx context.Context, findingID string) ([]FindingLifecycleEvent, error)
 	GetCertHealth(ctx context.Context) (*CertHealth, error)
+	FindingsByHost(ctx context.Context, hostUUID string) ([]Finding, error)
 }
 
 type CertHealth struct {
@@ -1498,6 +1499,28 @@ FROM finding_occurrences`+where+` ORDER BY severity DESC, created_at DESC LIMIT 
 	return findings, total, rows.Err()
 }
 
+// FindingsByHost returns all findings recorded in finding_occurrences for the given host UUID,
+// ordered by severity descending then creation time descending.
+func (p *Postgres) FindingsByHost(ctx context.Context, hostUUID string) ([]Finding, error) {
+	rows, err := p.pool.Query(ctx, `SELECT occurrence_id, host_uuid, severity, title, description, asset_ref, algorithm, policy_rule_id,
+migration_profile, 'historical', '', created_at, created_at, confidence
+FROM finding_occurrences WHERE host_uuid=$1 ORDER BY severity DESC, created_at DESC`, hostUUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	findings := []Finding{}
+	for rows.Next() {
+		var f Finding
+		if err := rows.Scan(&f.FindingID, &f.HostUUID, &f.Severity, &f.Title, &f.Description, &f.AssetRef, &f.Algorithm,
+			&f.PolicyRuleID, &f.MigrationProfile, &f.Status, &f.UpdatedBy, &f.UpdatedAt, &f.CreatedAt, &f.Confidence); err != nil {
+			return nil, err
+		}
+		findings = append(findings, f)
+	}
+	return findings, rows.Err()
+}
+
 func (p *Postgres) EnqueueAgentCommand(ctx context.Context, command *pb.MigrationCommand) error {
 	raw, err := json.Marshal(command)
 	if err != nil {
@@ -2622,3 +2645,4 @@ FROM tls_certificates`).Scan(&h.Expired, &h.Expiring30, &h.Expiring90, &h.TotalT
 	}
 	return &h, nil
 }
+
