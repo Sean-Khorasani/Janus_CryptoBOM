@@ -44,6 +44,8 @@ Janus supports both NIST PQC 2026.1 and CNSA 2.0 compliance profiles, with CNSA-
 
 1. **Post-Quantum Cryptographic Posture Management (PQC-PM)**: Complete visibility across codebases, compiled binaries, OS trust stores, network protocol suites, and process memory footprints.
 2. **Context-Aware Semantic Intent Analysis**: AST-based semantic analysis distinguishes active cryptographic protection from legacy verification-only paths, reducing SOC alert fatigue. Optional LLM-powered intent classification provides higher confidence.
+
+   > **Experimental (not production-ready):** LLM intent classification requires a separately configured OpenAI-compatible provider (`JANUS_LLM_API_KEY` / `JANUS_LLM_API_URL`). When no provider is configured the agent falls back to offline heuristics only. LLM-generated results are proposals requiring human review and must not be used as the sole basis for production remediation decisions.
 3. **Automated Sandboxed Migration**: Signed, atomic migration directives with automated backup, validation, reload, TLS verification, and rollback.
 
 ---
@@ -117,7 +119,7 @@ Janus CryptoBOM is divided into four main layers connected via a single protobuf
 |---|---|
 | `agent/src/main.rs` | CLI entry with `--once`, daemon, and `check` subcommand |
 | `agent/src/config.rs` | TOML-based configuration with plugin manifest loading |
-| `agent/src/discovery/source.rs` | Static source analysis with comment/string stripping, LLM intent classification |
+| `agent/src/discovery/source.rs` | Static source analysis with comment/string stripping, LLM intent classification (experimental — requires configured provider) |
 | `agent/src/discovery/binary.rs` | PE/ELF/Mach-O import/export symbol scanning |
 | `agent/src/discovery/dependency.rs` | Package manifest parsing (npm, Go, Python, Rust, Maven) |
 | `agent/src/discovery/network.rs` | TLS handshake probing (SMTP/LDAP/PgSQL/MySQL STARTTLS) |
@@ -183,7 +185,7 @@ Ensure `pg_hba.conf` allows password authentication from localhost.
 
 #### Option B: Docker
 ```bash
-docker compose -f infra/docker-compose.yml up -d postgres
+docker compose -f docker-compose.yml up -d postgres
 ```
 
 ### 2. Launching the Go Server
@@ -219,7 +221,9 @@ $env:JANUS_DISABLE_AUTH="false"
 # Agent stall detection
 $env:JANUS_AGENT_STALL_SECONDS=300
 
-# LLM integration
+# LLM integration (experimental — not required for core operation)
+# Enables optional intent classification in the agent and the /api/llm/proxy endpoint.
+# Results are proposals; require human review before acting on them.
 $env:JANUS_LLM_API_KEY="sk-..."
 $env:JANUS_LLM_API_URL="https://api.openai.com/v1"
 
@@ -332,10 +336,20 @@ All dashboard endpoints require `Authorization: Bearer <jwt>` header. Obtain tok
 | GET | `/api/components` | Paginated CBOM component catalog (`?limit=&offset=&search=&sort=`) |
 | GET | `/api/findings` | Paginated crypto findings with status (`?limit=&offset=&search=&sort=&order=`) |
 | PUT | `/api/findings/{id}/status` | Update finding status (open, accepted_risk, false_positive, remediated) |
+| GET | `/api/findings/{id}/timeline` | Ordered lifecycle event history for a finding |
+| GET | `/api/hosts/{uuid}/findings` | All findings scoped to a specific host UUID |
 | GET | `/api/migrations` | Migration transaction history |
 | POST | `/api/migrations/enqueue` | Enqueue a migration command (operator/admin role) |
+| POST | `/api/migrations/simulate` | Dry-run migration simulation with compatibility analysis |
 | GET/POST | `/api/policies` | List policies / create custom profile |
 | POST | `/api/policies/active` | Switch active compliance profile |
+| GET | `/api/policy/rules` | Versioned control pack (12 PQC/CNSA rules with framework mappings) |
+| GET | `/api/policy/rules/{id}` | Single control rule by ID (e.g. JANUS-PQC-001) |
+| GET/POST | `/api/waves` | Migration wave plans (CRUD) |
+| GET | `/api/agility/scorecard` | Per-host crypto agility scores (6 dimensions) |
+| POST | `/api/agility/exercise` | Dry-run agility assessment across fleet |
+| GET | `/api/sla/metrics` | SLA metrics including real cert health (expired/expiring counts) |
+| GET | `/api/admin/release-check` | Release readiness check (admin role) |
 | GET/POST | `/api/fleet/config` | Global fleet configuration |
 | GET/POST/DELETE | `/api/fleet/profiles` | Configuration profile CRUD |
 | GET/POST | `/api/fleet/profiles/mapping` | Agent-to-profile mappings |
@@ -346,13 +360,42 @@ All dashboard endpoints require `Authorization: Bearer <jwt>` header. Obtain tok
 | POST | `/api/agent/heartbeat` | Agent heartbeat telemetry |
 | POST | `/api/auth/login` | JWT token issuance |
 | POST | `/api/certificates/csr` | PQC certificate signing request generation |
-| POST | `/api/llm/proxy` | LLM API proxy for agent-side intent classification |
+| POST | `/api/llm/proxy` | LLM API proxy for agent-side intent classification (experimental — forwards to configured provider; no structured output or evidence citation) |
 | GET | `/api/export/cyclonedx` | CycloneDX v1.6 CBOM export |
 | GET | `/api/export/csv` | CSV findings export |
 | GET | `/api/export/sarif` | SARIF v2.1.0 findings export |
 | GET | `/api/export/siem` | JSON-lines SIEM export |
 | GET | `/metrics` | Prometheus metrics endpoint |
 | WS | `/api/ws` | WebSocket real-time event stream |
+
+---
+
+## Capability Maturity
+
+Features are classified by operational maturity. Do not use `experimental` or lower features for production remediation decisions without manual review.
+
+| Feature | Maturity | Notes |
+|---|---|---|
+| **Source crypto detection** (regex + comment stripping) | Experimental | Precision/recall measured; no AST flow analysis yet |
+| **Binary import/export scanning** | Experimental | Import table only; no disassembly |
+| **Dependency manifest scanning** | Experimental | npm/go/cargo/pip/maven; no transitive graph |
+| **TLS/PKI network probing** | Experimental | 9 assessment categories; no live OCSP/CRL |
+| **Windows cert-store scanning** | Experimental | certutil/CNG/SChannel/CAPI; Windows agent only |
+| **Process memory scanning** | Experimental | Linux `/proc/mem`; Windows `ReadProcessMemory`; elevated privilege required |
+| **CycloneDX 1.6 CBOM export** | Experimental | cryptoProperties included; schema validation pending |
+| **SARIF 2.1.0 export** | Experimental | Source locations and rules list included |
+| **Versioned compliance control pack** | Experimental | 12 JANUS-PQC/CNSA rules; exception workflow pending |
+| **Migration wave planning** | Prototype | CRUD + state machine; dependency graph pending |
+| **Crypto agility scorecard** | Prototype | 6 dimensions; no live negotiation tests |
+| **LLM finding analysis** | Prototype | Async job queue with provenance; provider config required; **not for autonomous remediation** |
+| **Sandbox migration simulation** | Prototype | Compatibility analysis + dependency hints; no compiler-aware transforms |
+| **Active migration execution** | Prototype | HMAC-signed, atomic, rollback-tested; requires explicit operator enablement |
+| **HSM/PKCS#11 key operations** | Prototype | SoftHSM2 via syscall; production HSM wiring pending |
+
+Full maturity definitions and per-dimension breakdowns: [`docs/CAPABILITY_MATURITY.md`](docs/CAPABILITY_MATURITY.md).  
+Security policy and supported versions: [`SECURITY.md`](SECURITY.md).  
+Support tiers and deprecation policy: [`SUPPORT.md`](SUPPORT.md).  
+Privacy and data governance: [`docs/PRIVACY_DATA_GOVERNANCE.md`](docs/PRIVACY_DATA_GOVERNANCE.md).
 
 ---
 
