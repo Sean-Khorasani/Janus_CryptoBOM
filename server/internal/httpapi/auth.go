@@ -105,13 +105,31 @@ func AuthMiddleware(secret []byte, disableAuth bool) func(http.Handler) http.Han
 				return
 			}
 
-			// Heartbeat endpoint and CSR creation endpoints are public/agent-only
+			if r.URL.Path == "/api/agent/config" || r.URL.Path == "/api/agent/scan-command" {
+				hostUUID := r.URL.Query().Get("host_uuid")
+				mac := hmac.New(sha256.New, secret)
+				_, _ = mac.Write([]byte(hostUUID))
+				expected := fmt.Sprintf("%x", mac.Sum(nil))
+				if hostUUID == "" || !hmac.Equal([]byte(expected), []byte(r.Header.Get("X-Janus-Agent-Token"))) {
+					http.Error(w, "invalid agent authentication", http.StatusUnauthorized)
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Heartbeat and CSR creation remain public for compatibility with older agents.
 			if r.URL.Path == "/api/agent/heartbeat" || r.URL.Path == "/api/certificates/csr" || r.URL.Path == "/api/health" || r.URL.Path == "/api/auth/login" {
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" && r.URL.Path == "/api/ws" {
+				if token := r.URL.Query().Get("access_token"); token != "" {
+					authHeader = "Bearer " + token
+				}
+			}
 			if authHeader == "" {
 				http.Error(w, "missing authorization header", http.StatusUnauthorized)
 				return
@@ -179,29 +197,36 @@ type LoginResponse struct {
 	Role  string `json:"role"`
 }
 
-func LoginHandler(secret []byte) http.HandlerFunc {
+func LoginHandler(secret []byte, disableAuth bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		var req LoginRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// Body is optional when auth is disabled — ignore parse errors.
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		// Simple static credentials mapping
 		var role string
-		if req.Username == "admin" && req.Password == "janus-admin-pass" {
+		if disableAuth {
+			// Auth disabled: any credentials (or none) get admin access.
+			// The username defaults to "dev-admin" when not provided.
+			if req.Username == "" {
+				req.Username = "dev-admin"
+			}
 			role = "admin"
-		} else if req.Username == "operator" && req.Password == "janus-operator-pass" {
-			role = "operator"
-		} else if req.Username == "viewer" && req.Password == "janus-viewer-pass" {
-			role = "viewer"
 		} else {
-			http.Error(w, "invalid username or password", http.StatusUnauthorized)
-			return
+			// Static credentials for dev/prototype use.
+			if req.Username == "admin" && req.Password == "janus-admin-pass" {
+				role = "admin"
+			} else if req.Username == "operator" && req.Password == "janus-operator-pass" {
+				role = "operator"
+			} else if req.Username == "viewer" && req.Password == "janus-viewer-pass" {
+				role = "viewer"
+			} else {
+				http.Error(w, "invalid username or password", http.StatusUnauthorized)
+				return
+			}
 		}
 
 		token, err := GenerateToken(req.Username, role, secret)

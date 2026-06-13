@@ -46,7 +46,7 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", api.health)
-	mux.HandleFunc("/api/auth/login", LoginHandler(jwtSecret))
+	mux.HandleFunc("/api/auth/login", LoginHandler(jwtSecret, cfg.DisableAuth))
 	mux.HandleFunc("/api/overview", api.overview)
 	mux.HandleFunc("/api/assets", api.assets)
 	mux.HandleFunc("/api/components", api.components)
@@ -141,7 +141,7 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded", "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "db": "connected"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "db": "connected", "api_version": version.APIVersion})
 }
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
