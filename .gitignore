@@ -61,6 +61,8 @@ release-evidence/
 /docs/analysis/
 # Internal developer deployment / manual-test tooling
 /dev/
+# Local SoftHSM2 developer setup (not required to build the product)
+/HSM/
 # Stray build output and runtime artifacts at the repo root
 /ui/dist/
 *.sqlite3-journal
