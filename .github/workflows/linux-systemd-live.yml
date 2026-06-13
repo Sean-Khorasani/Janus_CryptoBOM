@@ -1,0 +1,65 @@
+name: Linux Live systemd Lifecycle
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/linux-systemd-live.yml"
+      - "agent/**"
+      - "packaging/systemd/**"
+      - "scripts/ci/verify-linux-systemd-live.sh"
+      - "scripts/install-agent-linux.sh"
+      - "scripts/uninstall-agent-linux.sh"
+      - "rust-toolchain.toml"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/linux-systemd-live.yml"
+      - "agent/**"
+      - "packaging/systemd/**"
+      - "scripts/ci/verify-linux-systemd-live.sh"
+      - "scripts/install-agent-linux.sh"
+      - "scripts/uninstall-agent-linux.sh"
+      - "rust-toolchain.toml"
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.96.0"
+
+jobs:
+  systemd-live:
+    name: Live systemd / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Build release agent
+        working-directory: agent
+        run: cargo build --locked --release
+      - name: Lint lifecycle verifier
+        run: shellcheck scripts/ci/verify-linux-systemd-live.sh
+      - name: Verify systemd lifecycle on disposable runner
+        shell: bash
+        env:
+          JANUS_SYSTEMD_LIVE_DISPOSABLE: "1"
+          JANUS_SYSTEMD_EVIDENCE_DIR: ${{ github.workspace }}/evidence/systemd-live
+        run: |
+          mkdir -p "$JANUS_SYSTEMD_EVIDENCE_DIR"
+          set -o pipefail
+          sudo --preserve-env=JANUS_SYSTEMD_LIVE_DISPOSABLE,JANUS_SYSTEMD_EVIDENCE_DIR \
+            bash scripts/ci/verify-linux-systemd-live.sh 2>&1 |
+            tee "$JANUS_SYSTEMD_EVIDENCE_DIR/lifecycle.log"
+      - name: Upload live systemd evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: systemd-live-ubuntu-24.04-x86_64-supported
+          path: evidence/systemd-live/
+          if-no-files-found: error
+          retention-days: 14

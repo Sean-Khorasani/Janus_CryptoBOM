@@ -1,0 +1,407 @@
+name: Linux Gate L0
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.x"
+  NODE_VERSION: "22.x"
+  RUST_VERSION: "1.96.0"
+  HELM_VERSION: "v3.18.6"
+
+jobs:
+  native:
+    name: Native / ${{ matrix.platform }} / ${{ matrix.tier }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.tier == 'experimental' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04-x86_64-glibc
+            runner: ubuntu-24.04
+            tier: supported
+          - platform: ubuntu-24.04-arm64-glibc
+            runner: ubuntu-24.04-arm
+            tier: experimental
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux gate system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes protobuf-compiler shellcheck
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+      - name: Record toolchain
+        run: |
+          mkdir -p evidence
+          {
+            uname -a
+            go version
+            rustc --version
+            cargo --version
+            node --version
+            npm --version
+            docker --version
+            docker compose version
+          } | tee "evidence/toolchain-${{ matrix.platform }}.log"
+      - name: Run native Linux gate
+        shell: bash
+        run: |
+          set -o pipefail
+          make linux-gate 2>&1 | tee "evidence/linux-gate-${{ matrix.platform }}.log"
+      - name: Run Go race tests
+        shell: bash
+        run: |
+          set -o pipefail
+          (cd server && go test -mod=readonly -race ./...) 2>&1 |
+            tee "evidence/go-race-${{ matrix.platform }}.log"
+      - name: Lint CI scripts
+        run: shellcheck scripts/ci/*.sh
+      - name: Upload native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}-${{ matrix.tier }}
+          path: evidence/
+          if-no-files-found: error
+
+  package-systemd:
+    name: Staged package and systemd static / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Build agent release binary
+        working-directory: agent
+        run: cargo build --locked --release
+      - name: Verify staged lifecycle and systemd unit
+        shell: bash
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          bash scripts/ci/verify-linux-package.sh 2>&1 |
+            tee evidence/package-systemd-ubuntu-24.04-x86_64.log
+      - name: Upload package evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-systemd-ubuntu-24.04-x86_64-supported
+          path: evidence/
+          if-no-files-found: error
+
+  discovery:
+    name: Discovery evidence / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install discovery evidence tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes strace
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Build release agent
+        working-directory: agent
+        run: cargo build --locked --release
+      - name: Verify passive and privileged discovery behavior
+        shell: bash
+        run: bash scripts/ci/verify-linux-discovery.sh agent/target/release/janus-agent evidence
+      - name: Upload discovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery-ubuntu-24.04-x86_64-supported
+          path: evidence/
+          if-no-files-found: error
+
+  systemd-live:
+    name: Live systemd / ubuntu-24.04-x86_64 / supported
+    uses: ./.github/workflows/linux-systemd-live.yml
+
+  containers-compose:
+    name: Containers and compose / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native container images
+        shell: bash
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          docker build --pull -f server/Dockerfile -t janus-server:ci . 2>&1 |
+            tee evidence/server-image-build.log
+          docker build --pull -f agent/Dockerfile -t janus-agent:ci agent 2>&1 |
+            tee evidence/agent-image-build.log
+      - name: Verify final images are non-root
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            test "$(docker image inspect janus-server:ci --format '{{.Config.User}}')" = janus
+            test -n "$(docker image inspect janus-agent:ci --format '{{.Config.User}}')"
+            docker image inspect janus-server:ci janus-agent:ci
+          } 2>&1 | tee evidence/image-inspect.log
+      - name: Start canonical compose stack
+        shell: bash
+        run: |
+          set -o pipefail
+          docker compose -f docker-compose.yml up -d --build --wait 2>&1 |
+            tee evidence/compose-up.log
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8080/api/health >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              echo "server health endpoint did not become ready" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --show-error http://127.0.0.1:8080/api/health |
+            tee evidence/api-health.json
+          curl --fail --show-error http://127.0.0.1:8080/ |
+            tee evidence/ui-index.html >/dev/null
+          timeout 180 docker compose -f docker-compose.yml run --rm --no-deps \
+            -e JANUS_SCAN_ROOTS=/scan/tests/testdata \
+            -e JANUS_CACHE_PATH=/tmp/ci-agent.db \
+            -e JANUS_HOST_UUID_PATH=/tmp/ci-host-id \
+            -e JANUS_REPORT_PATH= \
+            -e JANUS_SARIF_PATH= \
+            janus-agent --config /data/janus-agent.toml --once 2>&1 |
+            tee evidence/agent-once.log
+          docker compose -f docker-compose.yml exec -T postgres \
+            psql -U janus -d janus -Atc \
+            "select 'assets=' || count(*) from assets union all select 'telemetry=' || count(*) from telemetry_payloads;" |
+            tee evidence/telemetry-counts.log
+          grep -Eq '^assets=[1-9][0-9]*$' evidence/telemetry-counts.log
+          grep -Eq '^telemetry=[1-9][0-9]*$' evidence/telemetry-counts.log
+          server_secret_hash="$(
+            docker compose -f docker-compose.yml exec -T janus-server \
+              sha256sum /run/janus-secrets/command-signing-key | awk '{print $1}'
+          )"
+          agent_secret_hash="$(
+            docker compose -f docker-compose.yml exec -T janus-agent \
+              sha256sum /run/janus-secrets/command-signing-key | awk '{print $1}'
+          )"
+          test -n "$server_secret_hash"
+          test "$server_secret_hash" = "$agent_secret_hash"
+          docker compose -f docker-compose.yml exec -T janus-server \
+            sh -c 'test -z "${JANUS_COMMAND_SIGNING_KEY:-}"'
+          docker compose -f docker-compose.yml exec -T janus-agent \
+            sh -c 'test -z "${JANUS_COMMAND_SIGNING_KEY:-}"'
+          docker compose -f docker-compose.yml ps --all |
+            tee evidence/compose-ps.log
+          test "$(docker compose -f docker-compose.yml ps --status running --services | wc -l)" -eq 3
+      - name: Capture compose logs
+        if: always()
+        run: docker compose -f docker-compose.yml logs --no-color > evidence/compose.log 2>&1 || true
+      - name: Stop canonical compose stack
+        if: always()
+        run: docker compose -f docker-compose.yml down -v --remove-orphans || true
+      - name: Upload container evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: containers-compose-ubuntu-24.04-x86_64-supported
+          path: evidence/
+          if-no-files-found: error
+
+  browser:
+    name: Browser / chromium / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - name: Install pinned Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Build UI
+        run: npm run build
+      - name: Run browser scenarios
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: evidence/playwright-junit.xml
+        run: npm run test:e2e:ci -- --reporter=line,junit
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-chromium-ubuntu-24.04-x86_64-supported
+          path: |
+            ui/evidence/
+            ui/test-results/
+            ui/playwright-report/
+          if-no-files-found: warn
+
+  helm:
+    name: Helm render / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Verify Helm Linux variants
+        shell: bash
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          bash scripts/verify-helm-linux.sh 2>&1 | tee evidence/helm-linux.log
+      - name: Upload Helm evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-ubuntu-24.04-x86_64-supported
+          path: evidence/
+          if-no-files-found: error
+
+  e2e:
+    name: E2E smoke / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Run controlled Linux E2E smoke test
+        shell: bash
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          bash scripts/test-e2e-linux.sh 2>&1 | tee evidence/e2e-linux.log
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ubuntu-24.04-x86_64-supported
+          path: evidence/
+          if-no-files-found: error
+
+  dependency-security-scan:
+    name: Dependency security scan / ubuntu-24.04-x86_64 / supported
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Go vulnerability scan
+        shell: bash
+        run: |
+          mkdir -p evidence
+          set -o pipefail
+          (cd server && govulncheck -json ./...) 2>&1 | tee evidence/govulncheck.json
+          (cd server && govulncheck ./...) 2>&1 | tee evidence/govulncheck.txt
+      - name: Rust vulnerability scan
+        shell: bash
+        run: |
+          set -o pipefail
+          (cd agent && cargo audit --json) 2>&1 | tee evidence/cargo-audit.json
+          (cd agent && cargo audit) 2>&1 | tee evidence/cargo-audit.txt
+      - name: Node vulnerability scan
+        shell: bash
+        run: |
+          set -o pipefail
+          (cd ui && npm ci --prefer-offline 2>/dev/null; npm audit --audit-level=high --production) 2>&1 |
+            tee evidence/npm-audit.txt
+      - name: Upload security scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-security-scan-ubuntu-24.04-x86_64-supported
+          path: evidence/
+          if-no-files-found: error
+
+  linux-gate-l0:
+    name: Linux Gate L0 / required
+    if: always()
+    needs:
+      - native
+      - package-systemd
+      - discovery
+      - systemd-live
+      - containers-compose
+      - browser
+      - helm
+      - e2e
+      - dependency-security-scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every supported Linux capability
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+          PACKAGE_SYSTEMD_RESULT: ${{ needs.package-systemd.result }}
+          DISCOVERY_RESULT: ${{ needs.discovery.result }}
+          SYSTEMD_LIVE_RESULT: ${{ needs.systemd-live.result }}
+          CONTAINERS_COMPOSE_RESULT: ${{ needs.containers-compose.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+          HELM_RESULT: ${{ needs.helm.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          DEPENDENCY_SECURITY_SCAN_RESULT: ${{ needs.dependency-security-scan.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          for capability in \
+            NATIVE \
+            PACKAGE_SYSTEMD \
+            DISCOVERY \
+            SYSTEMD_LIVE \
+            CONTAINERS_COMPOSE \
+            BROWSER \
+            HELM \
+            E2E \
+            DEPENDENCY_SECURITY_SCAN; do
+            result_variable="${capability}_RESULT"
+            result="${!result_variable}"
+            printf '%-30s %s\n' "$capability" "$result"
+            if [[ "$result" != success ]]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
