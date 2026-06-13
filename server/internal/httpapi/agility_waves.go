@@ -10,6 +10,37 @@ import (
 	"github.com/janus-cbom/janus/server/internal/waveplan"
 )
 
+// POST /api/agility/exercise — dry-run agility exercise (WP-023).
+// Computes scorecards for all hosts and runs RunExercise against them.
+// Requires operator or admin role (enforced at route registration).
+func (a *API) agilityExercise(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Fetch findings for all hosts, same as the scorecard endpoint.
+	params := store.QueryParams{Limit: 5000}
+	findings, _, err := a.store.FindingsPaginated(r.Context(), params)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Group by host_uuid and compute per-host scorecards.
+	hostFindings := map[string][]store.Finding{}
+	for _, f := range findings {
+		hostFindings[f.HostUUID] = append(hostFindings[f.HostUUID], f)
+	}
+	scorecards := make([]agility.Scorecard, 0, len(hostFindings))
+	for host, hf := range hostFindings {
+		scorecards = append(scorecards, agility.ComputeScorecard(host, hf, 0, 0, nil))
+	}
+
+	report := agility.RunExercise(scorecards)
+	writeJSON(w, http.StatusOK, report)
+}
+
 // GET /api/agility/scorecard
 // Query params: host_uuid (optional) — omit for fleet-wide view.
 func (a *API) agilityScorecard(w http.ResponseWriter, r *http.Request) {

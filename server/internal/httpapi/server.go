@@ -52,6 +52,7 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/components", api.components)
 	mux.HandleFunc("/api/findings", api.findings)
 	mux.HandleFunc("/api/findings/", api.findingsDispatch) // PUT /api/findings/{id}/status | GET /api/findings/{id}/timeline
+	mux.HandleFunc("/api/hosts/", api.hostFindings)       // GET /api/hosts/{uuid}/findings
 	mux.HandleFunc("/api/migrations", api.migrations)
 	mux.HandleFunc("/api/report.html", api.reportHTML)
 	mux.HandleFunc("/api/certificates/csr", api.createCSR)
@@ -88,6 +89,10 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/llm/status", api.llmStatus)
 	// Crypto-agility scorecard (AGILE-01/WP-023)
 	mux.HandleFunc("/api/agility/scorecard", api.agilityScorecard)
+	// Agility dry-run exercise (WP-023)
+	mux.Handle("/api/agility/exercise", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.agilityExercise)))
+	// Release readiness check (WP-025)
+	mux.Handle("/api/admin/release-check", RequireRole([]string{"admin"})(http.HandlerFunc(api.releaseCheck)))
 	// Migration wave planning (WAVE-01/WP-022)
 	mux.Handle("/api/waves", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.wavePlans)))
 	mux.Handle("/api/waves/", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.wavePlanByID)))
@@ -601,6 +606,23 @@ func (a *API) exportCSV(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	// Optional host_uuid filter (comma-separated) scopes the export to a
+	// selection of agents — used by the fleet bulk-export action.
+	if raw := strings.TrimSpace(r.URL.Query().Get("host_uuid")); raw != "" {
+		allowed := make(map[string]bool)
+		for _, id := range strings.Split(raw, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				allowed[id] = true
+			}
+		}
+		filtered := findings[:0]
+		for _, f := range findings {
+			if allowed[f.HostUUID] {
+				filtered = append(filtered, f)
+			}
+		}
+		findings = filtered
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", `attachment; filename="janus-findings.csv"`)
