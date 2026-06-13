@@ -212,7 +212,8 @@ export function AgentFleetInventory() {
           {bulkStatus && <span className="text-[#4d594f] dark:text-[#8fa991]" role="status">{bulkStatus}</span>}
         </div>
       )}
-      <div className="max-h-[65vh] overflow-auto">
+      {/* Wide table on large screens; stacked cards on small screens (UX-009). */}
+      <div className="hidden max-h-[65vh] overflow-auto lg:block">
         <table className="w-full min-w-[1200px] text-left text-xs">
           <thead className="sticky top-0 z-10 bg-white dark:bg-[#1a2620]"><tr className="border-b border-[#dfe5dc] dark:border-[#2a3a30]">
             <th className="p-2"><input type="checkbox" aria-label="Select visible agents" checked={agents.length > 0 && agents.every(a => selectedAgents.has(a.host_uuid))} onChange={e => setSelectedAgents(e.target.checked ? new Set(agents.map(a => a.host_uuid)) : new Set())} /></th>
@@ -247,6 +248,36 @@ export function AgentFleetInventory() {
           </tr>)}</tbody>
         </table>
       </div>
+
+      {/* Card layout for small screens (UX-009) — same data, no horizontal scroll. */}
+      <div className="space-y-2 lg:hidden">
+        {agents.length === 0 && <div className="rounded border border-dashed border-[#dfe5dc] p-4 text-center text-[#697469] dark:border-[#2a3a30] dark:text-[#8fa991]">No agents match the current filters.</div>}
+        {agents.map(agent => (
+          <div key={agent.host_uuid} onClick={() => openAgent(agent)} className="cursor-pointer rounded border border-[#dfe5dc] p-3 dark:border-[#2a3a30]">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span onClick={e => e.stopPropagation()}>
+                    <input type="checkbox" aria-label={`Select ${agent.hostname}`} checked={selectedAgents.has(agent.host_uuid)} onChange={e => setSelectedAgents(previous => { const next = new Set(previous); e.target.checked ? next.add(agent.host_uuid) : next.delete(agent.host_uuid); return next; })} />
+                  </span>
+                  <strong className="truncate">{agent.hostname}</strong>
+                </div>
+                <div className="truncate font-mono text-[10px] text-[#697469]">{agent.host_uuid}</div>
+              </div>
+              <span className="shrink-0 rounded bg-[#edf1ea] px-2 py-0.5 text-[10px] font-semibold dark:bg-[#22302a]">{agent.status || "unknown"}</span>
+            </div>
+            <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+              <div><dt className="text-[#697469] dark:text-[#8fa991]">OS</dt><dd>{agent.os_name} {agent.os_version}</dd></div>
+              <div><dt className="text-[#697469] dark:text-[#8fa991]">IP</dt><dd className="font-mono">{agent.observed_ip || "unknown"}</dd></div>
+              <div><dt className="text-[#697469] dark:text-[#8fa991]">Last connection</dt><dd>{new Date(agent.last_seen).toLocaleString()}</dd></div>
+              <div><dt className="text-[#697469] dark:text-[#8fa991]">Last scan risk</dt><dd>{severityLabel(agent.last_scan_severity)}</dd></div>
+              <div><dt className="text-[#697469] dark:text-[#8fa991]">Open findings</dt><dd>{agent.open_findings || 0}</dd></div>
+              <div><dt className="text-[#697469] dark:text-[#8fa991]">Agent</dt><dd>{agent.agent_version || "unknown"}</dd></div>
+            </dl>
+          </div>
+        ))}
+      </div>
+
       <div className="mt-3 flex justify-between text-xs">
         <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset-limit))}>Previous</button>
         <span>{offset + 1}-{Math.min(offset + limit, total)} of {total}</span>
