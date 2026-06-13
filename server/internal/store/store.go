@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -1307,7 +1308,20 @@ func (p *Postgres) AssetsPaginated(ctx context.Context, params FleetQueryParams)
 		where += " AND (a.hostname ILIKE $" + n + " OR a.host_uuid ILIKE $" + n + " OR a.os_name ILIKE $" + n + " OR a.os_version ILIKE $" + n + " OR a.agent_version ILIKE $" + n + " OR a.observed_ip ILIKE $" + n + " OR a.dns_name ILIKE $" + n + ")"
 	}
 	if params.Status != "" {
-		add(" AND a.status=", params.Status)
+		// Filter on DERIVED status, not the raw stored value (UX-007): "offline" is
+		// computed from staleness and never stored; a scanning agent's stored status
+		// is a phase name ("Static Source Analysis", "Uploading results"), never the
+		// literal "Scanning". Only "Idle" matched before.
+		switch strings.ToLower(params.Status) {
+		case "offline":
+			where += " AND a.last_seen < now() - interval '5 minutes'"
+		case "idle":
+			where += " AND a.last_seen >= now() - interval '5 minutes' AND a.status = 'Idle'"
+		case "scanning":
+			where += " AND a.last_seen >= now() - interval '5 minutes' AND a.status NOT IN ('Idle', 'offline', '')"
+		default:
+			add(" AND a.status=", params.Status)
+		}
 	}
 	if params.OSName != "" {
 		add(" AND a.os_name=", params.OSName)
