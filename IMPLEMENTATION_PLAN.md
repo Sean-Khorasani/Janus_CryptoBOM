@@ -816,6 +816,509 @@ Current gaps that drive this plan:
 **Verification:** Automated lab reports attached to each release and adapter certification.  
 **Current status (2026-06-12):** **Partially implemented.** `docs/ALGORITHM_COMPATIBILITY.md` (329 lines): NIST Quantum Security Level reference table, source-to-PQC migration matrix (RSA/ECDSA/ECDH/AES/SHA/TLS/PKCS7), key size comparisons, library support table (OpenSSL 3.5+ native, oqs-provider for 3.3/3.4, rustls, BoringSSL, libOQS, Go circl), migration sequencing guidance. Targets drawn from live `policies/nist-pqc-2026.yaml` and `policies/cnsa-2.0.yaml`. Missing: automated lab reports, performance baselines, failure-mode documentation, adapter certification process.
 
+---
+
+## New Requirements — Operational Experience Audit (2026-06-12)
+
+Identified through systematic codebase audit and hands-on operator testing. These are gaps not covered by the existing WP-* / LLM-* work packages.
+
+### Status Table
+
+| Work package | Priority | Status | Description |
+| --- | --- | --- | --- |
+| UX-001 | P1 | Not started | Agent scan control: pause, stop, resume, target path |
+| UX-002 | P2 | Not started | Bulk finding actions: accept, remediate, assign |
+| UX-003 | P2 | Not started | Finding assignment, comments, per-finding SLA |
+| UX-004 | P2 | Not started | LLM configuration and testing panel in dashboard |
+| UX-005 | P3 | Not started | Empty states and React error boundaries |
+| UX-006 | P2 | Not started | Policy create/edit/import/export from UI |
+| UX-007 | P2 | Not started | Wave plan visual editor and dependency graph |
+| OPS-001 | P1 | Not started | Graceful server shutdown with drain period |
+| OPS-002 | P2 | Not started | API-wide rate limiting (login, findings, migrations) |
+| OPS-003 | P2 | Not started | Multi-channel notifications: email, Slack, PagerDuty |
+| OPS-004 | P3 | Not started | Correlation IDs and distributed tracing |
+| OPS-005 | P2 | Not started | OpenAPI 3.0 specification |
+| OPS-006 | P2 | Not started | Prometheus metrics endpoint |
+| OPS-007 | P2 | Not started | Incremental / changed-files-only scanning |
+| AUTH-001 | P2 | Not started | Configurable JWT TTL and refresh-token flow |
+| AUTH-002 | P2 | Not started | Password change and session revocation |
+| AUTH-003 | P1 | Not started | Unauthenticated `/api/certificates/csr` endpoint (access-control bug) |
+| AUTH-004 | P1 | Not started | HSM sign/verify endpoints lack role guard (access-control bug) |
+| DOC-001 | P1 | Not started | Operator quick-start: default credentials, build outputs, env vars |
+| DOC-002 | P2 | Not started | API reference with all endpoints, auth, request/response shapes |
+| DOC-003 | P2 | Not started | Plugin development guide |
+| DOC-004 | P2 | Not started | Troubleshooting runbook: common errors, log interpretation |
+| LLM-021 | P2 | Not started | LLM config unification: reconcile env-var config with fleet-DB UI fields |
+| LLM-022 | P2 | Not started | Interactive verdict review: accept/reject LLM verdicts from findings UI |
+| LLM-023 | P2 | Not started | LLM usage dashboard: token spend, cost estimate, job success rate |
+
+---
+
+## UX-001 Agent Scan Control
+
+**Priority:** P1
+**Scope:** Operators need to pause, resume, cancel, and re-target an in-progress scan without restarting the agent process. A scan of a large codebase can take minutes to hours; the only current option is to kill and restart the agent.
+
+**Evidence of gap:**
+- `agent/src/main.rs:143` — outer scan loop has no interrupt path; `tokio::time::sleep` waits are not cancellable via API
+- `agent/src/comms.rs` — only polls for `scan-now` command; no `PAUSE`, `RESUME`, `CANCEL`, `TARGET_PATH` command types
+- `server/internal/httpapi/server.go` — no endpoint for scan control commands
+
+**Acceptance criteria:**
+- `POST /api/agents/{uuid}/command` accepts `{"command": "scan_cancel" | "scan_pause" | "scan_resume" | "scan_now" | "scan_target", "path": "..." }` (operator+ role)
+- Agent polls this endpoint and acts within one heartbeat cycle (≤ 5 s)
+- Fleet Command tab in UI shows per-agent control buttons: Scan Now, Pause, Resume, Cancel
+- Cancelled scans upload partial results; paused scans resume from file-walk position
+- Command delivery and outcome are logged in `agent_command_log` table
+
+**Verification:** Agent integration test: send cancel command mid-scan, verify partial telemetry uploaded and scan stops.
+
+---
+
+## UX-002 Bulk Finding Actions
+
+**Priority:** P2
+**Scope:** Operators managing hundreds of findings need batch triage operations. Current UI updates one finding at a time; no server endpoint for batch updates.
+
+**Evidence of gap:**
+- `server/internal/httpapi/server.go:219` — `findingStatus()` handles one finding per request; no batch variant
+- `ui/src/components/FindingsGrid.tsx` — no multi-select checkbox or bulk-action toolbar
+- No `POST /api/findings/bulk-update` endpoint
+
+**Acceptance criteria:**
+- `POST /api/findings/bulk-update` accepts `[{finding_id, status}]` array (max 100); runs in a single DB transaction; returns per-item success/failure
+- Findings table adds row checkboxes and a "Apply to selected" dropdown (Accept Risk / Mark Remediated / Assign)
+- Bulk actions are recorded in `finding_lifecycle_events` with actor identity
+- Bulk accept/remediate respects the same auto-reopen logic as individual updates
+
+**Verification:** Bulk-update 50 findings in a single call; verify lifecycle events and DB state match.
+
+---
+
+## UX-003 Finding Assignment, Comments, and Per-Finding SLA
+
+**Priority:** P2
+**Scope:** Enterprise operators need to assign findings to owners, add investigation notes, and track remediation deadlines. None of this exists today.
+
+**Evidence of gap:**
+- `server/internal/store/store.go:148` — `Finding` struct has no `assigned_to`, `due_date`, or comment link
+- `server/internal/httpapi/server.go` — no `/api/findings/{id}/comments` or `/api/findings/{id}/assign` endpoints
+- `ui/src/components/FindingTimeline.tsx` — shows lifecycle events but no comment input or assignee display
+
+**Acceptance criteria:**
+- DB migration: `finding_comments` table (finding_id, actor, body, created_at); `assigned_to` + `due_date` columns on `finding_occurrences`
+- `POST /api/findings/{id}/comments`, `GET /api/findings/{id}/comments` (paginated)
+- `POST /api/findings/{id}/assign` (body: `{assigned_to, due_date}`)
+- Finding timeline UI shows comments inline with lifecycle events; comment input box at bottom
+- SLA breach (due_date < today, status != remediated) surfaces as a filter in findings view and contributes to `/api/sla/metrics`
+
+**Verification:** Assign finding to user, add comment, verify both appear in timeline. Breach SLA and verify metric appears.
+
+---
+
+## UX-004 LLM Configuration and Testing Panel
+
+**Priority:** P2
+**Scope:** LLM settings are server env vars only; operators cannot change model, mode, timeout, or test connectivity from the UI. The LLM Analysis tab shows job history but no controls.
+
+**Evidence of gap:**
+- `server/internal/httpapi/llm_analysis.go:168` — `llmStatus()` returns read-only config summary; no write endpoint
+- `ui/src/components/LLMAnalysis.tsx` — shows status card and jobs table; no settings form, no "Test Connection" button
+- `server/internal/httpapi/server.go:82` — `/api/llm/test-connection` endpoint exists but is not wired to any UI element
+
+**Acceptance criteria:**
+- LLM Analysis tab gains a "Settings" sub-panel (operator+ role) showing: capability mode toggle, model names, timeout, max tokens/min, configured key status (masked)
+- "Test Connection" button calls `GET /api/llm/test-connection` and shows latency + model response
+- Settings are read-only display (env-var-sourced); panel includes a callout: "To change these values, update `JANUS_LLM_*` env vars and restart the server"
+- LLM job list shows token usage and cost-estimate column (tokens × configurable rate)
+- Verdict review inline: each job row expands to show verdict fields with Accept/Override buttons that call `PUT /api/findings/{id}/status`
+
+**Verification:** Test connection shows success with latency. Submit analysis job; expand row; accept verdict; verify finding status updated.
+
+---
+
+## UX-005 Empty States and React Error Boundaries
+
+**Priority:** P3
+**Scope:** When there are no findings, agents, or components, the UI shows empty tables with no guidance. Unhandled render errors crash the entire app silently.
+
+**Evidence of gap:**
+- `ui/src/App.tsx` — no `<ErrorBoundary>` wrapper; a single component exception white-screens the app
+- `ui/src/components/FindingsGrid.tsx` — empty array renders empty table rows, no "no findings" message
+- Overview shows "Highest Priority Findings" heading even when the list is empty
+
+**Acceptance criteria:**
+- Root `App.tsx` and each tab panel wrapped in `ErrorBoundary` (shows "Something went wrong" + retry + report link)
+- All list/table views show illustrated empty state with context-sensitive message and action button: e.g., "No agents registered — run `janus-agent --once`", "No findings — a scan hasn't completed yet"
+- First-run experience: dashboard detects no agents registered and shows onboarding banner linking to quickstart
+
+**Verification:** Disconnect DB mid-session; error boundary catches and shows recovery UI rather than white screen.
+
+---
+
+## UX-006 Policy Create, Edit, Import, Export From UI
+
+**Priority:** P2
+**Scope:** Policy profiles are YAML files on disk. Operators cannot create or edit a policy from the dashboard; they must SSH into the server and edit files directly. The Policy Studio tab shows policies read-only.
+
+**Evidence of gap:**
+- `server/internal/httpapi/server.go:63-65` — policies endpoints are GET-only; no POST/PUT/DELETE for policy CRUD
+- `server/internal/policy/engine.go` — loads profiles from `policies/` directory at startup; no hot-reload
+- `ui/src/components/PolicyStudio.tsx` — renders profile details as read-only fields
+
+**Acceptance criteria:**
+- `POST /api/policies` (create), `PUT /api/policies/{version}` (update), `DELETE /api/policies/{version}` (admin only) — writes to `policies/` directory and triggers engine reload
+- `GET /api/policies/{version}/export` — returns validated YAML for download
+- `POST /api/policies/import` — accepts YAML, validates schema, saves as new version
+- Policy Studio gains edit form for threshold fields (min RSA bits, require TLS 1.3, etc.) and "Save as New Version" + "Export YAML" buttons
+- Policy changes emit `policy_switched` WebSocket event and appear in compliance report immediately
+
+**Verification:** Create a policy via UI, verify it appears in profile list and takes effect on next finding assessment.
+
+---
+
+## UX-007 Wave Plan Visual Editor and Dependency Graph
+
+**Priority:** P2
+**Scope:** Wave plans exist in the DB with full CRUD but there is no dependency graph between plans, no visual timeline, and no progress tracking per wave. Operators must use the API directly.
+
+**Evidence of gap:**
+- `server/internal/store/store.go:370` — `WavePlan` struct has all fields but no `DependsOn []string` dependency graph
+- `server/internal/httpapi/agility_waves.go` — CRUD endpoints exist; no `/api/waves/{id}/dependency-graph` or progress endpoint
+- `ui/src/components/AgilityDashboard.tsx` — scorecard only; no wave plan editor or Gantt view
+
+**Acceptance criteria:**
+- DB migration: `wave_plan_dependencies` table (plan_id, depends_on_plan_id); cycle detection on save
+- `GET /api/waves/dependency-graph` returns nodes + edges for visualization
+- Wave plans UI sub-tab: Gantt-style timeline showing plans, their windows, and status
+- Per-wave progress: `component_count` used as denominator; findings by status per wave component as numerator
+- Topological execution order displayed; blocked plans shown with blocker name
+
+**Verification:** Create two waves with dependency; verify graph endpoint returns correct edge; verify blocked wave cannot start until dependency is complete.
+
+---
+
+## OPS-001 Graceful Server Shutdown
+
+**Priority:** P1
+**Scope:** `SIGTERM` kills the server immediately, dropping in-flight gRPC streams, HTTP requests, and pending webhook dispatches. Kubernetes rolling updates lose telemetry from agents mid-upload.
+
+**Evidence of gap:**
+- `server/cmd/janus-server/main.go` — no `signal.NotifyContext` or graceful shutdown handler visible
+- `server/internal/grpcserver/server.go` — gRPC `StreamTelemetry` streams have no drain mechanism
+- `server/internal/grpcserver/server.go:315` — webhook goroutines are fire-and-forget with no wait group
+
+**Acceptance criteria:**
+- On `SIGTERM` / `SIGINT`: stop accepting new HTTP connections (return 503), wait up to `JANUS_GRACEFUL_SHUTDOWN_SECONDS` (default 30) for in-flight requests to complete, close gRPC server with `GracefulStop()`, flush pending webhook goroutines, close DB pool
+- Health endpoint returns `{"status": "draining"}` during shutdown
+- Agent detects 503 and queues payloads to SQLite for retry after reconnect
+
+**Verification:** Send SIGTERM during active telemetry upload; verify payload lands in DB (not dropped); verify agent retried from SQLite queue on reconnect.
+
+---
+
+## OPS-002 API-Wide Rate Limiting
+
+**Priority:** P2
+**Scope:** Rate limiting middleware exists (`features.go:302`) but is only applied to `/api/llm/proxy`. Login endpoint, findings queries, and migration enqueue have no protection against brute-force or flooding.
+
+**Evidence of gap:**
+- `server/internal/httpapi/server.go:81` — `RateLimit()` applied only to one route
+- `server/internal/httpapi/auth.go:200` — login handler has no attempt throttling; brute-force of the 3 hardcoded accounts is trivial
+- No `429 Too Many Requests` responses observed on any other endpoint
+
+**Acceptance criteria:**
+- `JANUS_RATE_LIMIT_GLOBAL_PER_MINUTE` (default 300/IP/min) applied to all routes via middleware
+- `JANUS_RATE_LIMIT_LOGIN_PER_MINUTE` (default 5/IP/min) applied specifically to `/api/auth/login`
+- Migration enqueue: max 10/min/operator
+- Returns `429` with `Retry-After` header; logs at WARN with IP
+- Rate limit counters reset on server restart (in-memory; no Redis dep for prototype)
+
+**Verification:** Exceed login limit; verify 429 returned on 6th attempt within one minute.
+
+---
+
+## OPS-003 Multi-Channel Notifications
+
+**Priority:** P2
+**Scope:** Critical findings only dispatch to SIEM webhooks. No email, Slack, or PagerDuty support. Operators miss events unless they run a separate SIEM.
+
+**Evidence of gap:**
+- `server/internal/httpapi/server.go:78` — only `/api/webhooks` (generic SIEM webhook)
+- No `notification_channels` table in store; no send-email/send-slack helper
+- README.md does not list any notification channel beyond webhooks
+
+**Acceptance criteria:**
+- `notification_channels` table: (id, type [email|slack|pagerduty|webhook], destination, event_filter, active)
+- `POST /api/notifications/channels`, `GET /api/notifications/channels`, `DELETE /api/notifications/channels/{id}`
+- Email: SMTP config via `JANUS_SMTP_*` env vars; sends HTML summary for critical findings
+- Slack: incoming webhook URL; sends formatted attachment with finding + remediation link
+- PagerDuty: Events API v2; severity mapping (critical=P1, high=P2)
+- All channels share the same circuit-breaker logic already in `grpcserver/server.go`
+- UI: Notifications tab in Settings showing channel list, add/edit form, test-send button
+
+**Verification:** Configure Slack channel; trigger critical finding; verify message delivered with correct fields.
+
+---
+
+## OPS-004 Correlation IDs and Structured Log Tracing
+
+**Priority:** P3
+**Scope:** Multi-component flows (agent → gRPC → server → DB → webhook) cannot be traced end-to-end. Debugging requires manual cross-service log grepping.
+
+**Evidence of gap:**
+- `server/internal/httpapi/auth.go` middleware — no `X-Correlation-ID` injection
+- All `slog.Info()` calls in `grpcserver/server.go` log without a request-scoped trace ID
+- Agent logs (`eprintln!` / Rust `log`) have no correlation to server-side request IDs
+
+**Acceptance criteria:**
+- Auth middleware injects `X-Correlation-ID` (UUID) into request context and response header; passes to DB calls via `pgx` context
+- `host_uuid` included in every server-side log line touching that agent
+- Agent logs include `telemetry_id` from `CbomTelemetryPayload` in all relevant lines
+- Optional: `JANUS_OTLP_ENDPOINT` config for OpenTelemetry trace export (disabled by default)
+
+**Verification:** Trace a single telemetry upload across agent log, gRPC server log, and DB audit log by correlation ID.
+
+---
+
+## OPS-005 OpenAPI 3.0 Specification
+
+**Priority:** P2
+**Scope:** 40+ REST endpoints with no machine-readable contract. Integrators and tool vendors must reverse-engineer the API from README markdown or source code. No SDK generation, no client validation, no breaking-change detection in CI.
+
+**Evidence of gap:**
+- `README.md:325` — API reference is a hand-written markdown table
+- No `/api/openapi.json` or `/api/swagger.json` endpoint
+- No spec file in repo; no CI diff check
+
+**Acceptance criteria:**
+- `GET /api/openapi.json` returns OpenAPI 3.0 spec (hand-authored or generated)
+- Spec covers all endpoints: path, method, request schema, response schema, auth requirement, error codes
+- CI step: `make api-spec-check` diffs committed spec against current routes and fails if they diverge
+- Spec linked from README "API Reference" section
+
+**Verification:** Generate a Go client from the spec; call `/api/overview` and `/api/findings` successfully.
+
+---
+
+## OPS-006 Prometheus Metrics Endpoint
+
+**Priority:** P2
+**Scope:** No operational metrics are exported. Operators cannot monitor request latency, finding ingestion rate, DB pool health, or webhook failure rate from their existing monitoring stack.
+
+**Evidence of gap:**
+- No `GET /metrics` endpoint; no `prometheus/client_golang` dependency
+- `server/internal/grpcserver/server.go` — webhook failure is logged but not counted
+- No DB pool utilization visible externally
+
+**Acceptance criteria:**
+- `GET /metrics` (Prometheus text format, no auth required for scraping) exposes:
+  - `janus_http_requests_total{method,path,status}` — request counter
+  - `janus_http_request_duration_seconds{path}` — latency histogram
+  - `janus_findings_total{severity,status}` — finding gauge
+  - `janus_agents_connected` — connected agent gauge
+  - `janus_webhook_dispatches_total{status}` — webhook success/failure counter
+  - `janus_db_pool_connections{state}` — DB pool stats
+- `JANUS_METRICS_ADDR` (default empty = disabled) configures a separate listen address for metrics scraping
+
+**Verification:** Scrape `/metrics` with `curl`; parse output with `promtool check metrics`; verify counters increment on request.
+
+---
+
+## OPS-007 Incremental / Changed-Files-Only Scanning
+
+**Priority:** P2
+**Scope:** Every scan re-processes all files from scratch. For large repositories (100k+ files) this means scans take tens of minutes even when only a handful of files changed. The `scan_state` table in SQLite was built for this but is not used to skip unchanged files.
+
+**Evidence of gap:**
+- `agent/src/storage.rs` — `scan_state` table stores `content_hash` per file path
+- `agent/src/discovery/source.rs:scan()` — walks all files unconditionally; no skip-on-hash-match logic
+- `agent/src/main.rs` — no diff-only mode or changed-set argument
+
+**Acceptance criteria:**
+- `scan()` computes SHA-256 of each file before parsing; skips if hash matches `scan_state` entry and entry is < `max_cache_age_hours` old
+- Full re-scan forced when: hash mismatch, cache miss, policy version changed since last scan, or operator sends `scan_now` command with `force_full=true`
+- `--changed-since <git-ref>` flag for `check` subcommand: only scans files modified between `git-ref` and HEAD
+- Progress reporting reflects skipped files (count shown separately from scanned)
+- `scan_state` entries pruned for deleted files on each full scan
+
+**Verification:** Run full scan; modify 2 files; run incremental scan; verify only 2 files re-analyzed; verify findings still reflect full picture (unchanged findings retained from prior scan).
+
+---
+
+## AUTH-001 Configurable JWT TTL and Refresh Flow
+
+**Priority:** P2
+**Scope:** JWT expiry is hardcoded to 24 hours (`auth.go:45`). No refresh mechanism means long-running operator sessions expire mid-workflow. Compliance environments often require shorter TTLs.
+
+**Evidence of gap:**
+- `server/internal/httpapi/auth.go:45` — `time.Now().Add(24 * time.Hour)`
+- No `JANUS_JWT_TTL_SECONDS` env var
+- No `POST /api/auth/refresh` endpoint
+- Long-running operations (batch migrations, agility exercises) may span the 24h window
+
+**Acceptance criteria:**
+- `JANUS_JWT_TTL_SECONDS` (default 86400, range 900–2592000) controls access token lifetime
+- `POST /api/auth/refresh` — accepts a valid (non-expired) token, returns a new token with reset TTL; rate-limited to 10/hour/user
+- Token expiry shown in UI (countdown or "expires in X hours" in header)
+- Agent uses separate long-lived API key (not JWT); not affected by this change
+
+**Verification:** Set TTL to 1800; verify token expires after 30 min; verify refresh returns new valid token.
+
+---
+
+## AUTH-002 Password Change and Session Revocation
+
+**Priority:** P2
+**Scope:** Users cannot change their password. Admin cannot revoke a compromised session. Offboarded users' sessions persist until expiry. This is a gap even for the static-credential prototype.
+
+**Evidence of gap:**
+- No `POST /api/auth/password-change` endpoint
+- No session table; no revocation mechanism
+- `auth.go:214` — credential check is against compile-time constants; no runtime update path
+
+**Acceptance criteria:**
+- `POST /api/auth/password-change` (authenticated) — accepts `{current_password, new_password}`; new password min 12 chars; bcrypt-hashed in DB
+- `POST /api/admin/revoke-sessions/{username}` (admin only) — adds token hash to a `revoked_tokens` blacklist table; checked in `VerifyToken`
+- Blacklist entries pruned when their original TTL would have expired
+- UI: "Change Password" option in user menu (top-right header)
+
+**Verification:** Change password; verify old password no longer works. Revoke session; verify next API call returns 401.
+
+---
+
+## AUTH-003 Unauthenticated CSR Endpoint (Access-Control Bug)
+
+**Priority:** P1
+**Scope:** `/api/certificates/csr` is in the public allowlist — any network client can generate PQC certificate signing requests without authentication. This bypasses operator control over certificate issuance.
+
+**Evidence of gap:**
+- `server/internal/httpapi/auth.go:122` — `/api/certificates/csr` explicitly allowed without JWT
+- `server/internal/httpapi/server.go:58` — route registered without `RequireRole()`
+
+**Acceptance criteria:**
+- Remove `/api/certificates/csr` from the unauthenticated allowlist in `auth.go`
+- Apply `RequireRole([]string{"operator", "admin"})` guard at route registration
+- CSR generation attempts are logged with actor identity
+- Test: unauthenticated POST returns 401; operator POST succeeds
+
+**Verification:** Unit test in `httpapi/handlers_test.go` confirms unauthenticated request returns 401.
+
+---
+
+## AUTH-004 HSM Sign/Verify Endpoints Lack Role Guard (Access-Control Bug)
+
+**Priority:** P1
+**Scope:** `/api/hsm/sign` and `/api/hsm/verify` are registered without `RequireRole()`, allowing any authenticated user (including viewers) to invoke HSM cryptographic operations.
+
+**Evidence of gap:**
+- `server/internal/httpapi/server.go:109-110` — both routes use bare `mux.HandleFunc()` with no role middleware
+- `/api/migrations/enqueue` (line 61) correctly uses `RequireRole([]string{"operator", "admin"})` — HSM endpoints should match
+
+**Acceptance criteria:**
+- Both HSM routes wrapped with `RequireRole([]string{"operator", "admin"})`
+- Test: viewer-role token returns 403; operator-role token succeeds
+
+**Verification:** Unit test confirms viewer token returns 403 for both endpoints.
+
+---
+
+## DOC-001 Operator Quick-Start Guide
+
+**Priority:** P1
+**Scope:** The README does not document: default login credentials, actual binary output paths after `make build`, what `JANUS_DISABLE_AUTH` actually does to the login flow, minimum required env vars to start, or what the agent config fields mean. First-time operators get blocked on each of these.
+
+**Evidence of gap:**
+- `README.md` "Running" section lists commands but not binary output paths (`server/janus-server`, `agent/target/release/janus-agent`)
+- Default credentials (`admin`/`janus-admin-pass`) appear only in `auth.go:214` — not documented anywhere
+- `JANUS_DISABLE_AUTH` behavior (bypasses server JWT but not UI login screen) not explained
+- Agent config fields (`enable_runtime_discovery`, TLS probing, `command_signing_key` required) not explained outside the example TOML comments
+
+**Acceptance criteria:**
+- `docs/QUICKSTART.md` (≤ 2 pages) covering: prerequisites, 5-command startup (postgres + server + UI + agent), default credentials table, binary paths, minimum env vars, first-scan verification
+- README "Quick Start" section links to `docs/QUICKSTART.md` and shows the 5-command sequence
+- Each agent config field in `janus-agent.example.toml` has an inline comment explaining its effect and whether it requires elevated privileges
+
+**Verification:** A new engineer can go from zero to first finding displayed in < 15 minutes following only `docs/QUICKSTART.md`.
+
+---
+
+## DOC-002 API Reference
+
+**Priority:** P2
+**Scope:** The README has a partial API endpoint table with no request/response schemas, no auth requirements per endpoint, and no error codes. Integrators cannot write clients without reading server source code.
+
+**Acceptance criteria:**
+- `docs/API_REFERENCE.md` covering every endpoint: method, path, auth role required, request body schema, response schema, example `curl` call, common error codes
+- Kept in sync with `server/internal/httpapi/server.go` route registrations (CI check)
+- Alternatively, superseded by OPS-005 (OpenAPI spec)
+
+---
+
+## DOC-003 Plugin Development Guide
+
+**Priority:** P2
+**Scope:** Janus supports external plugins via `plugin_commands` config, but there is no documentation on how to write one, what output format is expected, what resource limits apply, or how to test one.
+
+**Acceptance criteria:**
+- `docs/PLUGIN_GUIDE.md`: plugin contract (stdin/stdout JSON schema), resource limits (memory_mb, cpu_percent), supported OS environments, example plugin (Python + shell), testing with `janus-agent check --plugin-only`, error handling
+
+---
+
+## DOC-004 Troubleshooting Runbook
+
+**Priority:** P2
+**Scope:** Common failure modes have no documented resolution path. Users must read source code or ask for help to diagnose issues.
+
+**Acceptance criteria:**
+- `docs/TROUBLESHOOTING.md` covering at minimum: "Incompatible API version" error (rebuild server), agent flood log (LLM timeout — now fixed), login loop, agent won't register (signing key mismatch), database migration failures, gRPC connection refused, scan finds nothing (exclusion list too broad)
+- Each entry: symptom, likely cause, diagnostic command, resolution
+
+---
+
+## LLM-021 LLM Configuration Unification
+
+**Priority:** P2
+**Scope:** LLM config exists in two places: server env vars (`JANUS_LLM_*`) and fleet-DB UI fields (saved by FleetManagement.tsx but never read by the service). The UI fields are misleading — operators think they're configuring LLM but the server ignores those values.
+
+**Evidence of gap:**
+- `ui/src/components/FleetManagement.tsx:31-46` — `llmApiKey`, `llmApiUrl` fields saved to fleet DB
+- `server/internal/llm/service.go:44` — only reads `cfg.LLM` from env; never queries fleet DB
+- Two sources of truth creates confusion about which value is authoritative
+
+**Acceptance criteria:**
+- Either: (a) remove the DB-stored LLM fields from FleetManagement and replace with read-only display of env-var-sourced config (simpler), OR (b) move all LLM config to DB and hot-reload on change
+- Chosen approach documented in `CLAUDE.md` and in the UI with a callout
+- No silent config divergence: if DB fields exist but env vars disagree, server logs a warning at startup
+
+---
+
+## LLM-022 Interactive Verdict Review in Findings UI
+
+**Priority:** P2
+**Scope:** LLM verdicts are visible only in the LLM Analysis tab. Operators cannot review a verdict in context while looking at a finding's detail panel. Accepting or overriding a verdict requires navigating away from the finding.
+
+**Acceptance criteria:**
+- Finding detail panel shows LLM verdict (if exists): verdict label, confidence bar, reasoning, evidence citations
+- "Accept Verdict" button: if `confirmed` → no-op; if `false_positive` → sets finding status to `accepted_risk`; if `severity_adjusted` → prompts to apply adjusted severity
+- "Override" button: opens dialog to set manual status regardless of verdict
+- Verdict acceptance is recorded in `finding_lifecycle_events` with `actor` = logged-in user
+
+---
+
+## LLM-023 LLM Usage Dashboard
+
+**Priority:** P2
+**Scope:** No visibility into LLM token consumption, cost, or job success rate. Operators cannot track spend or identify runaway analysis jobs.
+
+**Acceptance criteria:**
+- `GET /api/llm/usage/summary` returns: total jobs (by status), total tokens in/out, estimated cost (configurable $/1k tokens), avg latency, top-5 models used
+- LLM Analysis tab gains a "Usage" sub-panel with these metrics, updated on each job completion via WebSocket
+- `JANUS_LLM_COST_PER_1K_TOKENS_IN` / `_OUT` env vars for cost estimation (default 0 = not shown)
+- Token budget enforcement: if `JANUS_LLM_MAX_TOKENS_PER_REQUEST` exceeded, job is rejected before calling provider
+
+---
+
 ## Recommended Execution Order
 
 1. **Prove Linux:** WP-LNX-001 through WP-LNX-008; pass Linux Gate L0.
@@ -824,3 +1327,4 @@ Current gaps that drive this plan:
 4. **Make results and migrations trustworthy:** WP-013 through WP-019, WP-026.
 5. **Scale and standardize:** WP-020, WP-021, WP-025.
 6. **Lead the category:** WP-022 through WP-024, WP-027.
+7. **Operational experience (new):** AUTH-003, AUTH-004, OPS-001 (P1 fixes first), then DOC-001, UX-001, OPS-002, UX-002, UX-003, UX-004, LLM-021, LLM-022, AUTH-001, OPS-003, OPS-005, OPS-006, OPS-007, UX-006, UX-007, LLM-023, OPS-004, AUTH-002, DOC-002, DOC-003, DOC-004, UX-005.
