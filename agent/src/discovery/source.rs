@@ -249,7 +249,40 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
     out
 }
 
-fn analyze_snippet_llm_sync(http_endpoint: &str, prompts_dir: &str, name: &str, source_file: &str, snippet: &str) -> Result<String> {
+fn default_classify_template() -> PromptTemplate {
+    PromptTemplate {
+        prompt: concat!(
+            "You are a cryptography security expert. Analyze the following code snippet ",
+            "which contains a reference to the cryptographic algorithm '{{algorithm}}'. ",
+            "Classify the usage intent into exactly one of the following categories: ",
+            "'protect', 'verify', 'negotiate', 'test'. ",
+            "Reply with a JSON object exactly matching this format: ",
+            "{\"intent\": \"one-of-the-categories\", \"confidence\": 0.9}\n",
+            "Code Snippet (from {{source_file}}):\n{{snippet}}"
+        ).to_string(),
+        model: "gpt-4o-mini".to_string(),
+        temperature: 0.0,
+        version: None,
+    }
+}
+
+fn default_remediate_template() -> PromptTemplate {
+    PromptTemplate {
+        prompt: concat!(
+            "You are a cryptography security expert. Rewrite the following code snippet from ",
+            "'{{source_file}}' to migrate from the quantum-vulnerable algorithm '{{algorithm}}' ",
+            "to a secure post-quantum or modern standard (e.g., ML-KEM, ML-DSA, SHA-256). ",
+            "The response must return ONLY a unified diff patch. ",
+            "Do not include markdown code block formatting (like ```diff), just the raw diff text. ",
+            "Remediation patch target file: {{source_file}}\nCode Snippet:\n{{snippet}}"
+        ).to_string(),
+        model: "gpt-4o-mini".to_string(),
+        temperature: 0.0,
+        version: None,
+    }
+}
+
+fn analyze_snippet_llm_sync(http_endpoint: &str, tmpl: &PromptTemplate, name: &str, source_file: &str, snippet: &str) -> Result<String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -259,24 +292,6 @@ fn analyze_snippet_llm_sync(http_endpoint: &str, prompts_dir: &str, name: &str, 
         .split('/')
         .next()
         .unwrap_or("127.0.0.1:8080");
-
-    let tmpl = PromptRegistry::new(prompts_dir).load_or_default(
-        "classify-intent",
-        PromptTemplate {
-            prompt: concat!(
-                "You are a cryptography security expert. Analyze the following code snippet ",
-                "which contains a reference to the cryptographic algorithm '{{algorithm}}'. ",
-                "Classify the usage intent into exactly one of the following categories: ",
-                "'protect', 'verify', 'negotiate', 'test'. ",
-                "Reply with a JSON object exactly matching this format: ",
-                "{\"intent\": \"one-of-the-categories\", \"confidence\": 0.9}\n",
-                "Code Snippet (from {{source_file}}):\n{{snippet}}"
-            ).to_string(),
-            model: "gpt-4o-mini".to_string(),
-            temperature: 0.0,
-            version: None,
-        },
-    );
     let prompt = tmpl.render(&[("algorithm", name), ("source_file", source_file), ("snippet", snippet)]);
 
     let body_json = serde_json::json!({
@@ -310,7 +325,7 @@ fn analyze_snippet_llm_sync(http_endpoint: &str, prompts_dir: &str, name: &str, 
     if let Some(idx) = response.find("\r\n\r\n") {
         let body = &response[idx + 4..];
         let val: serde_json::Value = serde_json::from_str(body)?;
-        
+
         if let Some(choices) = val.get("choices") {
             if let Some(content) = choices[0]["message"]["content"].as_str() {
                 let clean = content.replace("```json", "").replace("```", "").trim().to_string();
@@ -321,13 +336,13 @@ fn analyze_snippet_llm_sync(http_endpoint: &str, prompts_dir: &str, name: &str, 
             }
         }
     }
-    
+
     anyhow::bail!("failed to parse LLM response")
 }
 
 pub fn generate_remediation_patch_llm(
     http_endpoint: &str,
-    prompts_dir: &str,
+    tmpl: &PromptTemplate,
     name: &str,
     source_file: &str,
     snippet: &str,
@@ -342,22 +357,6 @@ pub fn generate_remediation_patch_llm(
         .next()
         .unwrap_or("127.0.0.1:8080");
 
-    let tmpl = PromptRegistry::new(prompts_dir).load_or_default(
-        "remediate-patch",
-        PromptTemplate {
-            prompt: concat!(
-                "You are a cryptography security expert. Rewrite the following code snippet from ",
-                "'{{source_file}}' to migrate from the quantum-vulnerable algorithm '{{algorithm}}' ",
-                "to a secure post-quantum or modern standard (e.g., ML-KEM, ML-DSA, SHA-256). ",
-                "The response must return ONLY a unified diff patch. ",
-                "Do not include markdown code block formatting (like ```diff), just the raw diff text. ",
-                "Remediation patch target file: {{source_file}}\nCode Snippet:\n{{snippet}}"
-            ).to_string(),
-            model: "gpt-4o-mini".to_string(),
-            temperature: 0.0,
-            version: None,
-        },
-    );
     let prompt = tmpl.render(&[("algorithm", name), ("source_file", source_file), ("snippet", snippet)]);
 
     let body_json = serde_json::json!({
@@ -410,6 +409,19 @@ pub fn generate_remediation_patch_llm(
 pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
     let patterns = patterns()?;
     let mut out = ScanResult::default();
+
+    // Load prompt templates once per scan (not per match) to avoid repeated disk reads.
+    let classify_tmpl = if use_llm {
+        PromptRegistry::new(&cfg.prompts_dir).load_or_default("classify-intent", default_classify_template())
+    } else {
+        default_classify_template()
+    };
+    let remediate_tmpl = if use_llm {
+        PromptRegistry::new(&cfg.prompts_dir).load_or_default("remediate-patch", default_remediate_template())
+    } else {
+        default_remediate_template()
+    };
+
     // Candidate patches are collected and written once next to the report —
     // a passive scan must never write into the scanned tree.
     let mut pending_patches: Vec<String> = Vec::new();
@@ -502,7 +514,7 @@ pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
                     let (algo_status, algo_conf) = if use_llm && !is_test_file {
                         match analyze_snippet_llm_sync(
                             &cfg.http_endpoint(),
-                            &cfg.prompts_dir,
+                            &classify_tmpl,
                             pat.name,
                             &entry.path().display().to_string(),
                             &snippet,
@@ -526,7 +538,7 @@ pub fn scan(cfg: &AgentConfig, use_llm: bool) -> Result<ScanResult> {
                         let patch = if use_llm {
                             match generate_remediation_patch_llm(
                                 &cfg.http_endpoint(),
-                                &cfg.prompts_dir,
+                                &remediate_tmpl,
                                 pat.name,
                                 &path_str,
                                 &snippet,
