@@ -941,7 +941,7 @@ Identified through systematic codebase audit and hands-on operator testing. Thes
 | AUTH-001 | P2 | **Partial** | Configurable JWT TTL via JANUS_JWT_TTL implemented (clamped 5m-720h, commit pending); refresh-token flow still pending |
 | AUTH-002 | P2 | Not started | Password change and session revocation |
 | AUTH-003 | P1 | **Implemented** | `/api/certificates/csr` removed from public allowlist, wrapped with `RequireRole(operator,admin)`, actor audit-logged. Tests: unauth→401, viewer→403, operator passes. |
-| AUTH-004 | P1 | Not started | HSM sign/verify endpoints lack role guard (access-control bug) |
+| AUTH-004 | P1 | **Implemented** | /api/hsm/sign and /api/hsm/verify wrapped with RequireRole(operator,admin); test: admin/operator pass, viewer/no-role 403 |
 | DOC-001 | P1 | Not started | Operator quick-start: default credentials, build outputs, env vars |
 | DOC-002 | P2 | Not started | API reference with all endpoints, auth, request/response shapes |
 | DOC-003 | P2 | Not started | Plugin development guide |
