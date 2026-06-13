@@ -1,3 +1,5 @@
+//go:build windows
+
 package hsm
 
 import (
@@ -11,15 +13,14 @@ import (
 )
 
 // PKCS11Client implements the HSM interface using direct PKCS#11 library loading
-// via syscall (dlopen/dlsym on Linux, LoadLibrary/GetProcAddress on Windows).
-// This avoids external Go dependencies and works with any standard PKCS#11 module.
+// via Windows LoadLibrary/GetProcAddress.
 type PKCS11Client struct {
-	mu         sync.Mutex
-	libHandle  syscall.Handle // platform-specific: HMODULE on Windows, void* on Linux
-	modulePath string
+	mu          sync.Mutex
+	libHandle   syscall.Handle // platform-specific: HMODULE on Windows, void* on Linux
+	modulePath  string
 	initialized bool
-	pin    string
-	slotID uint
+	pin         string
+	slotID      uint
 }
 
 // pkcs11Func represents a function pointer loaded from the PKCS#11 library.
@@ -127,4 +128,3 @@ func (c *PKCS11Client) GetKeyInfo(keyID string) (*KeyInfo, error) {
 // Ensure imports are used
 var _ = uuid.NewString
 var _ = unsafe.Sizeof(0)
-

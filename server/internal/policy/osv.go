@@ -15,11 +15,11 @@ import (
 // OSVClient provides live vulnerability lookups against the OSV.dev API.
 // Results are cached to avoid redundant network calls within the same assessment cycle.
 type OSVClient struct {
-	mu       sync.RWMutex
-	cache    map[string][]OSVVulnerability
-	client   *http.Client
-	enabled  bool
-	baseURL  string
+	mu      sync.RWMutex
+	cache   map[string][]OSVVulnerability
+	client  *http.Client
+	enabled bool
+	baseURL string
 }
 
 type OSVVulnerability struct {
@@ -36,8 +36,8 @@ type OSVSeverity struct {
 }
 
 type OSVAffected struct {
-	Package  OSVPackage  `json:"package"`
-	Ranges   []OSVRange  `json:"ranges"`
+	Package OSVPackage `json:"package"`
+	Ranges  []OSVRange `json:"ranges"`
 }
 
 type OSVPackage struct {
@@ -58,7 +58,7 @@ type OSVEvent struct {
 
 type osvQueryRequest struct {
 	Package *osvQueryPackage `json:"package,omitempty"`
-	Version string          `json:"version,omitempty"`
+	Version string           `json:"version,omitempty"`
 }
 
 type osvQueryPackage struct {

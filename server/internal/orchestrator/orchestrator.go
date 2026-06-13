@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -82,7 +83,8 @@ func (o *Orchestrator) Verify(cmd *pb.MigrationCommand) bool {
 }
 
 func canonicalCommand(cmd *pb.MigrationCommand) string {
-	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s\n%s\n%d\n%s\n%d\n%t",
+	checklist, _ := json.Marshal(cmd.ValidationChecklist)
+	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%d\n%s\n%d\n%t",
 		cmd.CommandId,
 		cmd.HostUuid,
 		cmd.TargetService,
@@ -90,10 +92,10 @@ func canonicalCommand(cmd *pb.MigrationCommand) string {
 		cmd.TargetKem,
 		cmd.TargetSignature,
 		cmd.ConfigPath,
+		checklist,
 		cmd.RollbackWindowSeconds,
 		cmd.PatchUnifiedDiff,
 		cmd.IssuedAtUnix,
 		cmd.DryRun,
 	)
 }
-

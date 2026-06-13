@@ -19,10 +19,10 @@ import (
 )
 
 type CSRProfile struct {
-	CommonName         string
-	DNSNames           []string
-	Organization       []string
-	TargetSignature    string
+	CommonName          string
+	DNSNames            []string
+	Organization        []string
+	TargetSignature     string
 	HybridCompatibility bool
 }
 

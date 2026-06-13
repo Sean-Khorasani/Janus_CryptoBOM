@@ -219,4 +219,3 @@ var JanusTelemetry_ServiceDesc = grpc.ServiceDesc{
 func IsEOF(err error) bool {
 	return err == io.EOF
 }
-

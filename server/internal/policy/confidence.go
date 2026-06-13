@@ -16,8 +16,8 @@ type ConfidenceReport struct {
 
 // ConfidenceAnalyzer tracks and reports on the confidence of policy findings.
 type ConfidenceAnalyzer struct {
-	mu      sync.Mutex
-	store   store.Store
+	mu       sync.Mutex
+	store    store.Store
 	outcomes map[string]bool // findingID -> wasRealFinding (in-memory tracking)
 }
 

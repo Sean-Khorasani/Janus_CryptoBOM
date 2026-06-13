@@ -21,11 +21,11 @@ import (
 )
 
 const (
-	wsGUID            = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	opText            = 1
-	opClose           = 8
-	opPing            = 9
-	opPong            = 10
+	wsGUID  = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	opText  = 1
+	opClose = 8
+	opPing  = 9
+	opPong  = 10
 )
 
 // Event is a JSON-serializable message pushed to all connected UI clients.
@@ -37,9 +37,9 @@ type Event struct {
 
 // wsConn wraps a single WebSocket connection.
 type wsConn struct {
-	conn   net.Conn
-	mu     sync.Mutex
-	done   chan struct{}
+	conn net.Conn
+	mu   sync.Mutex
+	done chan struct{}
 }
 
 func (w *wsConn) writeText(data []byte) error {

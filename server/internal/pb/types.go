@@ -66,15 +66,15 @@ type AgentRegistrationAck struct {
 }
 
 type CbomTelemetryPayload struct {
-	TelemetryId          string                `protobuf:"bytes,1,opt,name=telemetry_id,json=telemetryId,proto3" json:"telemetry_id,omitempty"`
-	HostUuid             string                `protobuf:"bytes,2,opt,name=host_uuid,json=hostUuid,proto3" json:"host_uuid,omitempty"`
-	ScanStartedUnix      int64                 `protobuf:"varint,3,opt,name=scan_started_unix,json=scanStartedUnix,proto3" json:"scan_started_unix,omitempty"`
-	ScanFinishedUnix     int64                 `protobuf:"varint,4,opt,name=scan_finished_unix,json=scanFinishedUnix,proto3" json:"scan_finished_unix,omitempty"`
-	Components           []*CbomComponent      `protobuf:"bytes,5,rep,name=components,proto3" json:"components,omitempty"`
-	Findings             []*CryptoFinding      `protobuf:"bytes,6,rep,name=findings,proto3" json:"findings,omitempty"`
-	NetworkObservations  []*NetworkObservation `protobuf:"bytes,7,rep,name=network_observations,json=networkObservations,proto3" json:"network_observations,omitempty"`
-	Evidence             []*Evidence           `protobuf:"bytes,8,rep,name=evidence,proto3" json:"evidence,omitempty"`
-	CycloneDxJson        string                `protobuf:"bytes,9,opt,name=cyclone_dx_json,json=cycloneDxJson,proto3" json:"cyclone_dx_json,omitempty"`
+	TelemetryId         string                `protobuf:"bytes,1,opt,name=telemetry_id,json=telemetryId,proto3" json:"telemetry_id,omitempty"`
+	HostUuid            string                `protobuf:"bytes,2,opt,name=host_uuid,json=hostUuid,proto3" json:"host_uuid,omitempty"`
+	ScanStartedUnix     int64                 `protobuf:"varint,3,opt,name=scan_started_unix,json=scanStartedUnix,proto3" json:"scan_started_unix,omitempty"`
+	ScanFinishedUnix    int64                 `protobuf:"varint,4,opt,name=scan_finished_unix,json=scanFinishedUnix,proto3" json:"scan_finished_unix,omitempty"`
+	Components          []*CbomComponent      `protobuf:"bytes,5,rep,name=components,proto3" json:"components,omitempty"`
+	Findings            []*CryptoFinding      `protobuf:"bytes,6,rep,name=findings,proto3" json:"findings,omitempty"`
+	NetworkObservations []*NetworkObservation `protobuf:"bytes,7,rep,name=network_observations,json=networkObservations,proto3" json:"network_observations,omitempty"`
+	Evidence            []*Evidence           `protobuf:"bytes,8,rep,name=evidence,proto3" json:"evidence,omitempty"`
+	CycloneDxJson       string                `protobuf:"bytes,9,opt,name=cyclone_dx_json,json=cycloneDxJson,proto3" json:"cyclone_dx_json,omitempty"`
 }
 
 type CbomComponent struct {
@@ -134,14 +134,14 @@ type NetworkObservation struct {
 }
 
 type Evidence struct {
-	EvidenceId          string  `protobuf:"bytes,1,opt,name=evidence_id,json=evidenceId,proto3" json:"evidence_id,omitempty"`
-	SourceType          string  `protobuf:"bytes,2,opt,name=source_type,json=sourceType,proto3" json:"source_type,omitempty"`
-	SourceTool          string  `protobuf:"bytes,3,opt,name=source_tool,json=sourceTool,proto3" json:"source_tool,omitempty"`
-	Target              string  `protobuf:"bytes,4,opt,name=target,proto3" json:"target,omitempty"`
-	CollectionTimeUnix  int64   `protobuf:"varint,5,opt,name=collection_time_unix,json=collectionTimeUnix,proto3" json:"collection_time_unix,omitempty"`
-	RawArtifactSha256   string  `protobuf:"bytes,6,opt,name=raw_artifact_sha256,json=rawArtifactSha256,proto3" json:"raw_artifact_sha256,omitempty"`
-	Confidence          float64 `protobuf:"fixed64,7,opt,name=confidence,proto3" json:"confidence,omitempty"`
-	SensitivityClass    string  `protobuf:"bytes,8,opt,name=sensitivity_class,json=sensitivityClass,proto3" json:"sensitivity_class,omitempty"`
+	EvidenceId         string  `protobuf:"bytes,1,opt,name=evidence_id,json=evidenceId,proto3" json:"evidence_id,omitempty"`
+	SourceType         string  `protobuf:"bytes,2,opt,name=source_type,json=sourceType,proto3" json:"source_type,omitempty"`
+	SourceTool         string  `protobuf:"bytes,3,opt,name=source_tool,json=sourceTool,proto3" json:"source_tool,omitempty"`
+	Target             string  `protobuf:"bytes,4,opt,name=target,proto3" json:"target,omitempty"`
+	CollectionTimeUnix int64   `protobuf:"varint,5,opt,name=collection_time_unix,json=collectionTimeUnix,proto3" json:"collection_time_unix,omitempty"`
+	RawArtifactSha256  string  `protobuf:"bytes,6,opt,name=raw_artifact_sha256,json=rawArtifactSha256,proto3" json:"raw_artifact_sha256,omitempty"`
+	Confidence         float64 `protobuf:"fixed64,7,opt,name=confidence,proto3" json:"confidence,omitempty"`
+	SensitivityClass   string  `protobuf:"bytes,8,opt,name=sensitivity_class,json=sensitivityClass,proto3" json:"sensitivity_class,omitempty"`
 }
 
 type MigrationCommand struct {
@@ -221,4 +221,3 @@ func (*MigrationStatusReport) ProtoMessage()    {}
 func (m *MigrationStatusAck) Reset()         { *m = MigrationStatusAck{} }
 func (m *MigrationStatusAck) String() string { return proto.CompactTextString(m) }
 func (*MigrationStatusAck) ProtoMessage()    {}
-
