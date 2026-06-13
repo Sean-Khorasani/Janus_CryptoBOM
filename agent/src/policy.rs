@@ -27,10 +27,12 @@ fn find_evidence_ids(payload: &CbomTelemetryPayload, asset_ref: &str) -> Vec<Str
 
     for ev in &payload.evidence {
         let ev_target_normalized = ev.target.replace('/', "\\");
-        if ev.target == asset_ref 
-            || ev_target_normalized == clean_ref_normalized 
-            || (clean_ref_normalized.len() > 4 && ev_target_normalized.contains(&clean_ref_normalized))
-            || (ev_target_normalized.len() > 4 && clean_ref_normalized.contains(&ev_target_normalized))
+        if ev.target == asset_ref
+            || ev_target_normalized == clean_ref_normalized
+            || (clean_ref_normalized.len() > 4
+                && ev_target_normalized.contains(&clean_ref_normalized))
+            || (ev_target_normalized.len() > 4
+                && clean_ref_normalized.contains(&ev_target_normalized))
         {
             ids.push(ev.evidence_id.clone());
         }
@@ -56,15 +58,20 @@ fn assess_algorithm(
             component.bom_ref, alg.name, alg.role
         );
         let mut rule; // = "JANUS-PQC-001";
-        // let mut profile = "hybrid-tls13-mlkem-mldsa"; toreview and todel
+                      // let mut profile = "hybrid-tls13-mlkem-mldsa"; toreview and todel
         let profile;
         let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
 
-        if alg.role == CryptoRole::CertSignature as i32 || alg.role == CryptoRole::Signature as i32 || alg.role == CryptoRole::CertPublicKey as i32 {
+        if alg.role == CryptoRole::CertSignature as i32
+            || alg.role == CryptoRole::Signature as i32
+            || alg.role == CryptoRole::CertPublicKey as i32
+        {
             title = "Classical public-key signature cryptography is quantum-vulnerable".to_string();
             desc = format!(
                 "{} uses {} for {}. Migrate to PQC signature standard ML-DSA-65 or SLH-DSA.",
-                component.bom_ref, alg.name, role_name(alg.role)
+                component.bom_ref,
+                alg.name,
+                role_name(alg.role)
             );
             rule = "JANUS-PQC-001";
             profile = "certificate-signature-modernization";
@@ -139,8 +146,14 @@ fn assess_algorithm(
 
     let name_upper = alg.name.to_ascii_uppercase();
     let family_upper = alg.family.to_ascii_uppercase();
-    if name_upper.contains("TLS 1.0") || name_upper.contains("TLS 1.1") || name_upper.contains("RC4") || name_upper.contains("3DES")
-        || family_upper.contains("TLS 1.0") || family_upper.contains("TLS 1.1") || family_upper.contains("RC4") || family_upper.contains("3DES")
+    if name_upper.contains("TLS 1.0")
+        || name_upper.contains("TLS 1.1")
+        || name_upper.contains("RC4")
+        || name_upper.contains("3DES")
+        || family_upper.contains("TLS 1.0")
+        || family_upper.contains("TLS 1.1")
+        || family_upper.contains("RC4")
+        || family_upper.contains("3DES")
     {
         let evidence_ids = find_evidence_ids(payload, &component.bom_ref);
         push_finding(
@@ -162,7 +175,10 @@ fn assess_algorithm(
             payload,
             RiskSeverity::Critical,
             "Unencrypted private key found in process memory",
-            &format!("Unencrypted private key found in process memory: {}", component.bom_ref),
+            &format!(
+                "Unencrypted private key found in process memory: {}",
+                component.bom_ref
+            ),
             &component.bom_ref,
             &alg.name,
             "JANUS-CLASSICAL-008",
@@ -179,7 +195,10 @@ fn assess_network(payload: &mut CbomTelemetryPayload, obs: &NetworkObservation) 
             payload,
             RiskSeverity::Critical,
             "Cleartext service observed",
-            &format!("{} exposes {} without cryptographic protection.", obs.endpoint, obs.protocol),
+            &format!(
+                "{} exposes {} without cryptographic protection.",
+                obs.endpoint, obs.protocol
+            ),
             &obs.endpoint,
             "cleartext",
             "JANUS-NET-001",
@@ -248,6 +267,7 @@ fn assess_network(payload: &mut CbomTelemetryPayload, obs: &NetworkObservation) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_finding(
     payload: &mut CbomTelemetryPayload,
     severity: RiskSeverity,
@@ -259,9 +279,11 @@ fn push_finding(
     profile: &str,
     evidence_ids: Vec<String>,
 ) {
-    if payload.findings.iter().any(|f| {
-        f.policy_rule_id == rule && f.asset_ref == asset_ref && f.algorithm == algorithm
-    }) {
+    if payload
+        .findings
+        .iter()
+        .any(|f| f.policy_rule_id == rule && f.asset_ref == asset_ref && f.algorithm == algorithm)
+    {
         return;
     }
     payload.findings.push(CryptoFinding {
@@ -308,7 +330,9 @@ fn contains_any(s: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{CbomComponent, CbomTelemetryPayload, CryptoAlgorithm, CryptoRole, RiskSeverity};
+    use crate::proto::{
+        CbomComponent, CbomTelemetryPayload, CryptoAlgorithm, CryptoRole, RiskSeverity,
+    };
 
     #[test]
     fn test_assess_unencrypted_private_key() {
@@ -345,7 +369,10 @@ mod tests {
         assert_eq!(payload.findings.len(), 1);
         assert_eq!(payload.findings[0].policy_rule_id, "JANUS-CLASSICAL-008");
         assert_eq!(payload.findings[0].severity, RiskSeverity::Critical as i32);
-        assert_eq!(payload.findings[0].title, "Unencrypted private key found in process memory");
+        assert_eq!(
+            payload.findings[0].title,
+            "Unencrypted private key found in process memory"
+        );
     }
 
     #[test]
@@ -391,7 +418,7 @@ mod tests {
                     confidence: 0.80,
                     quantum_vulnerable: false,
                     context_snippet: String::new(),
-                }
+                },
             ],
             dependencies: Vec::new(),
             reachable: true,
@@ -403,7 +430,10 @@ mod tests {
         assert_eq!(payload.findings.len(), 2);
         assert_eq!(payload.findings[0].policy_rule_id, "JANUS-CLASSICAL-009");
         assert_eq!(payload.findings[0].severity, RiskSeverity::High as i32);
-        assert_eq!(payload.findings[0].title, "Weak Schannel/TLS Policy enabled in Registry");
+        assert_eq!(
+            payload.findings[0].title,
+            "Weak Schannel/TLS Policy enabled in Registry"
+        );
         assert_eq!(payload.findings[1].policy_rule_id, "JANUS-CLASSICAL-009");
     }
 }

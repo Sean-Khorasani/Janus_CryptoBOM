@@ -43,10 +43,16 @@ pub async fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
     // recipe next to the report. Generated only — applying it is an operator decision.
     let pq_disabled = out.components.iter().find(|c| {
         c.component_type == "windows-tls-group-policy"
-            && c.algorithms.iter().any(|a| a.status == "schannel-pq-group-disabled")
+            && c.algorithms
+                .iter()
+                .any(|a| a.status == "schannel-pq-group-disabled")
     });
     if let Some(c) = pq_disabled {
-        let curves = c.algorithms.first().map(|a| a.curve.clone()).unwrap_or_default();
+        let curves = c
+            .algorithms
+            .first()
+            .map(|a| a.curve.clone())
+            .unwrap_or_default();
         let recipe = schannel_pq_recipe(&c.version, &curves);
         let report_dir = std::path::Path::new(&cfg.report_path)
             .parent()
@@ -210,7 +216,8 @@ fn parse_cng_pq_capability(raw: &str) -> CbomComponent {
                 key_bits: 0,
                 curve: String::new(),
                 implementation_library: "Microsoft Primitive Provider".to_string(),
-                source_file: "HKLM\\...\\Cryptography\\Providers\\Microsoft Primitive Provider\\UM".to_string(),
+                source_file: "HKLM\\...\\Cryptography\\Providers\\Microsoft Primitive Provider\\UM"
+                    .to_string(),
                 source_line: 0,
                 source_column: 0,
                 symbol: needle.to_string(),
@@ -257,8 +264,15 @@ fn parse_cng_pq_capability(raw: &str) -> CbomComponent {
 /// the CNG primitives exist ("PQ-capable but not PQ-enabled").
 fn parse_tls_group_policy(raw: &str) -> CbomComponent {
     let val: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or_default();
-    let build = val.get("Build").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let display = val.get("DisplayVersion").and_then(|v| v.as_str()).unwrap_or("");
+    let build = val
+        .get("Build")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let display = val
+        .get("DisplayVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let curves = val.get("Curves").and_then(|v| v.as_str()).unwrap_or("");
     let curves_l = curves.to_ascii_lowercase();
     let pq_enabled = curves_l.contains("mlkem");
@@ -339,14 +353,19 @@ fn carve_key_artifacts(cfg: &AgentConfig, out: &mut ScanResult) {
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if !matches!(ext.as_str(), "pfx" | "p12" | "pem" | "jks" | "key" | "der" | "crt" | "cer") {
+            if !matches!(
+                ext.as_str(),
+                "pfx" | "p12" | "pem" | "jks" | "key" | "der" | "crt" | "cer"
+            ) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
             if meta.len() > cfg.max_file_bytes {
                 continue;
             }
-            let Ok(raw) = std::fs::read(entry.path()) else { continue };
+            let Ok(raw) = std::fs::read(entry.path()) else {
+                continue;
+            };
             let header = classify_key_artifact(&ext, &raw);
             let path = entry.path().display().to_string();
             out.evidence.push(Evidence {
@@ -403,7 +422,10 @@ fn carve_key_artifacts(cfg: &AgentConfig, out: &mut ScanResult) {
 #[allow(dead_code)] // exercised by unit tests on all platforms; runtime use is Windows-only
 fn classify_key_artifact(ext: &str, raw: &[u8]) -> &'static str {
     let head = String::from_utf8_lossy(&raw[..raw.len().min(80)]).to_string();
-    if head.contains("BEGIN RSA PRIVATE KEY") || head.contains("BEGIN EC PRIVATE KEY") || head.contains("BEGIN DSA PRIVATE KEY") {
+    if head.contains("BEGIN RSA PRIVATE KEY")
+        || head.contains("BEGIN EC PRIVATE KEY")
+        || head.contains("BEGIN DSA PRIVATE KEY")
+    {
         return "pem-private-key-legacy-format";
     }
     if head.contains("BEGIN ENCRYPTED PRIVATE KEY") {
@@ -637,7 +659,8 @@ fn algorithm_from_windows_line(
     // (name, family, quantum_vulnerable). Cert public keys and signatures over
     // RSA/ECC/DSA are the inventory's core QV findings; PQ algorithms (RFC 9881
     // ML-DSA OID arc 2.16.840.1.101.3.4.3.x, RFC 9909 SLH-DSA) classify as safe.
-    let (name, family, qv) = if lower.contains("ml-dsa") || lower.contains("2.16.840.1.101.3.4.3.1") {
+    let (name, family, qv) = if lower.contains("ml-dsa") || lower.contains("2.16.840.1.101.3.4.3.1")
+    {
         ("ML-DSA".to_string(), "ML-DSA".to_string(), false)
     } else if lower.contains("slh-dsa") {
         ("SLH-DSA".to_string(), "SLH-DSA".to_string(), false)
@@ -671,11 +694,13 @@ fn algorithm_from_windows_line(
     } else {
         "windows-cert-store-observed".to_string()
     };
-    let curve = ["p256", "p-256", "p384", "p-384", "p521", "p-521", "nistp256", "nistp384", "nistp521"]
-        .iter()
-        .find(|c| lower.contains(*c))
-        .map(|c| c.to_string())
-        .unwrap_or_default();
+    let curve = [
+        "p256", "p-256", "p384", "p-384", "p521", "p-521", "nistp256", "nistp384", "nistp521",
+    ]
+    .iter()
+    .find(|c| lower.contains(*c))
+    .map(|c| c.to_string())
+    .unwrap_or_default();
     CryptoAlgorithm {
         name,
         family,
@@ -1099,7 +1124,9 @@ HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\Micro
     #[test]
     fn tls_group_policy_classical_only_is_qv_finding() {
         // Captured shape from this machine: PQ primitives present, SChannel classical.
-        let c = parse_tls_group_policy(r#"{"Build":"26200","UBR":8655,"DisplayVersion":"25H2","Curves":"curve25519,NistP256,NistP384"}"#);
+        let c = parse_tls_group_policy(
+            r#"{"Build":"26200","UBR":8655,"DisplayVersion":"25H2","Curves":"curve25519,NistP256,NistP384"}"#,
+        );
         assert_eq!(c.algorithms.len(), 1);
         let a = &c.algorithms[0];
         assert_eq!(a.status, "schannel-pq-group-disabled");
@@ -1110,7 +1137,9 @@ HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\Micro
 
     #[test]
     fn tls_group_policy_hybrid_enabled_is_safe() {
-        let c = parse_tls_group_policy(r#"{"Build":"26300","UBR":1,"DisplayVersion":"26H1","Curves":"X25519MLKEM768,curve25519,NistP256"}"#);
+        let c = parse_tls_group_policy(
+            r#"{"Build":"26300","UBR":1,"DisplayVersion":"26H1","Curves":"X25519MLKEM768,curve25519,NistP256"}"#,
+        );
         let a = &c.algorithms[0];
         assert_eq!(a.status, "schannel-pq-group-enabled");
         assert!(!a.quantum_vulnerable);
@@ -1119,12 +1148,22 @@ HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\Micro
 
     #[test]
     fn cert_algorithms_flag_quantum_vulnerable() {
-        let a = algorithm_from_windows_line("RSA (2048 Bits)", CryptoRole::CertPublicKey, 2048, "certutil");
+        let a = algorithm_from_windows_line(
+            "RSA (2048 Bits)",
+            CryptoRole::CertPublicKey,
+            2048,
+            "certutil",
+        );
         assert!(a.quantum_vulnerable);
         assert_eq!(a.status, "windows-cert-store-observed");
         let a = algorithm_from_windows_line("RSA", CryptoRole::CertPublicKey, 1024, "certutil");
         assert_eq!(a.status, "weak-key");
-        let a = algorithm_from_windows_line("sha256ECDSA P-384", CryptoRole::CertSignature, 0, "certutil");
+        let a = algorithm_from_windows_line(
+            "sha256ECDSA P-384",
+            CryptoRole::CertSignature,
+            0,
+            "certutil",
+        );
         assert!(a.quantum_vulnerable);
         assert_eq!(a.curve, "p-384");
         let a = algorithm_from_windows_line("ML-DSA-65", CryptoRole::CertSignature, 0, "certutil");
@@ -1135,19 +1174,40 @@ HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\Micro
     #[test]
     fn schannel_recipe_is_gated_and_reversible() {
         let r = schannel_pq_recipe("26200", "curve25519,NistP256,NistP384");
-        assert!(r.contains("param([switch]$Apply)"), "must be dry-run by default");
+        assert!(
+            r.contains("param([switch]$Apply)"),
+            "must be dry-run by default"
+        );
         assert!(r.contains("Disable-TlsEccCurve"), "must document rollback");
-        assert!(r.contains("ML-KEM"), "must check CNG capability precondition");
+        assert!(
+            r.contains("ML-KEM"),
+            "must check CNG capability precondition"
+        );
         assert!(r.contains("X25519MLKEM768"));
         assert!(r.starts_with("# janus remediation recipe"));
     }
 
     #[test]
     fn key_artifact_classification_is_metadata_only() {
-        assert_eq!(classify_key_artifact("pem", b"-----BEGIN RSA PRIVATE KEY-----\nMII..."), "pem-private-key-legacy-format");
-        assert_eq!(classify_key_artifact("pem", b"-----BEGIN ENCRYPTED PRIVATE KEY-----"), "pem-private-key-encrypted");
-        assert_eq!(classify_key_artifact("pem", b"-----BEGIN CERTIFICATE-----"), "pem-certificate");
-        assert_eq!(classify_key_artifact("pfx", &[0x30, 0x82]), "pkcs12-container");
-        assert_eq!(classify_key_artifact("key", b"random bytes"), "key-file-unrecognized-header");
+        assert_eq!(
+            classify_key_artifact("pem", b"-----BEGIN RSA PRIVATE KEY-----\nMII..."),
+            "pem-private-key-legacy-format"
+        );
+        assert_eq!(
+            classify_key_artifact("pem", b"-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+            "pem-private-key-encrypted"
+        );
+        assert_eq!(
+            classify_key_artifact("pem", b"-----BEGIN CERTIFICATE-----"),
+            "pem-certificate"
+        );
+        assert_eq!(
+            classify_key_artifact("pfx", &[0x30, 0x82]),
+            "pkcs12-container"
+        );
+        assert_eq!(
+            classify_key_artifact("key", b"random bytes"),
+            "key-file-unrecognized-header"
+        );
     }
 }

@@ -12,26 +12,77 @@ use walkdir::WalkDir;
 use object::Object;
 
 const SYMBOLS: &[(&str, &str, CryptoRole)] = &[
-    ("EVP_EncryptInit", "OpenSSL EVP symmetric encryption", CryptoRole::Symmetric),
-    ("EVP_DecryptInit", "OpenSSL EVP symmetric decryption", CryptoRole::Symmetric),
-    ("RSA_public_encrypt", "OpenSSL RSA public encryption", CryptoRole::KeyExchange),
-    ("RSA_private_decrypt", "OpenSSL RSA private decryption", CryptoRole::KeyExchange),
+    (
+        "EVP_EncryptInit",
+        "OpenSSL EVP symmetric encryption",
+        CryptoRole::Symmetric,
+    ),
+    (
+        "EVP_DecryptInit",
+        "OpenSSL EVP symmetric decryption",
+        CryptoRole::Symmetric,
+    ),
+    (
+        "RSA_public_encrypt",
+        "OpenSSL RSA public encryption",
+        CryptoRole::KeyExchange,
+    ),
+    (
+        "RSA_private_decrypt",
+        "OpenSSL RSA private decryption",
+        CryptoRole::KeyExchange,
+    ),
     ("RSA_sign", "OpenSSL RSA signature", CryptoRole::Signature),
-    ("ECDSA_sign", "OpenSSL ECDSA signature", CryptoRole::Signature),
-    ("ECDH_compute_key", "OpenSSL ECDH key exchange", CryptoRole::KeyExchange),
-    ("DH_generate_key", "OpenSSL DH key exchange", CryptoRole::KeyExchange),
-    ("SSL_CTX_set_cipher_list", "OpenSSL TLS cipher configuration", CryptoRole::KeyExchange),
-    ("SSL_CTX_set1_groups_list", "OpenSSL TLS group configuration", CryptoRole::KeyExchange),
-    ("BCryptEncrypt", "Windows CNG encryption", CryptoRole::Symmetric),
-    ("BCryptSecretAgreement", "Windows CNG secret agreement", CryptoRole::KeyExchange),
-    ("CryptEncrypt", "Windows CAPI encryption", CryptoRole::Symmetric),
+    (
+        "ECDSA_sign",
+        "OpenSSL ECDSA signature",
+        CryptoRole::Signature,
+    ),
+    (
+        "ECDH_compute_key",
+        "OpenSSL ECDH key exchange",
+        CryptoRole::KeyExchange,
+    ),
+    (
+        "DH_generate_key",
+        "OpenSSL DH key exchange",
+        CryptoRole::KeyExchange,
+    ),
+    (
+        "SSL_CTX_set_cipher_list",
+        "OpenSSL TLS cipher configuration",
+        CryptoRole::KeyExchange,
+    ),
+    (
+        "SSL_CTX_set1_groups_list",
+        "OpenSSL TLS group configuration",
+        CryptoRole::KeyExchange,
+    ),
+    (
+        "BCryptEncrypt",
+        "Windows CNG encryption",
+        CryptoRole::Symmetric,
+    ),
+    (
+        "BCryptSecretAgreement",
+        "Windows CNG secret agreement",
+        CryptoRole::KeyExchange,
+    ),
+    (
+        "CryptEncrypt",
+        "Windows CAPI encryption",
+        CryptoRole::Symmetric,
+    ),
     ("CCCrypt", "macOS CommonCrypto", CryptoRole::Symmetric),
 ];
 
 pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
     let mut out = ScanResult::default();
     for root in &cfg.scan_roots {
-        for entry in WalkDir::new(root).into_iter().filter_entry(|e| include_entry(e.path(), cfg)) {
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| include_entry(e.path(), cfg))
+        {
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -59,7 +110,7 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
 
             if let Ok(binary_file) = object::File::parse(&*raw) {
                 parsed_ok = true;
-                
+
                 // Enumerate imports
                 if let Ok(imports) = binary_file.imports() {
                     for import in imports {
@@ -106,14 +157,17 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                                         status: "binary-export-observed".to_string(),
                                         key_bits: 0,
                                         curve: String::new(),
-                                        implementation_library: format!("{} (exported)", description),
+                                        implementation_library: format!(
+                                            "{} (exported)",
+                                            description
+                                        ),
                                         source_file: entry.path().display().to_string(),
                                         source_line: 0,
                                         source_column: 0,
                                         symbol: sym.to_string(),
                                         confidence: 0.90, // Structural export is high confidence
                                         quantum_vulnerable: false,
-                                context_snippet: String::new(),
+                                        context_snippet: String::new(),
                                     });
                                 }
                             }
@@ -163,7 +217,12 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
             });
             out.components.push(CbomComponent {
                 bom_ref: format!("binary:{}", path.replace('\\', "/")),
-                name: entry.path().file_name().unwrap_or_default().to_string_lossy().to_string(),
+                name: entry
+                    .path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
                 version: String::new(),
                 component_type: binary_type(&raw).to_string(),
                 purl: String::new(),
@@ -171,7 +230,10 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 language: "binary".to_string(),
                 algorithms,
                 dependencies: Vec::new(),
-                reachable: true,
+                // WP-014: presence of a crypto symbol in an import/export table
+                // does not prove it is exercised at runtime. Do not claim proven
+                // reachability from static binary inspection.
+                reachable: false,
             });
         }
     }
@@ -189,9 +251,13 @@ fn is_binary_candidate(path: &Path, raw: &[u8]) -> bool {
     if raw.len() < 4 {
         return false;
     }
-    matches!(binary_type(raw), "ELF" | "PE" | "Mach-O") ||
-        matches!(
-            path.extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase().as_str(),
+    matches!(binary_type(raw), "ELF" | "PE" | "Mach-O")
+        || matches!(
+            path.extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
             "exe" | "dll" | "so" | "dylib" | "bin" | "jar" | "war" | "ear" | "class"
         )
 }
@@ -256,4 +322,3 @@ fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-

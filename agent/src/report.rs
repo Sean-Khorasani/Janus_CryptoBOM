@@ -1,11 +1,12 @@
 use crate::proto::{CbomTelemetryPayload, CryptoAlgorithm, RiskSeverity};
 use anyhow::{Context, Result};
 use serde_json::json;
+use std::cmp::Reverse;
 use std::fs;
 
 pub fn write_html_report(path: &str, payload: &CbomTelemetryPayload) -> Result<()> {
     let mut findings = payload.findings.clone();
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+    findings.sort_by_key(|finding| Reverse(finding.severity));
 
     let mut html = String::new();
     html.push_str("<!doctype html><html><head><meta charset=\"utf-8\"><title>Janus Agent CryptoBOM Report</title>");
@@ -21,7 +22,10 @@ pub fn write_html_report(path: &str, payload: &CbomTelemetryPayload) -> Result<(
     ));
     html.push_str(&metric("Components", payload.components.len()));
     html.push_str(&metric("Findings", findings.len()));
-    html.push_str(&metric("Network Observations", payload.network_observations.len()));
+    html.push_str(&metric(
+        "Network Observations",
+        payload.network_observations.len(),
+    ));
     html.push_str(&metric("Evidence Objects", payload.evidence.len()));
 
     html.push_str("<h2>Findings</h2><table><thead><tr><th>Severity</th><th>Title</th><th>Asset</th><th>Algorithm</th><th>Rule</th></tr></thead><tbody>");
@@ -73,10 +77,19 @@ pub fn write_html_report(path: &str, payload: &CbomTelemetryPayload) -> Result<(
 
 pub fn write_sarif_report(path: &str, payload: &CbomTelemetryPayload) -> Result<()> {
     let rules = vec![
-        sarif_rule("JANUS-PQC-001", "Classical public-key cryptography is quantum-vulnerable"),
-        sarif_rule("JANUS-PQC-002", "RSA key size below 2026 transition threshold"),
+        sarif_rule(
+            "JANUS-PQC-001",
+            "Classical public-key cryptography is quantum-vulnerable",
+        ),
+        sarif_rule(
+            "JANUS-PQC-002",
+            "RSA key size below 2026 transition threshold",
+        ),
         sarif_rule("JANUS-CLASSICAL-003", "Deprecated hash detected"),
-        sarif_rule("JANUS-PQC-004", "AES-128 used where long-term confidentiality may require AES-256"),
+        sarif_rule(
+            "JANUS-PQC-004",
+            "AES-128 used where long-term confidentiality may require AES-256",
+        ),
         sarif_rule("JANUS-NET-001", "Cleartext service observed"),
         sarif_rule("JANUS-NET-002", "TLS endpoint is not validated as TLS 1.3"),
         sarif_rule("JANUS-PQC-005", "TLS key exchange is classical-only"),
@@ -141,9 +154,7 @@ fn sarif_rule(id: &str, name: &str) -> serde_json::Value {
 }
 
 fn sarif_level(severity: i32) -> &'static str {
-    if severity >= RiskSeverity::Critical as i32 {
-        "error"
-    } else if severity >= RiskSeverity::High as i32 {
+    if severity >= RiskSeverity::High as i32 {
         "error"
     } else if severity >= RiskSeverity::Medium as i32 {
         "warning"
@@ -153,7 +164,11 @@ fn sarif_level(severity: i32) -> &'static str {
 }
 
 fn metric(label: &str, value: usize) -> String {
-    format!("<div class=\"metric\"><div class=\"muted\">{}</div><strong>{}</strong></div>", esc(label), value)
+    format!(
+        "<div class=\"metric\"><div class=\"muted\">{}</div><strong>{}</strong></div>",
+        esc(label),
+        value
+    )
 }
 
 fn algorithms_html(algorithms: &[CryptoAlgorithm]) -> String {

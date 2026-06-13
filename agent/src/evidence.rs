@@ -220,8 +220,10 @@ pub fn redact_secrets(input: &str) -> String {
     let (pem, password, secret, apikey, aws_key) = PATTERNS.get_or_init(|| {
         (
             // PEM private key blocks — (?s) enables dotall so . crosses newlines
-            Regex::new(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----")
-                .expect("pem regex"),
+            Regex::new(
+                r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            )
+            .expect("pem regex"),
             // password = value  or  password: value  (case-insensitive)
             Regex::new(r"(?i)(password\s*[:=]\s*)\S+").expect("password regex"),
             // secret = value  or  secret: value  (case-insensitive)
@@ -320,12 +322,7 @@ mod tests {
     #[test]
     fn binary_snippet_is_capped() {
         let long_sym = "EVP_EncryptInit_".repeat(100);
-        let pkg = BoundedEvidencePackage::from_binary_import(
-            "f3",
-            "AES-128",
-            "/bin/app",
-            long_sym,
-        );
+        let pkg = BoundedEvidencePackage::from_binary_import("f3", "AES-128", "/bin/app", long_sym);
         let s = pkg.context_snippet.unwrap();
         assert!(s.len() <= MAX_CONTEXT_BYTES);
     }
@@ -356,8 +353,13 @@ mod tests {
 
     #[test]
     fn from_tls_produces_network_endpoint_classification() {
-        let pkg =
-            BoundedEvidencePackage::from_tls("f-class-2", "TLS-1.2", "TlsHandshake", 0.95, "api.example.com:443");
+        let pkg = BoundedEvidencePackage::from_tls(
+            "f-class-2",
+            "TLS-1.2",
+            "TlsHandshake",
+            0.95,
+            "api.example.com:443",
+        );
         assert_eq!(pkg.data_classification, DataClassification::NetworkEndpoint);
     }
 
@@ -367,28 +369,55 @@ mod tests {
     fn redact_secrets_removes_pem_private_key_block() {
         let input = "some code before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xHn/ygWep4\n-----END RSA PRIVATE KEY-----\nsome code after";
         let output = redact_secrets(input);
-        assert!(!output.contains("BEGIN RSA PRIVATE KEY"), "PEM block should be redacted");
-        assert!(!output.contains("MIIEpAIBAAK"), "key body should be redacted");
-        assert!(output.contains("[REDACTED]"), "should contain redaction marker");
-        assert!(output.contains("some code before"), "surrounding code should be preserved");
-        assert!(output.contains("some code after"), "surrounding code should be preserved");
+        assert!(
+            !output.contains("BEGIN RSA PRIVATE KEY"),
+            "PEM block should be redacted"
+        );
+        assert!(
+            !output.contains("MIIEpAIBAAK"),
+            "key body should be redacted"
+        );
+        assert!(
+            output.contains("[REDACTED]"),
+            "should contain redaction marker"
+        );
+        assert!(
+            output.contains("some code before"),
+            "surrounding code should be preserved"
+        );
+        assert!(
+            output.contains("some code after"),
+            "surrounding code should be preserved"
+        );
     }
 
     #[test]
     fn redact_secrets_removes_password_value() {
         let input = "host = localhost\npassword = mypassword123\nport = 5432";
         let output = redact_secrets(input);
-        assert!(!output.contains("mypassword123"), "password value should be redacted");
+        assert!(
+            !output.contains("mypassword123"),
+            "password value should be redacted"
+        );
         assert!(output.contains("password"), "key name should be preserved");
-        assert!(output.contains("[REDACTED]"), "should contain redaction marker");
-        assert!(output.contains("host = localhost"), "unrelated lines should be preserved");
+        assert!(
+            output.contains("[REDACTED]"),
+            "should contain redaction marker"
+        );
+        assert!(
+            output.contains("host = localhost"),
+            "unrelated lines should be preserved"
+        );
     }
 
     #[test]
     fn redact_secrets_leaves_clean_crypto_code_untouched() {
         let input = "EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv)";
         let output = redact_secrets(input);
-        assert_eq!(input, output, "clean crypto code should pass through unchanged");
+        assert_eq!(
+            input, output,
+            "clean crypto code should pass through unchanged"
+        );
     }
 
     #[test]

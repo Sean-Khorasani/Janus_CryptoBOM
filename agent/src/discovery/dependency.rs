@@ -73,7 +73,10 @@ const FHE_NEEDLES: &[&str] = &[
 pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
     let mut out = ScanResult::default();
     for root in &cfg.scan_roots {
-        for entry in WalkDir::new(root).into_iter().filter_entry(|e| include_entry(e.path(), cfg)) {
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| include_entry(e.path(), cfg))
+        {
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -123,9 +126,13 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             source_line: 0,
                             source_column: 0,
                             symbol: dep.clone(),
-                            confidence: if is_lockfile(entry.path()) { *confidence } else { confidence * 0.75 },
+                            confidence: if is_lockfile(entry.path()) {
+                                *confidence
+                            } else {
+                                confidence * 0.75
+                            },
                             quantum_vulnerable: false,
-                                context_snippet: String::new(),
+                            context_snippet: String::new(),
                         });
                         break; // only first matching package descriptor
                     }
@@ -148,7 +155,12 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
             let component_type = if has_fhe { "fhe-library" } else { "manifest" };
             out.components.push(CbomComponent {
                 bom_ref: format!("manifest:{}", path.replace('\\', "/")),
-                name: entry.path().file_name().unwrap_or_default().to_string_lossy().to_string(),
+                name: entry
+                    .path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
                 version: String::new(),
                 component_type: component_type.to_string(),
                 purl: String::new(),
@@ -177,22 +189,38 @@ fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
 
 fn is_lockfile(path: &Path) -> bool {
     matches!(
-        path.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default(),
         "Cargo.lock" | "package-lock.json" | "go.sum" | "poetry.lock" | "Pipfile.lock"
     )
 }
 
 fn is_manifest(path: &Path) -> bool {
     matches!(
-        path.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
-        "go.mod" | "go.sum" | "package.json" | "package-lock.json"
-        | "requirements.txt" | "pyproject.toml" | "pom.xml"
-        | "Cargo.toml" | "Cargo.lock" | "poetry.lock" | "Pipfile.lock"
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default(),
+        "go.mod"
+            | "go.sum"
+            | "package.json"
+            | "package-lock.json"
+            | "requirements.txt"
+            | "pyproject.toml"
+            | "pom.xml"
+            | "Cargo.toml"
+            | "Cargo.lock"
+            | "poetry.lock"
+            | "Pipfile.lock"
     )
 }
 
 fn manifest_type(path: &Path) -> &'static str {
-    match path.file_name().and_then(|s| s.to_str()).unwrap_or_default() {
+    match path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+    {
         "go.mod" | "go.sum" => "go",
         "package.json" | "package-lock.json" => "npm",
         "requirements.txt" | "pyproject.toml" | "poetry.lock" | "Pipfile.lock" => "python",
@@ -203,7 +231,11 @@ fn manifest_type(path: &Path) -> &'static str {
 }
 
 fn parse_dependencies(path: &Path, text: &str) -> BTreeMap<String, String> {
-    match path.file_name().and_then(|s| s.to_str()).unwrap_or_default() {
+    match path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+    {
         "package.json" | "package-lock.json" => parse_npm(text),
         "go.mod" => parse_go_mod(text),
         "go.sum" => parse_go_sum(text),
@@ -219,7 +251,12 @@ fn parse_dependencies(path: &Path, text: &str) -> BTreeMap<String, String> {
 fn parse_npm(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     if let Ok(v) = serde_json::from_str::<Value>(text) {
-        for key in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
+        for key in [
+            "dependencies",
+            "devDependencies",
+            "peerDependencies",
+            "optionalDependencies",
+        ] {
             if let Some(obj) = v.get(key).and_then(|x| x.as_object()) {
                 for (name, version) in obj {
                     out.insert(name.clone(), version.as_str().unwrap_or("").to_string());
@@ -229,7 +266,13 @@ fn parse_npm(text: &str) -> BTreeMap<String, String> {
         if let Some(obj) = v.get("packages").and_then(|x| x.as_object()) {
             for (path, meta) in obj {
                 if let Some(name) = path.strip_prefix("node_modules/") {
-                    out.insert(name.to_string(), meta.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string());
+                    out.insert(
+                        name.to_string(),
+                        meta.get("version")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -241,7 +284,10 @@ fn parse_go_mod(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for line in text.lines().map(str::trim) {
         if line.starts_with("require ") && !line.ends_with('(') {
-            let parts: Vec<_> = line.trim_start_matches("require ").split_whitespace().collect();
+            let parts: Vec<_> = line
+                .trim_start_matches("require ")
+                .split_whitespace()
+                .collect();
             if parts.len() >= 2 {
                 out.insert(parts[0].to_string(), parts[1].to_string());
             }
@@ -257,7 +303,11 @@ fn parse_go_mod(text: &str) -> BTreeMap<String, String> {
 
 fn parse_requirements(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
         let (name, version) = line.split_once("==").unwrap_or((line, ""));
         out.insert(name.to_string(), version.to_string());
     }
@@ -268,7 +318,10 @@ fn parse_cargo(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut in_deps = false;
     for line in text.lines().map(str::trim) {
-        if line.starts_with("[dependencies") || line.starts_with("[dev-dependencies") || line.starts_with("[build-dependencies") {
+        if line.starts_with("[dependencies")
+            || line.starts_with("[dev-dependencies")
+            || line.starts_with("[build-dependencies")
+        {
             in_deps = true;
             continue;
         }
@@ -277,17 +330,28 @@ fn parse_cargo(text: &str) -> BTreeMap<String, String> {
         }
         if in_deps {
             if let Some((name, version)) = line.split_once('=') {
-                out.insert(name.trim().to_string(), version.trim().trim_matches('"').to_string());
+                out.insert(
+                    name.trim().to_string(),
+                    version.trim().trim_matches('"').to_string(),
+                );
             }
         }
         if line.starts_with("name = ") {
-            let name = line.trim_start_matches("name = ").trim_matches('"').to_string();
+            let name = line
+                .trim_start_matches("name = ")
+                .trim_matches('"')
+                .to_string();
             out.entry(name).or_default();
         }
         if line.starts_with("version = ") {
             if let Some((last, _)) = out.iter().next_back().map(|(k, v)| (k.clone(), v.clone())) {
                 if out.get(&last).map(|v| v.is_empty()).unwrap_or(false) {
-                    out.insert(last, line.trim_start_matches("version = ").trim_matches('"').to_string());
+                    out.insert(
+                        last,
+                        line.trim_start_matches("version = ")
+                            .trim_matches('"')
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -319,7 +383,8 @@ fn parse_go_sum(text: &str) -> BTreeMap<String, String> {
         if parts.len() >= 2 {
             // Only keep non-go.mod entries (actual package downloads)
             if !parts[1].ends_with("/go.mod") {
-                out.entry(parts[0].to_string()).or_insert_with(|| parts[1].to_string());
+                out.entry(parts[0].to_string())
+                    .or_insert_with(|| parts[1].to_string());
             }
         }
     }
@@ -355,7 +420,8 @@ fn parse_pipfile_lock(text: &str) -> BTreeMap<String, String> {
         for section in &["default", "develop"] {
             if let Some(obj) = v.get(section).and_then(|x| x.as_object()) {
                 for (pkg, meta) in obj {
-                    let version = meta.get("version")
+                    let version = meta
+                        .get("version")
                         .and_then(|x| x.as_str())
                         .unwrap_or("")
                         .trim_start_matches("==")
@@ -367,7 +433,6 @@ fn parse_pipfile_lock(text: &str) -> BTreeMap<String, String> {
     }
     out
 }
-
 
 fn tag_value(line: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
@@ -389,4 +454,3 @@ fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-

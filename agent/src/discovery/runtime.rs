@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use sysinfo::{ProcessesToUpdate, System};
 use uuid::Uuid;
 
-pub fn scan(_cfg: &AgentConfig) -> Result<ScanResult> {
+pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
     let mut sys = System::new_all();
     sys.refresh_processes(ProcessesToUpdate::All, true);
     let mut out = ScanResult::default();
@@ -22,12 +22,22 @@ pub fn scan(_cfg: &AgentConfig) -> Result<ScanResult> {
             .unwrap_or_default();
         let joined = format!("{} {}", name, exe.to_ascii_lowercase());
         for (needle, alg, family, role) in [
-            ("openssl", "OpenSSL runtime", "OpenSSL", CryptoRole::Unspecified),
+            (
+                "openssl",
+                "OpenSSL runtime",
+                "OpenSSL",
+                CryptoRole::Unspecified,
+            ),
             ("nginx", "TLS termination", "TLS", CryptoRole::KeyExchange),
             ("apache", "TLS termination", "TLS", CryptoRole::KeyExchange),
             ("sshd", "SSH key exchange", "SSH", CryptoRole::KeyExchange),
             ("java", "JCA runtime", "JCA", CryptoRole::Unspecified),
-            ("node", "Node crypto runtime", "node-crypto", CryptoRole::Unspecified),
+            (
+                "node",
+                "Node crypto runtime",
+                "node-crypto",
+                CryptoRole::Unspecified,
+            ),
         ] {
             if joined.contains(needle) {
                 algorithms.push(CryptoAlgorithm {
@@ -83,28 +93,29 @@ pub fn scan(_cfg: &AgentConfig) -> Result<ScanResult> {
     #[cfg(target_os = "windows")]
     scan_windows_modules(&mut out);
 
-    #[cfg(target_os = "windows")]
-    scrape_process_memory_keys(&mut out);
+    if cfg.enable_process_memory_scraping {
+        scrape_process_memory_keys(&mut out);
+    }
 
     Ok(out)
 }
 
 #[cfg(target_os = "windows")]
 fn scan_windows_modules(out: &mut ScanResult) {
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Module32First, Module32Next, MODULEENTRY32, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32
-    };
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use sysinfo::{ProcessesToUpdate, System};
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32First, Module32Next, MODULEENTRY32, TH32CS_SNAPMODULE,
+        TH32CS_SNAPMODULE32,
+    };
 
     let mut sys = System::new_all();
     sys.refresh_processes(ProcessesToUpdate::All, true);
 
     for (pid, _) in sys.processes() {
         let u32_pid = pid.as_u32();
-        let h_snapshot = unsafe {
-            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, u32_pid)
-        };
+        let h_snapshot =
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, u32_pid) };
         if h_snapshot == INVALID_HANDLE_VALUE {
             continue;
         }
@@ -115,19 +126,28 @@ fn scan_windows_modules(out: &mut ScanResult) {
         if unsafe { Module32First(h_snapshot, &mut entry) } != 0 {
             loop {
                 let module_name = {
-                    let len = entry.szModule.iter().position(|&c| c == 0).unwrap_or(entry.szModule.len());
+                    let len = entry
+                        .szModule
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szModule.len());
                     let bytes: Vec<u8> = entry.szModule[..len].iter().map(|&c| c as u8).collect();
                     String::from_utf8_lossy(&bytes).to_string()
                 };
                 let lower_name = module_name.to_ascii_lowercase();
-                if lower_name.contains("bcrypt.dll") 
-                    || lower_name.contains("ncrypt.dll") 
-                    || lower_name.contains("libcrypto") 
-                    || lower_name.contains("openssl") 
+                if lower_name.contains("bcrypt.dll")
+                    || lower_name.contains("ncrypt.dll")
+                    || lower_name.contains("libcrypto")
+                    || lower_name.contains("openssl")
                 {
                     let module_path = {
-                        let len = entry.szExePath.iter().position(|&c| c == 0).unwrap_or(entry.szExePath.len());
-                        let bytes: Vec<u8> = entry.szExePath[..len].iter().map(|&c| c as u8).collect();
+                        let len = entry
+                            .szExePath
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(entry.szExePath.len());
+                        let bytes: Vec<u8> =
+                            entry.szExePath[..len].iter().map(|&c| c as u8).collect();
                         String::from_utf8_lossy(&bytes).to_string()
                     };
 
@@ -189,7 +209,11 @@ fn scan_linux_maps(out: &mut ScanResult) {
             let mut libs = Vec::new();
             for line in text.lines() {
                 let lower = line.to_ascii_lowercase();
-                if lower.contains("libssl") || lower.contains("libcrypto") || lower.contains("boringssl") || lower.contains("libgnutls") {
+                if lower.contains("libssl")
+                    || lower.contains("libcrypto")
+                    || lower.contains("boringssl")
+                    || lower.contains("libgnutls")
+                {
                     if let Some(path) = line.split_whitespace().last() {
                         libs.push(path.to_string());
                     }
@@ -233,17 +257,16 @@ fn scan_linux_maps(out: &mut ScanResult) {
 
 #[cfg(target_os = "windows")]
 fn scrape_process_memory_keys(out: &mut ScanResult) {
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ
-    };
-    use windows_sys::Win32::System::Memory::{
-        VirtualQueryEx, MEM_COMMIT, PAGE_NOACCESS, PAGE_GUARD,
-        PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-        MEMORY_BASIC_INFORMATION
-    };
-    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows_sys::Win32::Foundation::CloseHandle;
     use sysinfo::{ProcessesToUpdate, System};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Memory::{
+        VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_EXECUTE_READ,
+        PAGE_EXECUTE_READWRITE, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
 
     let mut sys = System::new_all();
     sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -253,10 +276,9 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
 
     for (pid, process) in sys.processes() {
         let u32_pid = pid.as_u32();
-        
-        let h_process = unsafe {
-            OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, u32_pid)
-        };
+
+        let h_process =
+            unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, u32_pid) };
         if h_process.is_null() {
             continue;
         }
@@ -274,9 +296,18 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
             let is_committed = mbi.State == MEM_COMMIT;
             let is_readable = (mbi.Protect & PAGE_NOACCESS) == 0
                 && (mbi.Protect & PAGE_GUARD) == 0
-                && (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0;
+                && (mbi.Protect
+                    & (PAGE_READONLY
+                        | PAGE_READWRITE
+                        | PAGE_EXECUTE_READ
+                        | PAGE_EXECUTE_READWRITE))
+                    != 0;
 
-            if is_committed && is_readable && mbi.RegionSize > 0 && mbi.RegionSize <= 50 * 1024 * 1024 {
+            if is_committed
+                && is_readable
+                && mbi.RegionSize > 0
+                && mbi.RegionSize <= 50 * 1024 * 1024
+            {
                 let mut buffer = vec![0u8; mbi.RegionSize];
                 let mut bytes_read = 0;
                 let ok = unsafe {
@@ -301,7 +332,8 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
                 }
             }
 
-            address = ((mbi.BaseAddress as usize).saturating_add(mbi.RegionSize)) as *const std::ffi::c_void;
+            address = ((mbi.BaseAddress as usize).saturating_add(mbi.RegionSize))
+                as *const std::ffi::c_void;
         }
 
         unsafe {
@@ -309,10 +341,13 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
         }
 
         if found_keys {
-            let exe_path = process.exe().map(|p| p.display().to_string()).unwrap_or_default();
+            let exe_path = process
+                .exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             let process_name = process.name().to_string_lossy().to_string();
             let target = format!("pid:{pid}:{process_name}");
-            
+
             out.evidence.push(Evidence {
                 evidence_id: Uuid::new_v4().to_string(),
                 source_type: "process-memory-key".to_string(),
@@ -358,8 +393,7 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
 #[cfg(target_os = "linux")]
 fn scrape_process_memory_keys(out: &mut ScanResult) {
     use std::fs;
-    use std::io::Read;
-    use sysinfo::{ProcessesToUpdate, System, PidExt};
+    use sysinfo::{ProcessesToUpdate, System};
 
     let mut sys = System::new_all();
     sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -376,9 +410,16 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
     for (pid, process) in sys.processes() {
         // Only scan processes with crypto libraries loaded
         let name = process.name().to_string_lossy().to_ascii_lowercase();
-        let exe = process.exe().map(|p| p.display().to_string()).unwrap_or_default().to_ascii_lowercase();
-        let is_crypto_relevant = ["openssl", "nginx", "apache", "sshd", "java", "node", "python"]
-            .iter().any(|n| name.contains(n) || exe.contains(n));
+        let exe = process
+            .exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let is_crypto_relevant = [
+            "openssl", "nginx", "apache", "sshd", "java", "node", "python",
+        ]
+        .iter()
+        .any(|n| name.contains(n) || exe.contains(n));
         if !is_crypto_relevant {
             continue;
         }
@@ -391,30 +432,46 @@ fn scrape_process_memory_keys(out: &mut ScanResult) {
         };
 
         let mem_path = format!("/proc/{}/mem", pid.as_u32());
-        let mut mem_file = match fs::File::open(&mem_path) {
+        let mem_file = match fs::File::open(&mem_path) {
             Ok(f) => f,
             Err(_) => continue,
         };
 
         for line in maps_content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 2 { continue; }
+            if parts.len() < 2 {
+                continue;
+            }
             let perms = parts[1];
             // Only scan readable, private regions (skip shared libraries for performance)
-            if !perms.starts_with('r') || perms.contains('x') { continue; }
+            if !perms.starts_with('r') || perms.contains('x') {
+                continue;
+            }
 
             // Parse address range
             let addr_range: Vec<&str> = parts[0].split('-').collect();
-            if addr_range.len() != 2 { continue; }
-            let start = match usize::from_str_radix(addr_range[0], 16) { Ok(a) => a, Err(_) => continue };
-            let end = match usize::from_str_radix(addr_range[1], 16) { Ok(a) => a, Err(_) => continue };
+            if addr_range.len() != 2 {
+                continue;
+            }
+            let start = match usize::from_str_radix(addr_range[0], 16) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            let end = match usize::from_str_radix(addr_range[1], 16) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
             let region_size = end.saturating_sub(start);
-            if region_size == 0 || region_size > 50 * 1024 * 1024 { continue; } // Skip empty/huge regions
+            if region_size == 0 || region_size > 50 * 1024 * 1024 {
+                continue;
+            } // Skip empty/huge regions
 
             // Use pread to read from the specific offset
             let mut buf = vec![0u8; region_size.min(2 * 1024 * 1024)]; // Max 2MB per region
             use std::os::unix::fs::FileExt;
-            if mem_file.read_at(&mut buf, start as u64).is_err() { continue; }
+            if mem_file.read_at(&mut buf, start as u64).is_err() {
+                continue;
+            }
 
             for header in key_headers {
                 if buf.windows(header.len()).any(|w| w == *header) {
@@ -469,4 +526,3 @@ fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-

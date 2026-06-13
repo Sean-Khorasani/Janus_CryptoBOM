@@ -1,6 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    ::prost::Enumeration,
+    Serialize,
+    Deserialize,
+)]
 #[repr(i32)]
 pub enum ExecutionMode {
     Unspecified = 0,
@@ -8,7 +20,19 @@ pub enum ExecutionMode {
     Active = 2,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    ::prost::Enumeration,
+    Serialize,
+    Deserialize,
+)]
 #[repr(i32)]
 pub enum CryptoRole {
     Unspecified = 0,
@@ -25,7 +49,19 @@ pub enum CryptoRole {
     KeyStorage = 11,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    ::prost::Enumeration,
+    Serialize,
+    Deserialize,
+)]
 #[repr(i32)]
 pub enum RiskSeverity {
     Unspecified = 0,
@@ -36,7 +72,19 @@ pub enum RiskSeverity {
     Critical = 5,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    ::prost::Enumeration,
+    Serialize,
+    Deserialize,
+)]
 #[repr(i32)]
 pub enum MigrationState {
     Unspecified = 0,
@@ -306,18 +354,18 @@ pub mod janus_telemetry_client {
         inner: tonic::client::Grpc<T>,
     }
 
-/* toreview and todel
-    impl JanusTelemetryClient<tonic::transport::Channel> {
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
+    /* toreview and todel
+        impl JanusTelemetryClient<tonic::transport::Channel> {
+            pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+            where
+                D: TryInto<tonic::transport::Endpoint>,
+                D::Error: Into<StdError>,
+            {
+                let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+                Ok(Self::new(conn))
+            }
         }
-    }
-*/
+    */
 
     impl<T> JanusTelemetryClient<T>
     where
@@ -339,22 +387,33 @@ pub mod janus_telemetry_client {
             self.inner.ready().await.map_err(|e| {
                 tonic::Status::unknown(format!("service was not ready: {}", e.into()))
             })?;
-            let path = http::uri::PathAndQuery::from_static("/janus.v1.JanusTelemetry/RegisterAgent");
+            let path =
+                http::uri::PathAndQuery::from_static("/janus.v1.JanusTelemetry/RegisterAgent");
             self.inner
-                .unary(request.into_request(), path, tonic::codec::ProstCodec::default())
+                .unary(
+                    request.into_request(),
+                    path,
+                    tonic::codec::ProstCodec::default(),
+                )
                 .await
         }
 
         pub async fn stream_telemetry(
             &mut self,
             request: impl tonic::IntoStreamingRequest<Message = CbomTelemetryPayload>,
-        ) -> Result<tonic::Response<tonic::codec::Streaming<MigrationCommand>>, tonic::Status> {
+        ) -> Result<tonic::Response<tonic::codec::Streaming<MigrationCommand>>, tonic::Status>
+        {
             self.inner.ready().await.map_err(|e| {
                 tonic::Status::unknown(format!("service was not ready: {}", e.into()))
             })?;
-            let path = http::uri::PathAndQuery::from_static("/janus.v1.JanusTelemetry/StreamTelemetry");
+            let path =
+                http::uri::PathAndQuery::from_static("/janus.v1.JanusTelemetry/StreamTelemetry");
             self.inner
-                .streaming(request.into_streaming_request(), path, tonic::codec::ProstCodec::default())
+                .streaming(
+                    request.into_streaming_request(),
+                    path,
+                    tonic::codec::ProstCodec::default(),
+                )
                 .await
         }
 
@@ -365,11 +424,16 @@ pub mod janus_telemetry_client {
             self.inner.ready().await.map_err(|e| {
                 tonic::Status::unknown(format!("service was not ready: {}", e.into()))
             })?;
-            let path = http::uri::PathAndQuery::from_static("/janus.v1.JanusTelemetry/ReportMigrationStatus");
+            let path = http::uri::PathAndQuery::from_static(
+                "/janus.v1.JanusTelemetry/ReportMigrationStatus",
+            );
             self.inner
-                .client_streaming(request.into_streaming_request(), path, tonic::codec::ProstCodec::default())
+                .client_streaming(
+                    request.into_streaming_request(),
+                    path,
+                    tonic::codec::ProstCodec::default(),
+                )
                 .await
         }
     }
 }
-

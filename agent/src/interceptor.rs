@@ -1,3 +1,5 @@
+#![cfg(target_os = "windows")]
+
 use std::ffi::CStr;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -51,7 +53,7 @@ fn inject_pqc_group(group_str: &str) -> String {
 
 #[cfg(target_os = "windows")]
 unsafe fn resolve_evp_cipher_name(cipher_ptr: *const std::ffi::c_void) -> String {
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, GetModuleHandleA};
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
     if cipher_ptr.is_null() {
         return "NULL".to_string();
@@ -71,8 +73,10 @@ unsafe fn resolve_evp_cipher_name(cipher_ptr: *const std::ffi::c_void) -> String
             let func_name = b"EVP_CIPHER_name\0";
             let proc = GetProcAddress(h_module, func_name.as_ptr());
             if let Some(proc_fn) = proc {
-                let evp_cipher_name_fn: unsafe extern "C" fn(*const std::ffi::c_void) -> *const std::ffi::c_char =
-                    std::mem::transmute(proc_fn);
+                let evp_cipher_name_fn: unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                )
+                    -> *const std::ffi::c_char = std::mem::transmute(proc_fn);
                 let name_ptr = evp_cipher_name_fn(cipher_ptr);
                 if !name_ptr.is_null() {
                     if let Ok(c_str) = CStr::from_ptr(name_ptr).to_str() {
@@ -84,8 +88,10 @@ unsafe fn resolve_evp_cipher_name(cipher_ptr: *const std::ffi::c_void) -> String
             let func_name_get0 = b"EVP_CIPHER_get0_name\0";
             let proc_get0 = GetProcAddress(h_module, func_name_get0.as_ptr());
             if let Some(proc_fn) = proc_get0 {
-                let evp_cipher_get0_name_fn: unsafe extern "C" fn(*const std::ffi::c_void) -> *const std::ffi::c_char =
-                    std::mem::transmute(proc_fn);
+                let evp_cipher_get0_name_fn: unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                )
+                    -> *const std::ffi::c_char = std::mem::transmute(proc_fn);
                 let name_ptr = evp_cipher_get0_name_fn(cipher_ptr);
                 if !name_ptr.is_null() {
                     if let Ok(c_str) = CStr::from_ptr(name_ptr).to_str() {
@@ -126,6 +132,7 @@ fn log_interception(func: &str, detail: &str) {
 // Original EVP hooks (unchanged)
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 #[no_mangle]
 pub unsafe extern "C" fn EVP_EncryptInit(
     ctx: *mut std::ffi::c_void,
@@ -138,7 +145,7 @@ pub unsafe extern "C" fn EVP_EncryptInit(
 
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, GetModuleHandleA};
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
         let dll_names: [*const u8; 5] = [
             b"libcrypto-3.dll\0".as_ptr(),
             b"libcrypto-3-x64.dll\0".as_ptr(),
@@ -166,6 +173,7 @@ pub unsafe extern "C" fn EVP_EncryptInit(
     1
 }
 
+#[cfg(target_os = "windows")]
 #[no_mangle]
 pub unsafe extern "C" fn EVP_EncryptInit_ex(
     ctx: *mut std::ffi::c_void,
@@ -179,7 +187,7 @@ pub unsafe extern "C" fn EVP_EncryptInit_ex(
 
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, GetModuleHandleA};
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
         let dll_names: [*const u8; 5] = [
             b"libcrypto-3.dll\0".as_ptr(),
             b"libcrypto-3-x64.dll\0".as_ptr(),
@@ -215,10 +223,8 @@ pub unsafe extern "C" fn EVP_EncryptInit_ex(
 /// Resolve an original function from a libcrypto DLL on Windows.
 /// Returns `None` on non-Windows platforms.
 #[cfg(target_os = "windows")]
-unsafe fn resolve_openssl_fn(
-    name: &[u8],
-) -> Option<*mut std::ffi::c_void> {
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, GetModuleHandleA};
+unsafe fn resolve_openssl_fn(name: &[u8]) -> Option<*mut std::ffi::c_void> {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
     let dll_names: [*const u8; 5] = [
         b"libcrypto-3.dll\0".as_ptr(),
@@ -236,7 +242,7 @@ unsafe fn resolve_openssl_fn(
         if !h_module.is_null() {
             let proc = GetProcAddress(h_module, null_name.as_ptr());
             if let Some(proc_fn) = proc {
-                return Some(proc_fn);
+                return Some(proc_fn as *mut std::ffi::c_void);
             }
         }
     }
@@ -260,6 +266,7 @@ unsafe fn cstr_to_str<'a>(ptr: *const std::ffi::c_char) -> &'a str {
 // SSL_CTX_set_cipher_list  — set the list of available TLS 1.2 ciphers
 // -----------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 #[no_mangle]
 pub unsafe extern "C" fn SSL_CTX_set_cipher_list(
     ctx: *mut std::ffi::c_void,
@@ -297,6 +304,7 @@ pub unsafe extern "C" fn SSL_CTX_set_cipher_list(
 // SSL_set_cipher_list  — set ciphers per-SSL object
 // -----------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 #[no_mangle]
 pub unsafe extern "C" fn SSL_set_cipher_list(
     ssl: *mut std::ffi::c_void,
@@ -334,6 +342,7 @@ pub unsafe extern "C" fn SSL_set_cipher_list(
 // SSL_CTX_set_ciphersuites  — set TLS 1.3 ciphersuites
 // -----------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 #[no_mangle]
 pub unsafe extern "C" fn SSL_CTX_set_ciphersuites(
     ctx: *mut std::ffi::c_void,
@@ -372,6 +381,7 @@ pub unsafe extern "C" fn SSL_CTX_set_ciphersuites(
 // SSL_CTX_set1_groups_list  — set supported named groups (curves)
 // -----------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 #[no_mangle]
 pub unsafe extern "C" fn SSL_CTX_set1_groups_list(
     ctx: *mut std::ffi::c_void,

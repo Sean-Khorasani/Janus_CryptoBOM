@@ -60,7 +60,6 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 .to_ascii_lowercase();
             let stripped = strip_comments(&text, &ext);
 
-            let text_lines: Vec<&str> = text.lines().collect();
             let stripped_lines: Vec<&str> = stripped.lines().collect();
 
             for (line_idx, stripped_line) in stripped_lines.iter().enumerate() {
@@ -69,18 +68,10 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                 }
                 for pat in &patterns {
                     if let Some(m) = pat.regex.find(stripped_line) {
-                        let start = line_idx.saturating_sub(3);
-                        let end = (line_idx + 4).min(text_lines.len());
-                        let snippet = text_lines[start..end].join("\n");
-
                         let file_hash = sha256_hex(&raw);
                         let evidence_id = Uuid::new_v4().to_string();
 
-                        let asset_ref = format!(
-                            "{}#L{}",
-                            entry.path().display(),
-                            line_idx + 1
-                        );
+                        let asset_ref = format!("{}#L{}", entry.path().display(), line_idx + 1);
 
                         out.evidence.push(crate::proto::Evidence {
                             evidence_id: evidence_id.clone(),
@@ -106,7 +97,10 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
                             ),
                             asset_ref,
                             algorithm: "side-channel".to_string(),
-                            policy_rule_id: format!("sidechannel-{}", pat.title.replace(' ', "-").to_ascii_lowercase()),
+                            policy_rule_id: format!(
+                                "sidechannel-{}",
+                                pat.title.replace(' ', "-").to_ascii_lowercase()
+                            ),
                             evidence_ids: vec![evidence_id],
                             migration_profile: String::new(),
                         });
@@ -208,10 +202,29 @@ fn include_entry(path: &Path, cfg: &AgentConfig) -> bool {
 
 fn is_source(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|s| s.to_str()).unwrap_or_default(),
-        "rs" | "go" | "js" | "jsx" | "ts" | "tsx" | "py" | "java" | "kt" | "cs"
-            | "c" | "h" | "cpp" | "hpp" | "rb" | "php" | "swift" | "m" | "mm"
-            | "scala" | "sh"
+        path.extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default(),
+        "rs" | "go"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "py"
+            | "java"
+            | "kt"
+            | "cs"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "rb"
+            | "php"
+            | "swift"
+            | "m"
+            | "mm"
+            | "scala"
+            | "sh"
     )
 }
 
@@ -236,10 +249,22 @@ fn strip_comments(text: &str, ext: &str) -> String {
     let is_c_like = matches!(
         ext,
         "rs" | "go"
-            | "js" | "jsx" | "ts" | "tsx"
-            | "java" | "kt" | "cs"
-            | "c" | "h" | "cpp" | "hpp"
-            | "swift" | "m" | "mm" | "scala" | "php"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "java"
+            | "kt"
+            | "cs"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "swift"
+            | "m"
+            | "mm"
+            | "scala"
+            | "php"
     );
     let is_script = matches!(ext, "py" | "rb" | "sh");
     let is_xml = ext == "xml";
@@ -294,11 +319,7 @@ fn strip_comments(text: &str, ext: &str) -> String {
 
         if in_triple_string {
             let tc = triple_char;
-            if i + 2 < chars.len()
-                && chars[i] == tc
-                && chars[i + 1] == tc
-                && chars[i + 2] == tc
-            {
+            if i + 2 < chars.len() && chars[i] == tc && chars[i + 1] == tc && chars[i + 2] == tc {
                 out.push(' ');
                 out.push(' ');
                 out.push(' ');

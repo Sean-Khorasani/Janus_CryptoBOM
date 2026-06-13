@@ -2,6 +2,7 @@ use crate::proto::CbomTelemetryPayload;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, Connection};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -11,6 +12,13 @@ pub struct OfflineStore {
 
 impl OfflineStore {
     pub fn open(path: &str) -> Result<Self> {
+        if let Some(parent) = Path::new(path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create sqlite cache directory {}", parent.display()))?;
+        }
         let conn = Connection::open(path).with_context(|| format!("open sqlite cache {path}"))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -48,13 +56,15 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     pub fn perform_maintenance(&self) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let mut stmt = conn.prepare("PRAGMA integrity_check")?;
-        let mut rows = stmt.query([])?;
-        if let Some(row) = rows.next()? {
-            let res: String = row.get(0)?;
-            if res != "ok" {
-                anyhow::bail!("sqlite integrity check failed: {}", res);
+        {
+            let conn = self.conn.lock().expect("sqlite mutex poisoned");
+            let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+            let mut rows = stmt.query([])?;
+            if let Some(row) = rows.next()? {
+                let res: String = row.get(0)?;
+                if res != "ok" {
+                    anyhow::bail!("sqlite integrity check failed: {}", res);
+                }
             }
         }
 
@@ -66,20 +76,25 @@ CREATE TABLE IF NOT EXISTS scan_state (
             .as_secs() as usize;
         let vacuum_interval: usize = 86400; // 24 hours
         if last_vacuum == 0 || now.saturating_sub(last_vacuum) > vacuum_interval {
-            conn.execute("VACUUM", [])?;
+            self.conn
+                .lock()
+                .expect("sqlite mutex poisoned")
+                .execute("VACUUM", [])?;
             self.set_stat("last_vacuum_unix", now)?;
         }
         Ok(())
     }
 
-        /// Check if a file's content hash has changed since last scan. Returns true if the file
+    /// Check if a file's content hash has changed since last scan. Returns true if the file
     /// should be re-scanned (new file, changed content, or no previous scan record).
+    #[allow(dead_code)]
     pub fn file_changed(&self, file_path: &str, content_hash: &str) -> bool {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let mut stmt = match conn.prepare("SELECT content_sha256 FROM scan_state WHERE file_path = ?1") {
-            Ok(s) => s,
-            Err(_) => return true, // table may not exist yet
-        };
+        let mut stmt =
+            match conn.prepare("SELECT content_sha256 FROM scan_state WHERE file_path = ?1") {
+                Ok(s) => s,
+                Err(_) => return true, // table may not exist yet
+            };
         match stmt.query_row([file_path], |row| {
             let prev: String = row.get(0)?;
             Ok(prev)
@@ -90,6 +105,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     /// Update the scan state for a file after scanning.
+    #[allow(dead_code)]
     pub fn upsert_scan_state(&self, file_path: &str, content_hash: &str) -> Result<()> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let now = std::time::SystemTime::now()
@@ -104,6 +120,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     /// Purge stale scan state entries for files that no longer exist.
+    #[allow(dead_code)]
     pub fn purge_stale_scan_state(&self, current_paths: &[String]) -> Result<usize> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut deleted = 0;
@@ -112,16 +129,16 @@ CREATE TABLE IF NOT EXISTS scan_state (
             let p: String = row.get(0)?;
             Ok(p)
         })?;
-        for row in rows {
-            if let Ok(path) = row {
-                if !current_paths.iter().any(|p| p == &path) {
-                    conn.execute("DELETE FROM scan_state WHERE file_path = ?1", params![path])?;
-                    deleted += 1;
-                }
+        for path in rows.flatten() {
+            if !current_paths.iter().any(|p| p == &path) {
+                conn.execute("DELETE FROM scan_state WHERE file_path = ?1", params![path])?;
+                deleted += 1;
             }
         }
         Ok(deleted)
     }
+
+    pub fn get_stat(&self, key: &str) -> Result<usize> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut stmt = conn.prepare("SELECT stat_value FROM scan_stats WHERE stat_key = ?1")?;
         let mut rows = stmt.query([key])?;
@@ -194,10 +211,10 @@ CREATE TABLE IF NOT EXISTS scan_state (
 #[cfg(target_os = "windows")]
 pub fn protect(data: &[u8]) -> Result<String> {
     use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
         CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
-    use windows_sys::Win32::Foundation::LocalFree;
 
     let mut input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
@@ -232,10 +249,10 @@ pub fn protect(data: &[u8]) -> Result<String> {
 #[cfg(target_os = "windows")]
 pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
     use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
         CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
-    use windows_sys::Win32::Foundation::LocalFree;
 
     let Some(encoded) = raw.strip_prefix("dpapi:") else {
         return Ok(raw.as_bytes().to_vec());
@@ -273,41 +290,53 @@ pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn protect(data: &[u8]) -> Result<String> {
-    // On non-Windows platforms, encrypt using AES-256-CTR with a key derived
-    // from the machine identity. This provides defense-in-depth (the key material
-    // is recoverable by root since /etc/machine-id is world-readable).
-    // For production deployments on Linux, integrate with libsecret or a TPM.
-    use sha2::{Sha256, Digest};
+    use ring::{
+        aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM},
+        rand::{SecureRandom, SystemRandom},
+    };
 
-    let machine_id = get_machine_identity();
-    let pepper = b"janus-cryptobom-storage-v1";
+    let key = linux_cache_key()?;
+    let key = LessSafeKey::new(
+        UnboundKey::new(&AES_256_GCM, &key)
+            .map_err(|_| anyhow::anyhow!("create cache AEAD key"))?,
+    );
+    let mut nonce = [0_u8; 12];
+    SystemRandom::new()
+        .fill(&mut nonce)
+        .map_err(|_| anyhow::anyhow!("generate cache AEAD nonce"))?;
+    let mut protected = data.to_vec();
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(nonce),
+        Aad::empty(),
+        &mut protected,
+    )
+    .map_err(|_| anyhow::anyhow!("encrypt cache payload"))?;
 
-    // Derive 32-byte key using SHA-256(machine_id || pepper)
+    let mut encoded = Vec::with_capacity(nonce.len() + protected.len());
+    encoded.extend_from_slice(&nonce);
+    encoded.extend_from_slice(&protected);
+    Ok(format!("aead-v1:{}", STANDARD.encode(encoded)))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn linux_cache_key() -> Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
     let mut hasher = Sha256::new();
-    hasher.update(machine_id.as_bytes());
-    hasher.update(pepper);
-    let key = hasher.finalize();
-
-    // Simple XOR-based encryption with keystream derived from key + counter
-    let mut encrypted = Vec::with_capacity(data.len() + 8);
-    let counter: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    encrypted.extend_from_slice(&counter.to_le_bytes());
-
-    for (i, chunk) in data.chunks(32).enumerate() {
-        let mut block_hasher = Sha256::new();
-        block_hasher.update(&key);
-        block_hasher.update(&(i as u64).to_le_bytes());
-        block_hasher.update(&counter.to_le_bytes());
-        let keystream = block_hasher.finalize();
-        for (b, k) in chunk.iter().zip(keystream.iter()) {
-            encrypted.push(b ^ k);
+    hasher.update(b"janus-cryptobom-cache-aead-v1");
+    if let Some(path) = std::env::var_os("JANUS_CACHE_KEY_FILE") {
+        let material = std::fs::read(&path)
+            .with_context(|| format!("read JANUS_CACHE_KEY_FILE {}", Path::new(&path).display()))?;
+        if material.len() < 32 {
+            anyhow::bail!("JANUS_CACHE_KEY_FILE must contain at least 32 bytes");
         }
+        hasher.update(b"file:");
+        hasher.update(material);
+    } else {
+        hasher.update(b"legacy-machine-identity:");
+        hasher.update(get_machine_identity().as_bytes());
     }
-
-    Ok(format!("aes256ctr:{}", STANDARD.encode(&encrypted)))
+    Ok(hasher.finalize().into())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -326,9 +355,32 @@ fn get_machine_identity() -> String {
 
 #[cfg(not(target_os = "windows"))]
 pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
-    use sha2::{Sha256, Digest};
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    use sha2::{Digest, Sha256};
 
-    // Try new encrypted format
+    if let Some(encoded) = raw.strip_prefix("aead-v1:") {
+        let mut protected = STANDARD.decode(encoded)?;
+        if protected.len() < 12 + AES_256_GCM.tag_len() {
+            anyhow::bail!("encrypted payload too short");
+        }
+        let nonce: [u8; 12] = protected[..12].try_into().expect("nonce length checked");
+        protected.drain(..12);
+        let key = linux_cache_key()?;
+        let key = LessSafeKey::new(
+            UnboundKey::new(&AES_256_GCM, &key)
+                .map_err(|_| anyhow::anyhow!("create cache AEAD key"))?,
+        );
+        let plaintext = key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::empty(),
+                &mut protected,
+            )
+            .map_err(|_| anyhow::anyhow!("cache payload authentication failed"))?;
+        return Ok(plaintext.to_vec());
+    }
+
+    // Legacy unauthenticated format retained only for upgrade compatibility.
     if let Some(encoded) = raw.strip_prefix("aes256ctr:") {
         let encrypted = STANDARD.decode(encoded)?;
         if encrypted.len() < 8 {
@@ -350,9 +402,9 @@ pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
         let mut plaintext = Vec::with_capacity(ciphertext.len());
         for (i, chunk) in ciphertext.chunks(32).enumerate() {
             let mut block_hasher = Sha256::new();
-            block_hasher.update(&key);
-            block_hasher.update(&(i as u64).to_le_bytes());
-            block_hasher.update(&counter.to_le_bytes());
+            block_hasher.update(key);
+            block_hasher.update((i as u64).to_le_bytes());
+            block_hasher.update(counter.to_le_bytes());
             let keystream = block_hasher.finalize();
             for (b, k) in chunk.iter().zip(keystream.iter()) {
                 plaintext.push(b ^ k);
@@ -373,4 +425,43 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{protect, unprotect, OfflineStore};
+
+    #[test]
+    fn maintenance_completes_and_records_vacuum() {
+        let path = std::env::temp_dir().join(format!(
+            "janus-storage-maintenance-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = OfflineStore::open(path.to_str().expect("temporary path is UTF-8"))
+            .expect("open temporary store");
+        store.ensure_schema().expect("create schema");
+
+        store.perform_maintenance().expect("perform maintenance");
+
+        assert!(store.get_stat("last_vacuum_unix").unwrap_or(0) > 0);
+        drop(store);
+        std::fs::remove_file(path).expect("remove temporary store");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn cache_protection_round_trips_and_rejects_tampering() {
+        let protected = protect(b"sensitive telemetry").expect("protect payload");
+        assert!(protected.starts_with("aead-v1:"));
+        assert_eq!(
+            unprotect(&protected).expect("unprotect payload"),
+            b"sensitive telemetry"
+        );
+
+        let mut tampered = protected.into_bytes();
+        let last = tampered.last_mut().expect("protected payload is non-empty");
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        assert!(unprotect(std::str::from_utf8(&tampered).unwrap()).is_err());
+    }
 }

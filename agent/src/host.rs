@@ -33,7 +33,7 @@ pub fn registration(cfg: &AgentConfig) -> Result<AgentRegistration> {
         os_version,
         arch,
         execution_mode,
-        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        agent_version: crate::version::full(),
         capabilities: vec![
             "passive-static-source-scan".to_string(),
             "passive-binary-symbol-scan".to_string(),
@@ -51,6 +51,10 @@ fn load_or_create_uuid(path: &str) -> Result<String> {
     if p.exists() {
         return Ok(fs::read_to_string(p)?.trim().to_string());
     }
+    if let Some(parent) = p.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create host uuid directory {}", parent.display()))?;
+    }
     let id = Uuid::new_v4().to_string();
     fs::write(p, &id).with_context(|| format!("write host uuid {}", p.display()))?;
     Ok(id)
@@ -59,7 +63,10 @@ fn load_or_create_uuid(path: &str) -> Result<String> {
 fn hardware_signatures() -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(hostname) = hostname::get() {
-        out.push(hash_label("hostname", hostname.to_string_lossy().as_bytes()));
+        out.push(hash_label(
+            "hostname",
+            hostname.to_string_lossy().as_bytes(),
+        ));
     }
     #[cfg(target_os = "linux")]
     {
@@ -86,4 +93,3 @@ fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-

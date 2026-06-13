@@ -35,11 +35,14 @@ pub fn update_progress(phase: &str, path: &std::path::Path) {
     }
     let total = state.total_files_scanned.fetch_add(1, Ordering::SeqCst) + 1;
     let previous_total = PREVIOUS_TOTAL_FILES.load(Ordering::SeqCst);
-    if previous_total > 0 {
-        let progress = (total * 100) / previous_total;
-        state.scan_progress.store(progress.min(99), Ordering::SeqCst);
+    if let Some(progress) = (total * 100).checked_div(previous_total) {
+        state
+            .scan_progress
+            .store(progress.min(99), Ordering::SeqCst);
     } else {
-        state.scan_progress.store((total / 10).min(90), Ordering::SeqCst);
+        state
+            .scan_progress
+            .store((total / 10).min(90), Ordering::SeqCst);
     }
 }
 
@@ -48,7 +51,29 @@ pub fn set_phase(phase: &str) {
     if let Ok(mut p) = state.current_phase.lock() {
         *p = phase.to_string();
     }
+    if phase == "Idle" {
+        state.scan_progress.store(0, Ordering::SeqCst);
+        if let Ok(mut path) = state.current_path.lock() {
+            path.clear();
+        }
+    }
     log_event(&format!("Transition to scan phase: {}", phase));
+}
+
+pub fn set_scan_complete(total_files: usize) {
+    let state = SharedScanState::global();
+    PREVIOUS_TOTAL_FILES.store(total_files.max(1), Ordering::SeqCst);
+    state.scan_progress.store(100, Ordering::SeqCst);
+    if let Ok(mut phase) = state.current_phase.lock() {
+        *phase = "Uploading results".to_string();
+    }
+    if let Ok(mut path) = state.current_path.lock() {
+        path.clear();
+    }
+    log_event(&format!(
+        "Scan completed after processing {} paths",
+        total_files
+    ));
 }
 
 pub fn log_event(msg: &str) {
@@ -83,10 +108,16 @@ pub fn set_exclusions(excs: Vec<String>) {
 
 pub fn run_self_test(cfg: &crate::config::AgentConfig) {
     log_event("Initializing Agent Diagnostics Self-Test...");
-    log_event(&format!("Configuration loaded successfully. Controller endpoint: {}", cfg.controller_endpoint));
+    log_event(&format!(
+        "Configuration loaded successfully. Controller endpoint: {}",
+        cfg.controller_endpoint
+    ));
     log_event(&format!("Execution mode: {}", cfg.execution_mode));
-    log_event(&format!("Scan interval: {} seconds", cfg.scan_interval_seconds));
-    
+    log_event(&format!(
+        "Scan interval: {} seconds",
+        cfg.scan_interval_seconds
+    ));
+
     let cache_path = std::path::Path::new(&cfg.cache_path);
     if let Some(parent) = cache_path.parent() {
         if parent.exists() {
@@ -95,15 +126,18 @@ pub fn run_self_test(cfg: &crate::config::AgentConfig) {
             log_event("[SELF-TEST] Offline cache folder missing: WARNING");
         }
     }
-    
+
     for root in &cfg.scan_roots {
         let p = std::path::Path::new(root);
         if p.exists() {
             log_event(&format!("[SELF-TEST] Scan root '{}' exists: PASS", root));
         } else {
-            log_event(&format!("[SELF-TEST] Scan root '{}' not found: WARNING", root));
+            log_event(&format!(
+                "[SELF-TEST] Scan root '{}' not found: WARNING",
+                root
+            ));
         }
     }
-    
+
     log_event("Diagnostics Self-Test finished.");
 }

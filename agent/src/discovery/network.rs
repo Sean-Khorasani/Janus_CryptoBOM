@@ -1,15 +1,15 @@
 use crate::{
     config::AgentConfig,
-    proto::{Evidence, NetworkObservation, CbomComponent, CryptoAlgorithm, CryptoRole},
+    proto::{CbomComponent, CryptoAlgorithm, CryptoRole, Evidence, NetworkObservation},
 };
 use anyhow::Result;
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::{net::TcpStream, time::timeout};
 use uuid::Uuid;
-use std::sync::Arc;
-use rustls::{ClientConfig, ClientConnection};
-use rustls::pki_types::ServerName;
 
 /// Structured TLS assessment category for a network probe result.
 ///
@@ -137,7 +137,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 
 pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
     let mut out = NetworkScanResult::default();
-    
+
     // Ensure the default crypto provider is installed
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -222,7 +222,8 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                 for (idx, cert) in peer_certs.iter().enumerate() {
                     let cert_bytes = cert.as_ref();
                     let (subj, iss, _not_after, sig) = parse_x509_der(cert_bytes);
-                    let (pubkey_alg, key_bits) = parse_x509_pubkey(cert_bytes).unwrap_or(("unknown".to_string(), 0));
+                    let (pubkey_alg, key_bits) =
+                        parse_x509_pubkey(cert_bytes).unwrap_or(("unknown".to_string(), 0));
 
                     let is_intermediate = idx > 0;
                     let mut is_weak_intermediate = false;
@@ -231,44 +232,61 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                     if is_intermediate {
                         // Check if signature algorithm is MD5 or SHA-1
                         let sig_upper = sig.to_uppercase();
-                        if sig_upper.contains("SHA1") || sig_upper.contains("SHA-1") || sig_upper.contains("MD5") {
+                        if sig_upper.contains("SHA1")
+                            || sig_upper.contains("SHA-1")
+                            || sig_upper.contains("MD5")
+                        {
                             is_weak_intermediate = true;
                             weak_reason = format!("Weak Intermediate CA Signature: {}", sig);
                         }
                         // Check if RSA key size is below 2048 bits
                         if pubkey_alg == "RSA" && key_bits > 0 && key_bits < 2048 {
                             is_weak_intermediate = true;
-                            weak_reason = format!("Weak Intermediate CA RSA key length: {} bits", key_bits);
+                            weak_reason =
+                                format!("Weak Intermediate CA RSA key length: {} bits", key_bits);
                         }
                     }
 
                     // Add intermediate CAs to components so they can be audited by policy engine
                     if is_intermediate {
-                        let mut algorithms = vec![
-                            CryptoAlgorithm {
-                                name: sig.clone(),
-                                family: if sig.to_uppercase().contains("ECDSA") { "ECC".to_string() } else if sig.to_uppercase().contains("RSA") { "RSA".to_string() } else { "hash".to_string() },
-                                role: CryptoRole::CertSignature as i32,
-                                status: if is_weak_intermediate { "weak-intermediate-ca-observed".to_string() } else { "intermediate-ca-observed".to_string() },
-                                key_bits: 0,
-                                curve: String::new(),
-                                implementation_library: "Network TLS Chain".to_string(),
-                                source_file: target.clone(),
-                                source_line: 0,
-                                source_column: 0,
-                                symbol: weak_reason.clone(),
-                                confidence: 0.90,
-                                quantum_vulnerable: sig.to_uppercase().contains("RSA") || sig.to_uppercase().contains("ECDSA"),
-                                context_snippet: String::new(),
-                            }
-                        ];
+                        let mut algorithms = vec![CryptoAlgorithm {
+                            name: sig.clone(),
+                            family: if sig.to_uppercase().contains("ECDSA") {
+                                "ECC".to_string()
+                            } else if sig.to_uppercase().contains("RSA") {
+                                "RSA".to_string()
+                            } else {
+                                "hash".to_string()
+                            },
+                            role: CryptoRole::CertSignature as i32,
+                            status: if is_weak_intermediate {
+                                "weak-intermediate-ca-observed".to_string()
+                            } else {
+                                "intermediate-ca-observed".to_string()
+                            },
+                            key_bits: 0,
+                            curve: String::new(),
+                            implementation_library: "Network TLS Chain".to_string(),
+                            source_file: target.clone(),
+                            source_line: 0,
+                            source_column: 0,
+                            symbol: weak_reason.clone(),
+                            confidence: 0.90,
+                            quantum_vulnerable: sig.to_uppercase().contains("RSA")
+                                || sig.to_uppercase().contains("ECDSA"),
+                            context_snippet: String::new(),
+                        }];
 
                         if key_bits > 0 {
                             algorithms.push(CryptoAlgorithm {
                                 name: format!("{}-{}", pubkey_alg, key_bits),
                                 family: pubkey_alg.clone(),
                                 role: CryptoRole::CertPublicKey as i32,
-                                status: if is_weak_intermediate { "weak-intermediate-ca-observed".to_string() } else { "intermediate-ca-observed".to_string() },
+                                status: if is_weak_intermediate {
+                                    "weak-intermediate-ca-observed".to_string()
+                                } else {
+                                    "intermediate-ca-observed".to_string()
+                                },
                                 key_bits,
                                 curve: String::new(),
                                 implementation_library: "Network TLS Chain".to_string(),
@@ -277,13 +295,17 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                                 source_column: 0,
                                 symbol: pubkey_alg.clone(),
                                 confidence: 0.90,
-                                quantum_vulnerable: pubkey_alg == "RSA" || pubkey_alg.contains("ECDSA"),
+                                quantum_vulnerable: pubkey_alg == "RSA"
+                                    || pubkey_alg.contains("ECDSA"),
                                 context_snippet: String::new(),
                             });
                         }
 
                         out.components.push(CbomComponent {
-                            bom_ref: format!("certificate:intermediate-ca:{}", sha256_hex(cert_bytes)),
+                            bom_ref: format!(
+                                "certificate:intermediate-ca:{}",
+                                sha256_hex(cert_bytes)
+                            ),
                             name: subj.clone(),
                             version: String::new(),
                             component_type: "certificate".to_string(),
@@ -291,7 +313,11 @@ pub async fn scan(cfg: &AgentConfig) -> Result<NetworkScanResult> {
                             file_path: "network-tls-chain".to_string(),
                             language: "tls".to_string(),
                             algorithms,
-                            dependencies: if iss.is_empty() { Vec::new() } else { vec![iss] },
+                            dependencies: if iss.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![iss]
+                            },
                             reachable: true,
                         });
                     }
@@ -348,7 +374,10 @@ async fn negotiate_starttls(stream: &mut TcpStream, port: u16) -> Result<()> {
             let n = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
             let resp = String::from_utf8_lossy(&buf[..n]);
             if !resp.starts_with("220") {
-                return Err(anyhow::anyhow!("SMTP STARTTLS negotiation failed: {}", resp));
+                return Err(anyhow::anyhow!(
+                    "SMTP STARTTLS negotiation failed: {}",
+                    resp
+                ));
             }
         }
         389 => {
@@ -380,12 +409,9 @@ async fn negotiate_starttls(stream: &mut TcpStream, port: u16) -> Result<()> {
             let _ = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
             // Send SSLRequest
             let ssl_req = &[
-                0x20, 0x00, 0x00, 0x01,
-                0x00, 0x8a, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x01,
-                0x21,
+                0x20, 0x00, 0x00, 0x01, 0x00, 0x8a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x21, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ];
             stream.write_all(ssl_req).await?;
         }
@@ -409,22 +435,26 @@ async fn native_probe(
     String,
 )> {
     let host = target.split(':').next().unwrap_or(target);
-    let port = target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(443);
-    
+    let port = target
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(443);
+
     let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(target))
         .await
         .map_err(|e| anyhow::anyhow!("Connection timeout: {}", e))??;
 
     negotiate_starttls(&mut stream, port).await?;
-        
+
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|_| anyhow::anyhow!("invalid server name: {}", host))?;
-        
+
     let mut conn = ClientConnection::new(config, server_name)?;
-    
+
     let mut raw_bytes = Vec::new();
     let mut buf = [0u8; 4096];
-    
+
     // Perform TLS handshake
     while conn.is_handshaking() {
         if conn.wants_write() {
@@ -471,7 +501,9 @@ async fn native_probe(
     let mut peer_certs = Vec::new();
     if let Some(certs) = conn.peer_certificates() {
         for cert in certs {
-            peer_certs.push(rustls::pki_types::CertificateDer::from(cert.as_ref().to_vec()));
+            peer_certs.push(rustls::pki_types::CertificateDer::from(
+                cert.as_ref().to_vec(),
+            ));
         }
     }
 
@@ -533,23 +565,26 @@ async fn native_probe(
 pub(crate) fn extract_named_group(bytes: &[u8]) -> Option<u16> {
     let mut i = 0;
     while i + 5 < bytes.len() {
-        if bytes[i] == 0x16 && bytes[i+1] == 0x03 {
-            let record_len = ((bytes[i+3] as usize) << 8) | (bytes[i+4] as usize);
+        if bytes[i] == 0x16 && bytes[i + 1] == 0x03 {
+            let record_len = ((bytes[i + 3] as usize) << 8) | (bytes[i + 4] as usize);
             let record_end = i + 5 + record_len;
             if record_end > bytes.len() {
                 break;
             }
-            
+
             let mut hs_idx = i + 5;
             while hs_idx + 4 < record_end {
                 let hs_type = bytes[hs_idx];
-                let hs_len = ((bytes[hs_idx+1] as usize) << 16) | ((bytes[hs_idx+2] as usize) << 8) | (bytes[hs_idx+3] as usize);
-                if hs_type == 0x02 { // ServerHello
+                let hs_len = ((bytes[hs_idx + 1] as usize) << 16)
+                    | ((bytes[hs_idx + 2] as usize) << 8)
+                    | (bytes[hs_idx + 3] as usize);
+                if hs_type == 0x02 {
+                    // ServerHello
                     let sh_end = hs_idx + 4 + hs_len;
                     if sh_end > record_end {
                         break;
                     }
-                    
+
                     let mut sh_idx = hs_idx + 4 + 2 + 32; // Skip version & random
                     if sh_idx < sh_end {
                         let sess_len = bytes[sh_idx] as usize;
@@ -557,19 +592,24 @@ pub(crate) fn extract_named_group(bytes: &[u8]) -> Option<u16> {
                     }
                     sh_idx += 2; // Skip cipher suite
                     sh_idx += 1; // Skip compression
-                    
+
                     if sh_idx + 2 <= sh_end {
-                        let ext_len = ((bytes[sh_idx] as usize) << 8) | (bytes[sh_idx+1] as usize);
+                        let ext_len =
+                            ((bytes[sh_idx] as usize) << 8) | (bytes[sh_idx + 1] as usize);
                         sh_idx += 2;
                         let ext_end = sh_idx + ext_len;
                         if ext_end <= sh_end {
                             while sh_idx + 4 <= ext_end {
-                                let ext_type = ((bytes[sh_idx] as usize) << 8) | (bytes[sh_idx+1] as usize);
-                                let ext_val_len = ((bytes[sh_idx+2] as usize) << 8) | (bytes[sh_idx+3] as usize);
+                                let ext_type =
+                                    ((bytes[sh_idx] as usize) << 8) | (bytes[sh_idx + 1] as usize);
+                                let ext_val_len = ((bytes[sh_idx + 2] as usize) << 8)
+                                    | (bytes[sh_idx + 3] as usize);
                                 sh_idx += 4;
-                                if ext_type == 51 { // key_share
+                                if ext_type == 51 {
+                                    // key_share
                                     if ext_val_len >= 2 && sh_idx + 2 <= ext_end {
-                                        let group = ((bytes[sh_idx] as u16) << 8) | (bytes[sh_idx+1] as u16);
+                                        let group = ((bytes[sh_idx] as u16) << 8)
+                                            | (bytes[sh_idx + 1] as u16);
                                         return Some(group);
                                     }
                                 }
@@ -701,8 +741,14 @@ pub(crate) fn parse_x509_der(der: &[u8]) -> (String, String, i64, String) {
         let format = if tag == 0x17 {
             let year_prefix = if s.len() >= 2 {
                 let yy: i32 = s[0..2].parse().unwrap_or(0);
-                if yy < 50 { "20" } else { "19" }
-            } else { "" };
+                if yy < 50 {
+                    "20"
+                } else {
+                    "19"
+                }
+            } else {
+                ""
+            };
             format!("{}{}", year_prefix, s)
         } else {
             s.to_string()
@@ -714,13 +760,18 @@ pub(crate) fn parse_x509_der(der: &[u8]) -> (String, String, i64, String) {
             let hour: i32 = format[8..10].parse().unwrap_or(0);
             let min: i32 = format[10..12].parse().unwrap_or(0);
             let sec: i32 = format[12..14].parse().unwrap_or(0);
-            
+
             let days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
             let mut days = 0;
             for y in 1970..year {
                 days += if is_leap_year(y) { 366 } else { 365 };
             }
-            for (idx, &d) in days_in_month.iter().enumerate().take(month as usize).skip(1) {
+            for (idx, &d) in days_in_month
+                .iter()
+                .enumerate()
+                .take(month as usize)
+                .skip(1)
+            {
                 days += d;
                 if idx == 2 && is_leap_year(year) {
                     days += 1;
@@ -762,7 +813,7 @@ fn parse_x509_pubkey(der: &[u8]) -> Option<(String, u32)> {
     let tbs_seq = read_tlv(cert_seq.value);
     let tbs = tbs_seq.first().filter(|e| e.tag == 0x30)?;
     let tbs_elements = read_tlv(tbs.value);
-    
+
     let mut idx = 0;
     if idx < tbs_elements.len() && tbs_elements[idx].tag == 0xa0 {
         idx += 1;
@@ -788,11 +839,11 @@ fn parse_x509_pubkey(der: &[u8]) -> Option<(String, u32)> {
         if spki_elements.len() >= 2 {
             let alg_seq = &spki_elements[0];
             let pubkey_bitstring = &spki_elements[1];
-            
+
             // Extract OID from alg_seq
             let alg_elements = read_tlv(alg_seq.value);
             let oid = alg_elements.first().filter(|e| e.tag == 0x06)?.value;
-            
+
             if oid == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01] {
                 // RSA Public Key
                 if pubkey_bitstring.value.len() > 1 {
@@ -983,7 +1034,10 @@ mod tls_category_tests {
 
     #[test]
     fn as_str_values_are_stable() {
-        assert_eq!(TlsAssessmentCategory::Unreachable.as_str(), "tls-unreachable");
+        assert_eq!(
+            TlsAssessmentCategory::Unreachable.as_str(),
+            "tls-unreachable"
+        );
         assert_eq!(TlsAssessmentCategory::NoTls.as_str(), "tls-no-tls");
         assert_eq!(
             TlsAssessmentCategory::TlsHandshakeFailed.as_str(),
