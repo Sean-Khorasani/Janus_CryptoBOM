@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -36,6 +37,26 @@ type JWTPayload struct {
 	Exp  int64  `json:"exp"`
 }
 
+// jwtTTL returns the access-token lifetime. Configurable via JANUS_JWT_TTL (a Go
+// duration like "8h" or "30m"); defaults to 24h and is clamped to [5m, 720h] so a
+// typo can't mint effectively-immortal or instantly-expiring tokens (AUTH-001).
+// Shorter tokens shrink the exposure window of a leaked token (relates to S3).
+func jwtTTL() time.Duration {
+	ttl := 24 * time.Hour
+	if v := os.Getenv("JANUS_JWT_TTL"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			ttl = parsed
+		}
+	}
+	if ttl < 5*time.Minute {
+		ttl = 5 * time.Minute
+	}
+	if ttl > 720*time.Hour {
+		ttl = 720 * time.Hour
+	}
+	return ttl
+}
+
 func GenerateToken(username, role string, secret []byte) (string, error) {
 	header := JWTHeader{Alg: "HS256", Typ: "JWT"}
 	headerBytes, err := json.Marshal(header)
@@ -47,7 +68,7 @@ func GenerateToken(username, role string, secret []byte) (string, error) {
 	payload := JWTPayload{
 		Sub:  username,
 		Role: role,
-		Exp:  time.Now().Add(24 * time.Hour).Unix(),
+		Exp:  time.Now().Add(jwtTTL()).Unix(),
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
