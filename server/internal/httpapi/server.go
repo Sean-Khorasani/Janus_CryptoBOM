@@ -66,11 +66,11 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/components", api.components)
 	mux.HandleFunc("/api/findings", api.findings)
 	mux.HandleFunc("/api/findings/", api.findingsDispatch) // PUT /api/findings/{id}/status | GET /api/findings/{id}/timeline
-	mux.HandleFunc("/api/hosts/", api.hostFindings)       // GET /api/hosts/{uuid}/findings
+	mux.HandleFunc("/api/hosts/", api.hostFindings)        // GET /api/hosts/{uuid}/findings
 	mux.HandleFunc("/api/migrations", api.migrations)
 	mux.HandleFunc("/api/report.html", api.reportHTML)
-	mux.HandleFunc("/api/agents/", api.agentRoutes)          // per-agent detail/scans/connections/config/commands (UX-002)
-	mux.HandleFunc("/api/reports/", api.reportFindings)      // GET /api/reports/{scan_id}/findings (UX-003)
+	mux.HandleFunc("/api/agents/", api.agentRoutes)                 // per-agent detail/scans/connections/config/commands (UX-002)
+	mux.HandleFunc("/api/reports/", api.reportFindings)             // GET /api/reports/{scan_id}/findings (UX-003)
 	mux.HandleFunc("/api/scan-config/schema", api.scanConfigSchema) // GET scan-parameter schema (UX-004)
 	// CSR generation is operator/admin-only (AUTH-003): certificate issuance must stay under operator control.
 	mux.Handle("/api/certificates/csr", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.createCSR)))
@@ -127,8 +127,12 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/sandbox/simulate", api.sandboxSimulate)
 	// F7 — Statistical Confidence Analysis
 	mux.HandleFunc("/api/confidence/report", api.confidenceReport)
-	mux.HandleFunc("/api/hsm/sign", api.hsmSign)
-	mux.HandleFunc("/api/hsm/verify", api.hsmVerify)
+	// HSM signing/verification are privileged operations on platform keys — gate
+	// them to operator/admin like other state-changing endpoints (AUTH-004). They
+	// previously had no role guard, so any authenticated user (incl. viewer) could
+	// drive the HSM.
+	mux.Handle("/api/hsm/sign", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.hsmSign)))
+	mux.Handle("/api/hsm/verify", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.hsmVerify)))
 	mux.HandleFunc("/metrics", api.metrics)
 
 	authWrapper := AuthMiddleware(jwtSecret, disableAuth)
@@ -380,10 +384,10 @@ func (a *API) reportHTML(w http.ResponseWriter, r *http.Request) {
 }
 
 type csrRequest struct {
-	CommonName         string   `json:"common_name"`
-	DNSNames           []string `json:"dns_names"`
-	Organization       []string `json:"organization"`
-	TargetSignature    string   `json:"target_signature"`
+	CommonName          string   `json:"common_name"`
+	DNSNames            []string `json:"dns_names"`
+	Organization        []string `json:"organization"`
+	TargetSignature     string   `json:"target_signature"`
 	HybridCompatibility bool     `json:"hybrid_compatibility"`
 }
 
@@ -606,11 +610,11 @@ func (a *API) exportCycloneDX(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type cdxCryptoComponent struct {
-		BomRef          string         `json:"bom-ref"`
-		Type            string         `json:"type"`
-		Name            string         `json:"name"`
-		Version         string         `json:"version,omitempty"`
-		Evidence        map[string]any `json:"evidence,omitempty"`
+		BomRef           string         `json:"bom-ref"`
+		Type             string         `json:"type"`
+		Name             string         `json:"name"`
+		Version          string         `json:"version,omitempty"`
+		Evidence         map[string]any `json:"evidence,omitempty"`
 		CryptoProperties map[string]any `json:"cryptoProperties,omitempty"`
 	}
 	cdxComps := make([]cdxCryptoComponent, 0, len(components))
@@ -735,24 +739,24 @@ func (a *API) exportSARIF(w http.ResponseWriter, r *http.Request) {
 	sarifRules := make([]map[string]any, 0, len(ruleSet))
 	for ruleID := range ruleSet {
 		sarifRules = append(sarifRules, map[string]any{
-			"id": ruleID,
+			"id":      ruleID,
 			"helpUri": "https://github.com/janus-cbom/janus/blob/main/docs/AGILITY_SCORECARD.md",
 		})
 	}
 
 	type sarifResult struct {
-		RuleID    string           `json:"ruleId"`
-		Level     string           `json:"level"`
-		Message   map[string]any   `json:"message"`
-		Locations []map[string]any `json:"locations"`
-		Properties map[string]any  `json:"properties,omitempty"`
+		RuleID     string           `json:"ruleId"`
+		Level      string           `json:"level"`
+		Message    map[string]any   `json:"message"`
+		Locations  []map[string]any `json:"locations"`
+		Properties map[string]any   `json:"properties,omitempty"`
 	}
 	results := make([]sarifResult, 0, len(findings))
 	for _, f := range findings {
 		sr := sarifResult{
-			RuleID:  f.PolicyRuleID,
-			Level:   sarifSeverity(f.Severity),
-			Message: map[string]any{"text": f.Title + ": " + f.Description},
+			RuleID:    f.PolicyRuleID,
+			Level:     sarifSeverity(f.Severity),
+			Message:   map[string]any{"text": f.Title + ": " + f.Description},
 			Locations: []map[string]any{parseSARIFLocation(f.AssetRef)},
 		}
 		if f.Algorithm != "" || f.Confidence > 0 {
@@ -775,7 +779,7 @@ func (a *API) exportSARIF(w http.ResponseWriter, r *http.Request) {
 				"informationUri": "https://github.com/janus-cbom/janus",
 				"rules":          sarifRules,
 			}},
-			"results":        results,
+			"results": results,
 			"originalUriBaseIds": map[string]any{
 				"%SRCROOT%": map[string]any{"uri": "./"},
 			},
@@ -943,7 +947,7 @@ func (a *API) fleetConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		
+
 		username, _ := r.Context().Value(UserContextKey).(string)
 		if username == "" {
 			username = "admin"
