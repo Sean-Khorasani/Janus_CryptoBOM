@@ -89,3 +89,12 @@ NOT committed — shared-tree entanglement (FOR LINUX TEAMMATE):
 ## 2026-06-12 — CLAIMED (Windows-side): all LLM-flow tasks (LLM-021/022)
 
 LLM-021 (agent never initiates LLM during scan) — DONE, committed 92d539a, 15 tests pass. LLM-022 (server batch+filter analyze endpoint, server-side evidence assembly, bounded-concurrency worker, findings-list selection UI + inline verdicts) — implementing now. Server LLM files (llm_analysis.go, llm/service.go, server.go) are clean == HEAD so I can edit/commit without entanglement; agent main.rs is your dirty WIP so I left scan() signature intact (flag ignored) rather than touch it. Plan updated with the normative flow + acceptance criteria.
+
+## 2026-06-12 — LLM-021/022 delivered
+
+- LLM-021 (agent never initiates LLM): 92d539a — removed both LLM functions + per-match call sites from source.rs; scanning fully deterministic. 15 source tests pass.
+- LLM-022 server: c628271 — POST /api/llm/analyze/batch (finding_ids OR filter: severity_gte/status/algorithm/host_uuid/scope all|all_critical), dedup, cap 500, audit; GET /api/llm/batches/{id}; bounded-concurrency worker (JANUS_LLM_MAX_CONCURRENT) assembling evidence SERVER-SIDE from stored finding metadata. 5 new unit tests pass; httpapi+llm packages green; new file gofmt-clean, server.go diff = 3 route lines only.
+- LLM-022 UI: b6eadf1 — findings list (FindingsGrid) row checkboxes + select-all/all-critical/page, "Analyze selected with AI" (gated on /api/llm/status enabled AND operator/admin role), batch submit + poll + inline VerdictBadge (advisory; never auto-changes status). UI builds clean.
+- Plan: 02f6b10 — refined requirement + normative flow + acceptance criteria under LLM-021/022.
+- Shared-tree note: ui/node_modules got overwritten cross-platform (Linux binaries) — ran npm install to restore Windows build; ui/package-lock.json left uncommitted (env artifact, differs per OS). The git-worktree split (ONBOARDING.md) would prevent this.
+- Residual for LLM-022: batch grouping is in-memory (verdicts persist in DB); a durable batches table is a future nicety. Optional bulk-verdicts endpoint would avoid the per-row verdict GETs on page load.
