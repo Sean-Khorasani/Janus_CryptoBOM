@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Janus CryptoBOM
+
+Files: *
+Copyright: 2024 Janus CryptoBOM contributors
+License: Proprietary
+ This software is not licensed for redistribution except as authorized by its
+ copyright holders.

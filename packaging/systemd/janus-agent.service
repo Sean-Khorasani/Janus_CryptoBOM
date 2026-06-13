@@ -1,0 +1,47 @@
+[Unit]
+Description=Janus CryptoBOM Endpoint Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=janusagent
+Group=janusagent
+ExecStart=/usr/bin/janus-agent --config /etc/janus-agent/janus-agent.toml
+LoadCredential=command-signing-key:/etc/janus-agent/command-signing-key
+Environment=JANUS_COMMAND_SIGNING_KEY_FILE=%d/command-signing-key
+Environment=JANUS_CACHE_KEY_FILE=/var/lib/janus-agent/cache-protection-key
+Restart=on-failure
+RestartSec=10
+StateDirectory=janus-agent
+StateDirectoryMode=0700
+ConfigurationDirectory=janus-agent
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/janus-agent
+
+[Install]
+WantedBy=multi-user.target

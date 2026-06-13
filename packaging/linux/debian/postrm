@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+if [ "$1" = purge ]; then
+  rm -rf /etc/janus-agent /var/lib/janus-agent
+  if getent passwd janusagent >/dev/null 2>&1; then
+    deluser --system janusagent >/dev/null 2>&1 || true
+  fi
+  if getent group janusagent >/dev/null 2>&1; then
+    delgroup --system janusagent >/dev/null 2>&1 || true
+  fi
+fi
+
+exit 0
+

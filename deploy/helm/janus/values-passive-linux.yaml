@@ -1,0 +1,13 @@
+# Supported Linux profile. This restates security-sensitive defaults so an
+# installation command can explicitly select the passive deployment contract.
+agent:
+  enabled: true
+  hostPID: false
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000

@@ -1,0 +1,10 @@
+Package: janus-agent
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Janus CryptoBOM Maintainers <maintainers@janus-cryptobom.invalid>
+Section: admin
+Priority: optional
+Depends: adduser, libc6
+Description: Janus CryptoBOM endpoint agent
+ Janus Agent inventories cryptographic assets and reports them to a Janus
+ control plane. This package installs the passive, hardened systemd profile.

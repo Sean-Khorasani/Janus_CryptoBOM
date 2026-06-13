@@ -14,9 +14,36 @@ data:
   JANUS_DB_MAX_CONNS: "25"
   JANUS_DB_MIN_CONNS: "5"
   JANUS_AGENT_STALL_SECONDS: "300"
+  JANUS_GRPC_MAX_RECV_BYTES: "{{ .Values.server.grpcMaxRecvBytes }}"
   JANUS_CORS_ORIGIN: "http://localhost:5173"
   JANUS_SCAN_SCHEDULE: "{{ .Values.agent.scan.schedule }}"
   JANUS_MIN_KEY_SIZE: "{{ .Values.agent.scan.minKeySize }}"
   JANUS_EXCLUDE_DIRS: "{{ .Values.agent.scan.excludeDirs }}"
   JANUS_RETENTION_DAYS: "{{ .Values.retention.days }}"
   JANUS_AUTO_PURGE: "{{ .Values.retention.autoPurge }}"
+  agent.toml: |
+    controller_endpoint = "http://{{ include "janus-cryptobom.fullname" . }}-server:{{ .Values.service.grpcPort }}"
+    http_controller_endpoint = "http://{{ include "janus-cryptobom.fullname" . }}-server:{{ .Values.service.httpPort }}"
+    execution_mode = "passive"
+    cache_path = "/data/agent.db"
+    host_uuid_path = "/data/host-id"
+    report_path = "/data/report.html"
+    sarif_path = "/data/report.sarif"
+    scan_interval_seconds = {{ .Values.agent.scan.intervalSeconds }}
+    max_file_bytes = {{ .Values.agent.scan.maxFileBytes }}
+    max_binary_bytes = {{ .Values.agent.scan.maxBinaryBytes }}
+    command_signing_key = "overridden-by-JANUS_COMMAND_SIGNING_KEY_FILE"
+    scan_roots = ["/host"]
+    exclude_dirs = [".git", "target", "node_modules", "dist", ".venv", "__pycache__"]
+    network_targets = []
+    enable_runtime_discovery = false
+    enable_process_memory_scraping = false
+    enable_plugin_discovery = false
+    enable_active_tls_probing = false
+    plugin_dirs = []
+    intercept_mode = "disabled"
+
+    [active]
+    allowed_services = []
+    allowed_config_roots = []
+    backup_dir = "/data/backups"

@@ -18,6 +18,7 @@ if "%~1"=="" goto usage
 if "%~1"=="" goto end
 if /i "%~1"=="clean" call :clean
 if /i "%~1"=="build" call :build
+if /i "%~1"=="package" call :package
 if /i "%~1"=="all" (
     call :clean
     call :build
@@ -49,6 +50,11 @@ if exist "%PROJECT_ROOT%\bin\janus_interceptor.dll" del /q "%PROJECT_ROOT%\bin\j
 if exist "%PROJECT_ROOT%\bin\janus-cli.exe" del /q "%PROJECT_ROOT%\bin\janus-cli.exe"
 
 cd "%PROJECT_ROOT%"
+goto :EOF
+
+:package
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%\build-windows.ps1" -Package
+if errorlevel 1 exit /b 1
 goto :EOF
 
 :build
@@ -91,11 +97,12 @@ cd "%PROJECT_ROOT%"
 goto :EOF
 
 :usage
-echo Usage: build.bat [clean] [build] [all]
+echo Usage: build.bat [clean] [build] [package] [all]
 echo.
 echo Commands:
 echo   clean        Removes all built artifacts and binaries.
 echo   build        Compiles the Agent, Server, and UI.
+echo   package      Builds and creates versioned Windows deployment ZIPs.
 echo   all          Equivalent to running "clean build".
 echo.
 echo Example: build.bat clean build

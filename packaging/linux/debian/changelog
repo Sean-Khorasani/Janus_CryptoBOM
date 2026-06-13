@@ -1,0 +1,6 @@
+janus-agent (@VERSION@) stable; urgency=medium
+
+  * Build native Janus Agent Linux package.
+
+ -- Janus CryptoBOM Maintainers <maintainers@janus-cryptobom.invalid>  Mon, 01 Jan 2024 00:00:00 +0000
+

@@ -27,12 +27,23 @@ spec:
       serviceAccountName: {{ include "janus-cryptobom.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: initialize-policies
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-c", "cp -R /policies/. /data/policies/"]
+          volumeMounts:
+            - name: policies
+              mountPath: /data/policies
       containers:
         - name: server
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: /data
           ports:
             - name: http
               containerPort: {{ .Values.server.port }}
@@ -78,6 +89,16 @@ spec:
             {{- toYaml .Values.server.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: policies
+              mountPath: /data/policies
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: policies
+          emptyDir: {}
       {{- with .Values.server.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

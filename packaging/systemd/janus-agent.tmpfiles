@@ -1,0 +1,2 @@
+d /var/lib/janus-agent 0700 janusagent janusagent -
+d /etc/janus-agent 0750 root janusagent -

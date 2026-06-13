@@ -7,6 +7,18 @@ This Helm chart deploys Janus CryptoBOM on Kubernetes.
 - Helm 3.2+
 - PV provisioner for persistent storage (if using bundled PostgreSQL)
 
+### Linux Validation
+
+Run the chart validation from the repository root:
+
+```bash
+./scripts/verify-helm-linux.sh
+```
+
+The script always checks Linux runtime, volume, port, and configuration
+invariants. When Helm is installed, it also runs `helm lint` and renders the
+default, agent-disabled, ephemeral-PostgreSQL, and external-database variants.
+
 ### Installing the Chart
 
 ```bash
@@ -33,8 +45,13 @@ The following table lists common configurable parameters:
 | `server.logLevel` | Log level (debug/info/warn/error) | `info` |
 | `server.disableAuth` | Disable authentication (dev only) | `false` |
 | `postgresql.enabled` | Deploy bundled PostgreSQL | `true` |
+| `postgresql.persistence.enabled` | Persist bundled PostgreSQL data | `true` |
 | `postgresql.persistence.size` | PostgreSQL volume size | `10Gi` |
 | `ingress.enabled` | Enable ingress | `false` |
+
+The server root filesystem remains read-only. Writable temporary files and
+runtime policy updates use pod-local `emptyDir` volumes. Agent state is also
+pod-local; redeploying or rescheduling an agent recreates its local state.
 
 ### Using External PostgreSQL
 

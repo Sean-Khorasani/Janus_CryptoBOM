@@ -1,6 +1,18 @@
-version: "3.8"
-
 services:
+  janus-secret-init:
+    image: alpine:3.22
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        test -s /run/janus-secrets/command-signing-key ||
+          head -c 32 /dev/urandom | base64 > /run/janus-secrets/command-signing-key
+        chmod 0444 /run/janus-secrets/command-signing-key
+    volumes:
+      - command-secret:/run/janus-secrets
+    restart: "no"
+
   postgres:
     image: postgres:16-alpine
     container_name: janus-postgres
@@ -8,8 +20,6 @@ services:
       POSTGRES_USER: janus
       POSTGRES_PASSWORD: janus
       POSTGRES_DB: janus
-    ports:
-      - "5432:5432"
     volumes:
       - pg-data:/var/lib/postgresql/data
     healthcheck:
@@ -31,10 +41,15 @@ services:
       JANUS_HTTP_ADDR: 0.0.0.0:8080
       JANUS_GRPC_ADDR: 0.0.0.0:9443
       JANUS_DISABLE_AUTH: "false"
-      JANUS_COMMAND_SIGNING_KEY: local-development-command-signing-key
+      JANUS_COMMAND_SIGNING_KEY_FILE: /run/janus-secrets/command-signing-key
+      JANUS_GRPC_MAX_RECV_BYTES: "33554432"
+    volumes:
+      - command-secret:/run/janus-secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
+      janus-secret-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
       interval: 10s
@@ -42,20 +57,53 @@ services:
       retries: 3
 
   janus-agent:
+    image: janus-agent:local
     build:
       context: ./agent
       dockerfile: Dockerfile
     container_name: janus-agent
-    environment:
-      JANUS_CONTROLLER_ENDPOINT: http://janus-server:9443
-      JANUS_SCAN_ROOTS: /scan
-      JANUS_CACHE_PATH: /data/agent.db
     volumes:
+      - ./config/janus-agent.compose.toml:/data/janus-agent.toml:ro
       - .:/scan:ro
       - agent-data:/data
+      - command-secret:/run/janus-secrets:ro
+    environment:
+      JANUS_COMMAND_SIGNING_KEY_FILE: /run/janus-secrets/command-signing-key
+      JANUS_CACHE_KEY_FILE: /data/cache-protection-key
     depends_on:
-      - janus-server
+      janus-server:
+        condition: service_healthy
+      janus-agent-state-init:
+        condition: service_completed_successfully
+      janus-secret-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  janus-agent-state-init:
+    image: janus-agent:local
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        umask 077
+        test -s /data/cache-protection-key ||
+          head -c 32 /dev/urandom | base64 > /data/cache-protection-key
+        chown -R 999:999 /data
+        chmod 0600 /data/cache-protection-key
+    volumes:
+      - agent-data:/data
+    restart: "no"
 
 volumes:
   pg-data:
   agent-data:
+  command-secret:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${JANUS_COMPOSE_SUBNET:-172.30.250.0/24}

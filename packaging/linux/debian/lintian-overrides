@@ -1,0 +1,9 @@
+# The package must preserve the already-built release artifact byte-for-byte.
+janus-agent: unstripped-binary-or-object [usr/bin/janus-agent]
+# Manual package scripts support systems where debhelper is unavailable.
+janus-agent: maintainer-script-calls-systemctl
+# The service-group-readable config and CLI-only binary are intentional.
+janus-agent: non-standard-file-perm 0640 != 0644 [etc/janus-agent/janus-agent.toml]
+janus-agent: no-manual-page [usr/bin/janus-agent]
+# This repository does not use Debian bug numbers for its initial package.
+janus-agent: initial-upload-closes-no-bugs [usr/share/doc/janus-agent/changelog.Debian.gz:1]

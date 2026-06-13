@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+
+if ! getent group janusagent >/dev/null 2>&1; then
+  addgroup --system janusagent >/dev/null
+fi
+if ! getent passwd janusagent >/dev/null 2>&1; then
+  adduser --system --ingroup janusagent --home /var/lib/janus-agent \
+    --no-create-home --disabled-login --disabled-password janusagent >/dev/null
+fi
+
+install -d -m 0750 -o root -g janusagent /etc/janus-agent
+chown root:janusagent /etc/janus-agent/janus-agent.toml
+chmod 0640 /etc/janus-agent/janus-agent.toml
+install -d -m 0700 -o janusagent -g janusagent /var/lib/janus-agent
+
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+  systemd-tmpfiles --create janus-agent.conf || true
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl preset janus-agent.service >/dev/null 2>&1 || true
+fi
+
+exit 0

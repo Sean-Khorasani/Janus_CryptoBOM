@@ -52,6 +52,12 @@ spec:
               command: ["pg_isready", "-U", {{ .Values.postgresql.auth.username | quote }}]
             initialDelaySeconds: 5
             periodSeconds: 5
+      {{- if not .Values.postgresql.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.postgresql.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -63,6 +69,7 @@ spec:
         resources:
           requests:
             storage: {{ .Values.postgresql.persistence.size }}
+  {{- end }}
 
 ---
 

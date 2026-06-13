@@ -8,12 +8,12 @@ replicaCount: 1
 image:
   registry: docker.io
   repository: janus-cbom/server
-  tag: "0.1.0"
+  tag: "0.14.0"
   pullPolicy: IfNotPresent
   # Override for agent image if different from server
   agent:
     repository: janus-cbom/agent
-    tag: "0.1.0"
+    tag: "0.14.0"
     pullPolicy: IfNotPresent
 
 nameOverride: ""
@@ -47,6 +47,7 @@ securityContext:
 server:
   port: 8080
   grpcPort: 9443
+  grpcMaxRecvBytes: 33554432
   logLevel: info
   disableAuth: false
   resources:
@@ -75,6 +76,7 @@ server:
 # Agent configuration (DaemonSet)
 agent:
   enabled: true
+  hostPID: false
   resources:
     requests:
       cpu: 100m
@@ -88,6 +90,9 @@ agent:
   affinity: {}
   # Scan configuration
   scan:
+    intervalSeconds: 900
+    maxFileBytes: 2097152
+    maxBinaryBytes: 16777216
     schedule: daily
     minKeySize: 2048
     excludeDirs: ".git, target, node_modules, dist, .venv, temp"

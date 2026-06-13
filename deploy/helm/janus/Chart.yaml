@@ -2,8 +2,8 @@ apiVersion: v2
 name: janus-cryptobom
 description: A Helm chart for deploying Janus CryptoBOM on Kubernetes
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.14.0
+appVersion: "0.14.0"
 icon: https://janus-cbom.io/icon.png
 keywords:
   - post-quantum
