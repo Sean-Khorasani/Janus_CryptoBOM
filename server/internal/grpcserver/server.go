@@ -16,6 +16,7 @@ import (
 	"github.com/janus-cbom/janus/server/internal/pb"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/store"
+	"github.com/janus-cbom/janus/server/internal/version"
 	"github.com/janus-cbom/janus/server/internal/ws"
 	"google.golang.org/grpc/peer"
 )
@@ -213,6 +214,64 @@ func (s *Server) ReportMigrationStatus(stream pb.JanusTelemetry_ReportMigrationS
 	}
 }
 
+// severityLabel maps a numeric severity to a human-readable label.
+func severityLabel(sev int32) string {
+	switch {
+	case sev >= 5:
+		return "critical"
+	case sev == 4:
+		return "high"
+	case sev == 3:
+		return "medium"
+	case sev == 2:
+		return "low"
+	default:
+		return "info"
+	}
+}
+
+// buildSIEMEvent constructs a structured SIEM event map for a single critical finding.
+func buildSIEMEvent(payload *pb.CbomTelemetryPayload, f *pb.CryptoFinding, prof policy.Profile) map[string]interface{} {
+	remHint := ""
+	if rule, ok := policy.GetRule(f.PolicyRuleId); ok {
+		remHint = rule.RemediationHint
+	}
+
+	evidenceCtx := ""
+	if len(f.EvidenceIds) > 0 {
+		evidenceCtx = f.EvidenceIds[0]
+	}
+
+	return map[string]interface{}{
+		"event_type":    "janus.finding.critical",
+		"event_version": "1.0",
+		"timestamp":     time.Now().UTC().Format(time.RFC3339),
+		"source": map[string]interface{}{
+			"product":   "Janus CryptoBOM",
+			"version":   version.Version,
+			"host_uuid": payload.HostUuid,
+		},
+		"finding": map[string]interface{}{
+			"finding_id":       f.FindingId,
+			"rule_id":          f.PolicyRuleId,
+			"title":            f.Title,
+			"severity":         f.Severity,
+			"severity_label":   severityLabel(f.Severity),
+			"algorithm":        f.Algorithm,
+			"asset_ref":        f.AssetRef,
+			"confidence":       0,
+			"status":           "open",
+			"first_seen_at":    time.Now().UTC().Format(time.RFC3339),
+			"evidence_context": evidenceCtx,
+		},
+		"remediation": map[string]interface{}{
+			"rule_hint":            remHint,
+			"migration_target_kem": prof.PreferredKEM,
+			"migration_target_sig": prof.PreferredSignature,
+		},
+	}
+}
+
 func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 	webhooks, err := s.store.GetWebhooks(context.Background())
 	if err != nil {
@@ -223,17 +282,22 @@ func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 		return
 	}
 
-	alert := map[string]interface{}{
-		"event":      "janus-critical-compliance-finding",
-		"timestamp":  time.Now().Format(time.RFC3339),
-		"host_uuid":  payload.HostUuid,
-		"findings":   len(payload.Findings),
-		"components": len(payload.Components),
-		"message":    fmt.Sprintf("Critical compliance findings reported for host %s", payload.HostUuid),
+	// Collect critical findings and build one SIEM event per finding.
+	prof := s.policy.GetActiveProfile()
+	var events [][]byte
+	for _, f := range payload.Findings {
+		if f.Severity < 5 {
+			continue
+		}
+		evt := buildSIEMEvent(payload, f, prof)
+		body, err := json.Marshal(evt)
+		if err != nil {
+			slog.Warn("failed to marshal SIEM event", "finding_id", f.FindingId, "error", err)
+			continue
+		}
+		events = append(events, body)
 	}
-
-	body, err := json.Marshal(alert)
-	if err != nil {
+	if len(events) == 0 {
 		return
 	}
 
@@ -249,46 +313,49 @@ func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 			continue
 		}
 
-		// Retry up to 3 times with exponential backoff
-		var lastErr error
-		success := false
-		for attempt := 0; attempt < 3; attempt++ {
-			if attempt > 0 {
-				backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-				time.Sleep(backoff)
+		// Dispatch one request per critical finding event.
+		for _, body := range events {
+			// Retry up to 3 times with exponential backoff
+			var lastErr error
+			success := false
+			for attempt := 0; attempt < 3; attempt++ {
+				if attempt > 0 {
+					backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+					time.Sleep(backoff)
+				}
+
+				req, reqErr := http.NewRequestWithContext(context.Background(), "POST", wh.URL, bytes.NewReader(body))
+				if reqErr != nil {
+					lastErr = reqErr
+					continue
+				}
+				req.Header.Set("Content-Type", "application/json")
+				if wh.SecretToken != "" {
+					req.Header.Set("X-Janus-Token", wh.SecretToken)
+				}
+
+				resp, respErr := client.Do(req)
+				if respErr != nil {
+					lastErr = respErr
+					continue
+				}
+				// Drain body for connection reuse
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					success = true
+					break
+				}
+				lastErr = fmt.Errorf("webhook returned status %d", resp.StatusCode)
 			}
 
-			req, reqErr := http.NewRequestWithContext(context.Background(), "POST", wh.URL, bytes.NewReader(body))
-			if reqErr != nil {
-				lastErr = reqErr
-				continue
+			if success {
+				s.circuit.recordSuccess(wh.URL)
+			} else {
+				slog.Error("failed to send webhook after 3 attempts", "url", wh.URL, "error", lastErr)
+				s.circuit.recordFailure(wh.URL)
 			}
-			req.Header.Set("Content-Type", "application/json")
-			if wh.SecretToken != "" {
-				req.Header.Set("X-Janus-Token", wh.SecretToken)
-			}
-
-			resp, err := client.Do(req)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			// Drain body for connection reuse
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				success = true
-				break
-			}
-			lastErr = fmt.Errorf("webhook returned status %d", resp.StatusCode)
-		}
-
-		if success {
-			s.circuit.recordSuccess(wh.URL)
-		} else {
-			slog.Error("failed to send webhook after 3 attempts", "url", wh.URL, "error", lastErr)
-			s.circuit.recordFailure(wh.URL)
 		}
 	}
 }
