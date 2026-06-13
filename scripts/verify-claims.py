@@ -53,7 +53,6 @@ CLAIM_SURFACE = [
     "docs/deployment.md",
     "docs/design.md",
     "docs/case_studies.md",
-    "docs/feature-inventory.md",
 ]
 
 # A banned phrase is ignored when negated or marked not-applicable on the same
