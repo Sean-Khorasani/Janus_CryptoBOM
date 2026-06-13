@@ -22,7 +22,6 @@ $JANUS_BIN check "$SCAN_PATH" \
   --format sarif \
   --output "$OUTPUT_DIR/janus-findings.sarif" \
   2>&1 | tee "$OUTPUT_DIR/janus-scan.log"
-SCAN_EXIT=$?
 
 # Generate CBOM
 echo "[2/3] Generating CycloneDX CBOM..."
