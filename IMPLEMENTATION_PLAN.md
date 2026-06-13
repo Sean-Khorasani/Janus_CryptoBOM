@@ -69,7 +69,7 @@ mode passes.
 | LLM-016 Build API and CLI automation | **Implemented** | REST endpoints: `POST /api/llm/analyze` (submit job, sync if evidence provided), `GET /api/llm/jobs` + `GET /api/llm/jobs/{id}` (list/get with verdict), `GET /api/llm/verdicts/{finding_id}`, `GET /api/llm/provenance/{finding_id}`, `GET /api/llm/status`. All require JWT auth. |
 | LLM-017 Enforce autonomous-remediation policy | Not started (security phase) | Deferred. |
 | LLM-018 Add LLM security and reliability controls | Not started (security phase) | Deferred. |
-| LLM-019 Add evaluation and release gates | **Prompt-injection defense + gate implemented** (commit pending) | `server/internal/llm/llm_test.go`: 15 tests covering ValidateVerdict (valid + invalid cases), ValidateSuggestion, HashString determinism. Missing: false-positive corpus, provider-contract tests, prompt-injection defense. |
+| LLM-019 Add evaluation and release gates | **Prompt-injection defense + release gate implemented** (commit 6342904); remaining: false-positive corpus, provider-contract tests | `server/internal/llm/llm_test.go`: 15 tests covering ValidateVerdict (valid + invalid cases), ValidateSuggestion, HashString determinism. Missing: false-positive corpus, provider-contract tests, prompt-injection defense. |
 | LLM-020 Correct documentation and product claims | Partially implemented | `CLAUDE.md` updated. `docs/LLM_CAPABILITY_CONTRACT.md` written. Missing: `README.md` capability-maturity section, per-feature experimental/supported labels. |
 | LLM-021 Remove agent-initiated LLM from the scan path | **Implemented** | `agent/src/discovery/source.rs`: removed `analyze_snippet_llm_sync` and `generate_remediation_patch_llm` and their per-match call sites (commit 92d539a). Scanning is fully deterministic; the agent reports findings + bounded evidence only. `scan()` flag retained but ignored. 15 source tests pass. |
 | LLM-022 Server-side admin-initiated batch analysis | **In progress** | Batch + filter selection endpoint, server-side evidence assembly, background worker, and findings-list UI selection + inline verdicts. See "Corrected LLM Analysis Flow" below for the normative design and acceptance criteria. |
@@ -371,20 +371,20 @@ Resume roadmap implementation after manual server/agent/Web UI feedback.
 | WP-002 | Not started | Blocked by Linux Gate L0. |
 | WP-003 through WP-012 | Deferred | Security phase — implement after all functional/UI work is complete. |
 | WP-013 | Partially implemented | Lifecycle events, auto-reopen on recurrence, `GET /api/findings/{id}/timeline`, `GET /api/hosts/{uuid}/findings`. See WP-013 section. |
-| WP-014 | Not started | Requires large new deps (AST parsers per language). |
+| WP-014 | Substantially implemented | Directive-aware **structural config parsers** (nginx/sshd_config/openssl.cnf, `config_parse.rs`); honest reachability (textual/import matches `reachable=false`); **published benchmark corpus** with precision/recall by detector & language (`docs/analysis/DETECTION-BENCHMARK.md`, 1.000/1.000). Full multi-language AST deferred (tree-sitter toolchain cost). See WP-014 section. |
 | WP-015 | Partially implemented | CompatibilityAnalysis/DependencyUpdate in sandbox, HumanApprovalRequired. See WP-015 section. |
 | WP-016 | Partially implemented | TLS probing, STARTTLS, 9 assessment categories, OCSP placeholder, `docs/NETWORK_ASSESSMENT.md`. See WP-016 section. |
 | WP-017 | Partially implemented | 12 versioned ControlRules, BuiltinControlPack, profile EffectiveDate/FrameworkMappings, REST API, compliance rules UI. See WP-017 section. |
 | WP-018 | Partially implemented | Real cert health from DB, real SLA metrics, no fabricated values. UI cert-health card. See WP-018 section. |
-| WP-019 | Partially implemented | 71 Rust + 18 Go packages green, fuzz test, store interface assertion, race CI step. See WP-019 section. |
+| WP-019 | Substantially implemented | 80 Rust + 13 Go packages green; fuzz test; **race/concurrency tests** (ws hub, webhook circuit, shutdown drain — `go test -race ./...` clean); **performance baseline** (`BenchmarkAssess`); **formal STRIDE threat models** for all 5 surfaces (`docs/THREAT_MODEL.md`). Missing: HA/failover, chaos harness, external pentest. See WP-019 section. |
 | WP-020 | Not started | HA/tenancy infrastructure — P2, skip until functional complete. |
 | WP-021 | Partially implemented | CycloneDX 1.6 cryptoProperties, SARIF 2.1.0 with source locations. See WP-021 section. |
-| WP-022 | Extended | WavePlan CRUD + CanaryTargets/MaintenanceWindow/ApprovalPolicy/BudgetHours fields, DB migrations 22/25/27. 15+ tests. See WP-022 section. |
-| WP-023 | Scaffolded + exercise EP | Agility scorecard, REST API, UI dashboard, dry-run exercise endpoint. See WP-023 section. |
+| WP-022 | Substantially implemented | WavePlan CRUD + canary/maintenance/approval/budget fields + **dependency graph** (cycle detection, topological order, dependency-safe activation gating) + **budget rollup**, DB migrations 22/25/27/28, `GET /api/waves/graph`. 23 tests. Missing: golden reference programs. See WP-022 section. |
+| WP-023 | Substantially implemented | Agility scorecard, REST API, UI dashboard, dry-run exercise, plus **automated negotiation harness** (per-adapter capability matrix, readiness grading, TTSA estimate) and `agility_metrics` now persisted per exercise. 25 tests. Missing: live end-to-end negotiation drills. See WP-023 section. |
 | WP-024 | Partially implemented | SIEM-compatible webhook payload (event_type, source, finding, remediation fields). See WP-024 section. |
-| WP-025 | Partially implemented | SECURITY.md, SUPPORT.md, CAPABILITY_MATURITY.md, release readiness check endpoint. See WP-025 section. |
+| WP-025 | Substantially implemented | SECURITY.md, SUPPORT.md, CAPABILITY_MATURITY.md, release-check endpoint, plus **documentation-claim linter** (`scripts/verify-claims.py`, in `linux-gate`) and **release-evidence bundle generator** (`scripts/release-evidence.sh`). See WP-025 section. |
 | WP-026 | Substantially implemented | DataClassification enum, redact_secrets (5 patterns), 11 tests, PRIVACY_DATA_GOVERNANCE.md. See WP-026 section. |
-| WP-027 | Partially implemented | ALGORITHM_COMPATIBILITY.md migration matrix and library support table. See WP-027 section. |
+| WP-027 | Substantially implemented | ALGORITHM_COMPATIBILITY.md plus an **automated interop lab report generator** (`scripts/interop-lab-report.py` → `docs/INTEROP_LAB.md`): live policy targets, performance baselines, per-target library/adapter compatibility, failure modes, adapter certification checklist. Missing: host-measured perf, hosted lab. See WP-027 section. |
 
 ### Latest Local Verification
 
@@ -931,16 +931,16 @@ Identified through systematic codebase audit and hands-on operator testing. Thes
 | UX-005 | P3 | Not started | Empty states and React error boundaries |
 | UX-006 | P2 | Not started | Policy create/edit/import/export from UI |
 | UX-007 | P2 | Not started | Wave plan visual editor and dependency graph |
-| OPS-001 | P1 | Not started | Graceful server shutdown with drain period |
+| OPS-001 | P1 | **Implemented** | Graceful shutdown: `JANUS_GRACEFUL_SHUTDOWN_SECONDS`, health=draining+503, gRPC GracefulStop, webhook WaitGroup drain. Agent already requeues via SQLite offline queue. Tests + race-clean. |
 | OPS-002 | P2 | Not started | API-wide rate limiting (login, findings, migrations) |
 | OPS-003 | P2 | Not started | Multi-channel notifications: email, Slack, PagerDuty |
 | OPS-004 | P3 | Not started | Correlation IDs and distributed tracing |
 | OPS-005 | P2 | Not started | OpenAPI 3.0 specification |
 | OPS-006 | P2 | Not started | Prometheus metrics endpoint |
 | OPS-007 | P2 | Not started | Incremental / changed-files-only scanning |
-| AUTH-001 | P2 | Not started | Configurable JWT TTL and refresh-token flow |
+| AUTH-001 | P2 | **Partial** | Configurable JWT TTL via JANUS_JWT_TTL implemented (clamped 5m-720h, commit pending); refresh-token flow still pending |
 | AUTH-002 | P2 | Not started | Password change and session revocation |
-| AUTH-003 | P1 | Not started | Unauthenticated `/api/certificates/csr` endpoint (access-control bug) |
+| AUTH-003 | P1 | **Implemented** | `/api/certificates/csr` removed from public allowlist, wrapped with `RequireRole(operator,admin)`, actor audit-logged. Tests: unauth→401, viewer→403, operator passes. |
 | AUTH-004 | P1 | Not started | HSM sign/verify endpoints lack role guard (access-control bug) |
 | DOC-001 | P1 | Not started | Operator quick-start: default credentials, build outputs, env vars |
 | DOC-002 | P2 | Not started | API reference with all endpoints, auth, request/response shapes |
