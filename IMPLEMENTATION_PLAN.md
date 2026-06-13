@@ -461,6 +461,26 @@ Still required before Linux Gate L0 can pass: hosted clean-clone/matrix
 evidence, live systemd restart/upgrade tests, full discovery snapshots, and
 destructive supported-adapter rollback tests.
 
+## UI/UX Audit (UX-001 … UX-009)
+
+Deep UI/UX pass 2026-06-13. Items marked **Implemented** shipped this pass;
+**Coordinate** items overlap the CR-AFM fleet work / the in-flight `agents`→`hosts`
+endpoint rename and must not be built in parallel.
+
+| Task | Severity | Status | Detail |
+| --- | --- | --- | --- |
+| **UX-001** Stale scan progress on offline agents | Bug (user-reported) | **Implemented (server)** + UI handoff | `scan_progress`/`current_scan_path` are live heartbeat values that freeze on disconnect — a finished agent shows 100%, a never-scanned one 0% — rendered as misleading "current work" (two offline agents at 100% and 0%). Server now zeroes both for offline agents in `assetSelect` (commit 11679d5), honest for every consumer. **Remaining (UI polish, in teammate's untracked HomeAgentStatus.tsx / AgentFleetInventory.tsx):** suppress the live progress bar entirely for offline/idle agents and show the state label instead of a 0% bar. |
+| **UX-002** Dead agent-management endpoints | Broken flow | **Coordinate (CR-AFM / hosts rename)** | No server routes for `/api/agents/{id}`, `/{id}/commands` (GET+POST), `/{id}/config` (GET+PUT), `/{id}/scans`, `/{id}/connections`. The **Rescan button, Configure modal, and agent-detail drawer are non-functional (404)** end-to-end. Store has `agent_commands` + `GetConfigForAgent`; missing: HTTP layer + `ScansByHost`/`ConnectionsByHost`/command enqueue+get/single-asset store methods. The gRPC `DrainAgentCommands` already delivers commands to agents, so only the HTTP enqueue/query layer is missing. **Owner overlap:** teammate is adding `/api/hosts/{uuid}/findings` (agents→hosts rename in progress) — these routes must land in that rename, not as competing `/api/agents/*`. Acceptance: Rescan enqueues a durable command the agent drains and the UI polls to completion; Configure loads + persists per-agent config; drawer loads scans/connections/findings. |
+| **UX-003** `/api/reports/{scanId}/findings` unregistered | Broken flow | **Implemented** | "Findings JSON" downloads (agent status + fleet inventory) and the drawer's latest-findings 404'd. Registered, backed by `store.ReportFindings` (commit 7edf24f). |
+| **UX-004** `/api/scan-config/schema` unregistered | Broken flow | **Implemented** | The per-agent Configure modal requires the schema to validate; without it Apply stayed permanently disabled. Registered, returns `scanconfig.CurrentSchema()` (commit 7edf24f). |
+| **UX-005** Unbounded rescan status polling | Reliability | **To do** | `HomeAgentStatus.requestScan` polls every 1 s with no cap; for an offline agent the command stays `queued` forever → a timer/parse loop that never stops. Cap attempts (or stop when the agent is offline) and back off. (In teammate's untracked file — handoff.) |
+| **UX-006** Configure modal has no focus trap | A11y | **To do** | The login modal uses `FocusTrap`; the per-agent Configure modal does not — focus isn't trapped and there's no Escape handler. Add both. (Teammate's untracked file — handoff.) |
+| **UX-007** Fleet status filter mismatches data model | Bug | **To do** | `AgentFleetInventory` status filter offers `Scanning` (value `"Scanning"`) and `Connected` (value `"Idle"`), but a scanning agent's `status` is the **phase name** ("Static Source Analysis", "Uploading results"), never literally "Scanning" — so the Scanning filter never matches. Normalize status to a stable enum (scanning/idle/offline) server-side, or map phase→scanning in the filter. |
+| **UX-008** Transient feedback lost on poll re-render | Consistency | **To do** | Rescan/config/export status is inline component state that disappears on the next 10–30 s poll re-render. Route through the existing `A11yAnnouncer`/a lightweight toast so confirmations persist and are announced. |
+| **UX-009** No responsive fallback for fleet tables | UX | **To do** | Inventory/coverage tables force `min-w-[1200px]` horizontal scroll on small screens; add column-priority or card layout at narrow widths. |
+
+Several UX-00x UI items live in `HomeAgentStatus.tsx` / `AgentFleetInventory.tsx`, which are currently the Linux teammate's **untracked** working-tree files; their fixes are staged for that side to commit to avoid taking authorship (see JOURNAL.md).
+
 ## Agent Fleet Management And Contextual Findings Change Plan
 
 All tasks in this section are mandatory and have the same priority. They are
