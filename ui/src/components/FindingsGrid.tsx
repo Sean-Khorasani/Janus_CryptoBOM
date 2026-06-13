@@ -30,6 +30,41 @@ export function Empty({ label }: { label: string }) {
   return <div className="py-8 text-center text-sm text-[#697469] dark:text-[#8fa991]">{label}</div>;
 }
 
+// --- Admin-initiated LLM analysis (LLM-022) -------------------------------
+// The agent never calls the LLM; the admin selects findings here and the server
+// runs batch analysis. These helpers talk to the batch + verdict endpoints.
+
+type FindingVerdict = { verdict: string; confidence?: number; adjusted_severity?: number; reasoning?: string };
+
+function llmHeaders(): Record<string, string> {
+  const token = localStorage.getItem("janus_token");
+  const h: Record<string, string> = { "content-type": "application/json" };
+  if (token) h["Authorization"] = `Bearer ${token}`;
+  return h;
+}
+
+export function VerdictBadge({ v }: { v: FindingVerdict }) {
+  const key = (v.verdict || "").toLowerCase();
+  const styles: Record<string, [string, string]> = {
+    real: ["AI: Real", "bg-[#d33f49] text-white"],
+    confirmed: ["AI: Real", "bg-[#d33f49] text-white"],
+    true_positive: ["AI: Real", "bg-[#d33f49] text-white"],
+    false_positive: ["AI: False-positive", "bg-[#edf1ea] text-[#4d594f] dark:bg-[#22302a] dark:text-[#6b7e6f]"],
+    "false-positive": ["AI: False-positive", "bg-[#edf1ea] text-[#4d594f] dark:bg-[#22302a] dark:text-[#6b7e6f]"],
+    abstain: ["AI: Abstain", "bg-[#fef3c7] text-[#78350f] dark:bg-[#2d2010] dark:text-[#fbbf24]"],
+  };
+  const [label, color] = styles[key] || [`AI: ${v.verdict}`, "bg-sky-100 text-sky-800 dark:bg-[#152238] dark:text-[#60a5fa]"];
+  const pct = typeof v.confidence === "number" ? ` ${Math.round(v.confidence * 100)}%` : "";
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${color}`}
+      title={v.reasoning ? `${v.reasoning}${v.adjusted_severity ? ` (proposed severity ${v.adjusted_severity})` : ""}` : "LLM verdict (advisory; does not change status)"}
+    >
+      {label}{pct}
+    </span>
+  );
+}
+
 export function formatDate(value: string) {
   if (!value) return "n/a";
   const d = new Date(value);
@@ -167,9 +202,28 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
   const [sortCol, setSortCol] = useState<"severity" | "algorithm" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc" | null>(null);
 
+  // Admin-initiated LLM analysis state (LLM-022).
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const role = (typeof localStorage !== "undefined" && localStorage.getItem("janus_role")) || "";
+  const canAnalyze = aiEnabled && (role === "admin" || role === "operator");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [verdicts, setVerdicts] = useState<Record<string, FindingVerdict>>({});
+  const [analyzeMsg, setAnalyzeMsg] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+
   useEffect(() => {
     setPage(1);
   }, [search]);
+
+  // Detect whether the server has LLM enabled; the controls are hidden otherwise.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/llm/status", { headers: llmHeaders() })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d && d.enabled) setAiEnabled(true); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -244,6 +298,60 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
   const totalPages = Math.max(1, Math.ceil(filteredFindings.length / itemsPerPage));
   const startIndex = (page - 1) * itemsPerPage;
   const paginatedFindings = filteredFindings.slice(startIndex, startIndex + itemsPerPage);
+
+  const fetchVerdict = async (id: string) => {
+    try {
+      const r = await fetch(`/api/llm/verdicts/${encodeURIComponent(id)}`, { headers: llmHeaders() });
+      if (!r.ok) return;
+      const v = await r.json();
+      if (v && v.verdict) setVerdicts(prev => ({ ...prev, [id]: v }));
+    } catch { /* advisory only */ }
+  };
+
+  // Lazily load any pre-existing verdicts for the visible page (bounded to itemsPerPage).
+  useEffect(() => {
+    if (!aiEnabled) return;
+    paginatedFindings.forEach(f => {
+      if (!(f.finding_id in verdicts)) void fetchVerdict(f.finding_id);
+    });
+    // verdicts intentionally excluded from deps to avoid a refetch loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiEnabled, page, search, sortCol, sortDir, findings]);
+
+  const toggleSelect = (id: string) => setSelectedIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const selectAllCritical = () => setSelectedIds(new Set(filteredFindings.filter(f => f.severity >= 5).map(f => f.finding_id)));
+  const selectAllVisible = () => setSelectedIds(new Set(paginatedFindings.map(f => f.finding_id)));
+
+  const analyzeSelected = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0 || analyzing) return;
+    setAnalyzing(true);
+    setAnalyzeMsg(`Submitting ${ids.length} finding${ids.length === 1 ? "" : "s"} for AI analysis…`);
+    try {
+      const res = await fetch("/api/llm/analyze/batch", { method: "POST", headers: llmHeaders(), body: JSON.stringify({ finding_ids: ids }) });
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      const { batch_id } = await res.json();
+      for (let i = 0; i < 80; i += 1) {
+        await new Promise(r => setTimeout(r, 1500));
+        const s = await fetch(`/api/llm/batches/${batch_id}`, { headers: llmHeaders() });
+        if (!s.ok) break;
+        const st = await s.json();
+        setAnalyzeMsg(`Analyzing… ${st.completed}/${st.total} done${st.failed ? `, ${st.failed} failed` : ""}${st.skipped ? `, ${st.skipped} already analyzed` : ""}`);
+        if (st.done) break;
+      }
+      await Promise.all(ids.map(fetchVerdict));
+      setAnalyzeMsg(`AI analysis complete for ${ids.length} finding${ids.length === 1 ? "" : "s"}. Verdicts are advisory — they never change status automatically.`);
+      setSelectedIds(new Set());
+    } catch (e) {
+      setAnalyzeMsg(`AI analysis failed: ${e instanceof Error ? e.message : "request failed"}`);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
 
   const downloadCSV = () => {
     const headers = ["id", "title", "severity", "algorithm", "asset"];
@@ -337,10 +445,40 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
         </div>
       </div>
 
+      {/* Admin-initiated AI analysis toolbar (LLM-022). Hidden unless the server
+          has LLM enabled and the user is operator/admin. */}
+      {canAnalyze && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-[#dfe5dc] bg-[#f7f8f5] px-3 py-2 text-xs dark:border-[#2a3a30] dark:bg-[#0d1210]" role="region" aria-label="AI analysis of findings">
+          <span className="font-semibold">{selectedIds.size} selected</span>
+          <button type="button" onClick={selectAllCritical} className="rounded border border-[#dfe5dc] bg-white px-2 py-1 font-medium hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:hover:bg-[#22302a]">Select all critical</button>
+          <button type="button" onClick={selectAllVisible} className="rounded border border-[#dfe5dc] bg-white px-2 py-1 font-medium hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:hover:bg-[#22302a]">Select page</button>
+          <button type="button" onClick={() => setSelectedIds(new Set())} disabled={selectedIds.size === 0} className="rounded px-2 py-1 font-medium text-[#697469] hover:underline disabled:opacity-40 dark:text-[#8fa991]">Clear</button>
+          <button
+            type="button"
+            onClick={analyzeSelected}
+            disabled={selectedIds.size === 0 || analyzing}
+            className="rounded bg-[#2f6fed] px-3 py-1 font-semibold text-white hover:bg-[#2560d0] disabled:opacity-50"
+          >
+            {analyzing ? "Analyzing…" : `Analyze selected with AI${selectedIds.size ? ` (${selectedIds.size})` : ""}`}
+          </button>
+          {analyzeMsg && <span className="text-[#4d594f] dark:text-[#8fa991]" role="status">{analyzeMsg}</span>}
+        </div>
+      )}
+
       <div className="overflow-auto">
         <table className="w-full min-w-[820px] text-left text-sm" role="table">
           <thead className="border-b border-[#dfe5dc] text-xs uppercase text-[#697469] dark:border-[#2a3a30] dark:text-[#8fa991]">
             <tr>
+              {canAnalyze && (
+                <th className="py-2 pr-2" scope="col">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all visible findings for AI analysis"
+                    checked={paginatedFindings.length > 0 && paginatedFindings.every(f => selectedIds.has(f.finding_id))}
+                    onChange={e => e.target.checked ? selectAllVisible() : setSelectedIds(new Set())}
+                  />
+                </th>
+              )}
               <th
                 onClick={() => handleSort("severity")}
                 className={`py-2 pr-3 cursor-pointer select-none hover:text-[#17211c] dark:hover:text-[#e8ede9] ${
@@ -398,11 +536,22 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
                   role="button"
                   aria-label={`Finding: ${finding.title}, severity: ${finding.severity}`}
                 >
+                  {canAnalyze && (
+                    <td className="py-2 pr-2" onClick={e => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${finding.title} for AI analysis`}
+                        checked={selectedIds.has(finding.finding_id)}
+                        onChange={() => toggleSelect(finding.finding_id)}
+                      />
+                    </td>
+                  )}
                   <td className="py-2 pr-3"><SeverityBadge severity={finding.severity} /></td>
                   <td className="py-2 pr-3">
                     <div className="flex items-center gap-2">
                       <span className="font-medium dark:text-[#e8ede9]">{finding.title}</span>
                       <UsageContextBadge description={finding.description} />
+                      {verdicts[finding.finding_id] && <VerdictBadge v={verdicts[finding.finding_id]} />}
                       {status === "accepted" && <span className="badge bg-[#edf1ea] text-[#4d594f] text-xs px-2 py-0.5 rounded font-medium dark:bg-[#22302a] dark:text-[#6b7e6f]">Accepted</span>}
                       {status === "false-positive" && <span className="badge bg-[#edf1ea] text-[#4d594f] text-xs px-2 py-0.5 rounded font-medium dark:bg-[#22302a] dark:text-[#6b7e6f]">False Positive</span>}
                       {status === "remediated" && <span className="badge bg-[#edf1ea] text-[#4d594f] text-xs px-2 py-0.5 rounded font-medium dark:bg-[#22302a] dark:text-[#6b7e6f]">Remediated</span>}
