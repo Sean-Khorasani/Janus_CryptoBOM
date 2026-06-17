@@ -1,16 +1,26 @@
 package policy
 
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+)
+
 // ControlRule describes a single versioned compliance rule with framework references.
 type ControlRule struct {
-	RuleID          string   `json:"rule_id"`
-	Title           string   `json:"title"`
-	Description     string   `json:"description"`
-	Rationale       string   `json:"rationale"`
-	FrameworkRefs   []string `json:"framework_refs"`
-	EffectiveDate   string   `json:"effective_date"`
-	ExpiryDate      string   `json:"expiry_date,omitempty"`
-	Severity        int      `json:"severity"`
-	RemediationHint string   `json:"remediation_hint"`
+	RuleID        string   `json:"rule_id"`
+	Title         string   `json:"title"`
+	Description   string   `json:"description"`
+	Rationale     string   `json:"rationale"`
+	FrameworkRefs []string `json:"framework_refs"`
+	EffectiveDate string   `json:"effective_date"`
+	ExpiryDate    string   `json:"expiry_date,omitempty"`
+	Severity      int      `json:"severity"`
+	// EvidenceType declares what discovery evidence substantiates a finding for this rule
+	// (WP-017 evidence requirements): every compliance result links to evidence of this kind.
+	EvidenceType    string `json:"evidence_type"`
+	RemediationHint string `json:"remediation_hint"`
 }
 
 // ControlPack is a versioned collection of compliance rules.
@@ -206,12 +216,32 @@ func init() {
 	}
 }
 
+// evidenceTypeFor maps a rule to the discovery evidence that substantiates a finding for it
+// (WP-017 evidence requirements): network rules are proven by live TLS/protocol probes; the
+// rest by source/binary/config detection. Keeps every compliance result tied to a known
+// evidence kind rather than a bare heuristic label.
+func evidenceTypeFor(ruleID string) string {
+	switch ruleID {
+	case "JANUS-PQC-005", "JANUS-PQC-006", "JANUS-NET-002":
+		return "network-tls-probe"
+	case "JANUS-NET-001":
+		return "network-probe"
+	default:
+		return "source-binary-or-config-detection"
+	}
+}
+
 // BuiltinControlPack returns the versioned control pack containing all built-in Janus policy rules.
 // CVE-based rule IDs emitted by the vulnerability advisory scanner are dynamic and are
 // not included in this pack — GetRule will return (_, false) for CVE-* identifiers.
 func BuiltinControlPack() ControlPack {
 	rules := make([]ControlRule, len(builtinRules))
 	copy(rules, builtinRules)
+	for i := range rules {
+		if rules[i].EvidenceType == "" {
+			rules[i].EvidenceType = evidenceTypeFor(rules[i].RuleID)
+		}
+	}
 	return ControlPack{
 		PackID:        "janus-builtin-v1",
 		Name:          "Janus Built-in PQC Compliance Rules",
@@ -219,6 +249,22 @@ func BuiltinControlPack() ControlPack {
 		EffectiveDate: "2025-08-13",
 		Rules:         rules,
 	}
+}
+
+// Attestation returns a deterministic HMAC-SHA256 (hex) over the canonical JSON of the pack,
+// so a consumer can verify the control pack was not altered in transit (WP-017 signed pack
+// attestation). `key` is the server's command-signing key. VerifyAttestation re-checks it.
+func (p ControlPack) Attestation(key []byte) string {
+	canonical, _ := json.Marshal(p)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(canonical)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyAttestation reports whether `attestation` matches the pack under `key`, in constant time.
+func (p ControlPack) VerifyAttestation(key []byte, attestation string) bool {
+	expected := p.Attestation(key)
+	return hmac.Equal([]byte(expected), []byte(attestation))
 }
 
 // GetRule returns the ControlRule for the given ruleID, or (ControlRule{}, false) if not found.
