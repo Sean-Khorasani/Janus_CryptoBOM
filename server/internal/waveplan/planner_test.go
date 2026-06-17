@@ -18,7 +18,7 @@ func (m *mockStore) CreateWavePlan(_ context.Context, plan *store.WavePlan) erro
 	return nil
 }
 
-func (m *mockStore) GetWavePlans(_ context.Context) ([]store.WavePlan, error) {
+func (m *mockStore) GetWavePlans(_ context.Context, _ string) ([]store.WavePlan, error) {
 	return m.plans, nil
 }
 
@@ -52,8 +52,8 @@ type storeMock struct {
 func (s *storeMock) CreateWavePlan(ctx context.Context, plan *store.WavePlan) error {
 	return s.mock.CreateWavePlan(ctx, plan)
 }
-func (s *storeMock) GetWavePlans(ctx context.Context) ([]store.WavePlan, error) {
-	return s.mock.GetWavePlans(ctx)
+func (s *storeMock) GetWavePlans(ctx context.Context, tenantID string) ([]store.WavePlan, error) {
+	return s.mock.GetWavePlans(ctx, tenantID)
 }
 func (s *storeMock) UpdateWavePlan(ctx context.Context, plan *store.WavePlan) error {
 	return s.mock.UpdateWavePlan(ctx, plan)
@@ -64,7 +64,7 @@ func (s *storeMock) DeleteWavePlan(ctx context.Context, planID string) error {
 
 func newTestPlanner() (*Planner, *mockStore) {
 	m := &mockStore{}
-	return New(&storeMock{mock: m}), m
+	return New(&storeMock{mock: m}, ""), m
 }
 
 func TestCreate_ValidPlan(t *testing.T) {
@@ -85,6 +85,22 @@ func TestCreate_ValidPlan(t *testing.T) {
 	}
 	if m.plans[0].Status != StatusPlanned {
 		t.Errorf("expected status=planned, got %s", m.plans[0].Status)
+	}
+}
+
+// WP-020: a tenant-scoped planner stamps its tenant onto created plans.
+func TestCreate_StampsTenant(t *testing.T) {
+	m := &mockStore{}
+	p := New(&storeMock{mock: m}, "acme")
+	plan := &store.WavePlan{Name: "Wave 1", WaveNumber: 1}
+	if err := p.Create(context.Background(), plan, "operator"); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if len(m.plans) != 1 || m.plans[0].TenantID != "acme" {
+		t.Fatalf("expected created plan in tenant 'acme', got %+v", m.plans)
+	}
+	if plan.TenantID != "acme" {
+		t.Errorf("planner should stamp tenant on the passed plan, got %q", plan.TenantID)
 	}
 }
 
@@ -215,6 +231,74 @@ func TestWavePlanCanaryTargetsAllowed(t *testing.T) {
 	}
 	if len(m.plans[0].CanaryTargets) != 2 {
 		t.Errorf("expected 2 canary_targets, got %d", len(m.plans[0].CanaryTargets))
+	}
+}
+
+func TestSuggestCanaryCohort(t *testing.T) {
+	p, _ := newTestPlanner()
+	// Ten hosts, intentionally unsorted with a duplicate, to prove deterministic dedup+sort.
+	ten := &store.WavePlan{
+		Name: "w", WaveNumber: 1,
+		AssetIDs: []string{"h09", "h01", "h05", "h02", "h08", "h03", "h10", "h04", "h07", "h06", "h01"},
+	}
+
+	cases := []struct {
+		percent int
+		wantN   int
+		wantTop string // smallest host id, always first in the cohort
+	}{
+		{10, 1, "h01"},   // ceil(9.x→ unique 10 *10% =1)
+		{25, 3, "h01"},   // ceil(2.5) = 3
+		{50, 5, "h01"},   // 10*50% = 5
+		{100, 10, "h01"}, // whole fleet (deduped to 10)
+	}
+	for _, c := range cases {
+		got, err := p.SuggestCanaryCohort(ten, c.percent)
+		if err != nil {
+			t.Fatalf("percent=%d: %v", c.percent, err)
+		}
+		if len(got) != c.wantN {
+			t.Errorf("percent=%d: cohort size = %d, want %d (%v)", c.percent, len(got), c.wantN, got)
+		}
+		if got[0] != c.wantTop {
+			t.Errorf("percent=%d: first = %q, want %q", c.percent, got[0], c.wantTop)
+		}
+	}
+
+	// Determinism: identical inputs yield identical cohorts.
+	a, _ := p.SuggestCanaryCohort(ten, 30)
+	b, _ := p.SuggestCanaryCohort(ten, 30)
+	if len(a) != len(b) {
+		t.Fatal("cohort selection is not deterministic")
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("cohort selection is not deterministic: %v vs %v", a, b)
+		}
+	}
+
+	// A single-asset wave always yields exactly one canary, even at 1%.
+	one := &store.WavePlan{Name: "w", WaveNumber: 1, AssetIDs: []string{"only"}}
+	if got, err := p.SuggestCanaryCohort(one, 1); err != nil || len(got) != 1 || got[0] != "only" {
+		t.Fatalf("single-asset wave: got %v err %v, want [only]", got, err)
+	}
+}
+
+func TestSuggestCanaryCohortErrors(t *testing.T) {
+	p, _ := newTestPlanner()
+	withAssets := &store.WavePlan{AssetIDs: []string{"h1"}}
+	for _, bad := range []int{0, -5, 101, 1000} {
+		if _, err := p.SuggestCanaryCohort(withAssets, bad); err == nil {
+			t.Errorf("percent=%d should be rejected", bad)
+		}
+	}
+	// No assets → error (nothing to select).
+	if _, err := p.SuggestCanaryCohort(&store.WavePlan{}, 10); err == nil {
+		t.Error("empty wave should be rejected")
+	}
+	// Nil plan → error, not panic.
+	if _, err := p.SuggestCanaryCohort(nil, 10); err == nil {
+		t.Error("nil plan should be rejected")
 	}
 }
 
