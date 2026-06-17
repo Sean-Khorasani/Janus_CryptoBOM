@@ -1,0 +1,6 @@
+name = "openssl-inventory"
+command = "sh"
+args = ["plugins/openssl-inventory/openssl-inventory.sh"]
+timeout_seconds = 20
+max_memory_mb = 128
+max_cpu_percent = 25
