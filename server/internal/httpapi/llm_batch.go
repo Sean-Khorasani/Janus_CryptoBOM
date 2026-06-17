@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -84,7 +83,7 @@ func (a *API) llmAnalyzeBatch(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the candidate finding set from the full findings list (in-memory
 	// filter keeps the store interface small; capped read).
-	all, err := a.store.Findings(r.Context(), 5000)
+	all, err := a.store.Findings(r.Context(), 5000, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -156,7 +155,10 @@ func (a *API) llmAnalyzeBatch(w http.ResponseWriter, r *http.Request) {
 				bs.Queued--
 				bs.Running++
 				bs.mu.Unlock()
-				_, err := svc.AnalyzeFinding(context.Background(), u.jobID, u.evidence, "false-positive-triage")
+				// Server-scoped context so a SIGTERM drain cancels in-flight LLM
+				// calls instead of leaking them (REM-2); the LLM service applies its
+				// own per-request timeout on top.
+				_, err := svc.AnalyzeFinding(a.shutdownCtx, u.jobID, u.evidence, "false-positive-triage")
 				bs.mu.Lock()
 				bs.Running--
 				if err != nil {
