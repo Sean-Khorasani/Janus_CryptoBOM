@@ -8,8 +8,42 @@ scan_interval_seconds = 900
 max_file_bytes = 2097152
 max_binary_bytes = 16777216
 # Required: 32-byte random key shared with the Janus controller for HMAC command signing.
-# Generate: openssl rand -hex 32
+# Generate with the bundled CLI (no external tools): janus-server gen-hmac-key
 command_signing_key = "local-development-command-signing-key"
+
+# Optional: hex SHA-256 fingerprint of the server's ML-DSA command-signing public key.
+# When set, migration commands must ALSO carry a valid ML-DSA (FIPS 204) signature from
+# the key with this fingerprint (additional layer; downgrade-resistant). Obtain it from
+# `janus-server hsm pubkey ...` or the server startup log. Empty = HMAC baseline only.
+command_pqc_fingerprint = ""
+
+# Optional (WP-029 P3): path to the bundled ML-DSA command Root CA certificate (PEM or DER).
+# When set, commands must carry a janus-sig-v2 envelope whose leaf command cert chains to this
+# root — CA-chained trust that replaces fingerprint pinning (command_pqc_fingerprint is then
+# bypassed). Fail-closed: if set but unreadable/invalid, every command is rejected. Unset =
+# fingerprint-pin / HMAC baseline.
+# command_root_ca = "command-root-ca.crt"
+
+# Replay-window guard (WP-028): reject migration commands older/newer than this many seconds
+# (0 disables). Default 300.
+# max_command_age_seconds = 300
+
+# Per-agent identity (WP-029 P1), provisioned by `janus-server agent enroll`. When both are
+# set, the agent also sends a per-agent HMAC token to the server's agent endpoints (used when
+# the server runs JANUS_AGENT_AUTH_MODE=per-agent). Unset = legacy shared-token auth.
+# agent_id  = "<uuid from enroll>"
+# agent_key = "<hex key from enroll>"
+
+# One-way TLS trust anchor (WP-029 P2). Point this at the Root CA produced by
+# `janus-server pki init` (root-ca.crt), bundled into the agent package. When set, the agent
+# validates the controller's certificate against this root on BOTH the gRPC channel and the
+# HTTP endpoints. Use https:// controller endpoints alongside it. Unset = system trust store.
+# tls_ca_cert = "root-ca.crt"
+# http_controller_endpoint = "https://janus.example.com:8080"
+
+# Optional plugin-manifest signing (WP-028 / SEC-02): require each discovered plugin.toml to
+# carry a valid plugin.toml.sig (HMAC under this key) or the agent refuses to load it.
+# plugin_signing_key = "<hex>"
 
 # Directory containing prompt TOML templates for LLM-based classification and remediation.
 # Defaults to JANUS_PROMPTS_DIR env var, then "config/prompts" relative to CWD.
