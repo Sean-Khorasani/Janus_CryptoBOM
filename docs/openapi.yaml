@@ -1,0 +1,865 @@
+openapi: 3.0.3
+info:
+  title: Janus CryptoBOM REST API
+  description: >
+    REST/WebSocket control-plane API for the Janus CryptoBOM post-quantum
+    cryptographic posture-management platform (OPS-005). This specification is
+    hand-maintained against `docs/API_REFERENCE.md` — see that document for prose,
+    examples, and role semantics. The bulk telemetry channel (agent CBOM ingest +
+    signed migration commands) is gRPC (`proto/janus.proto`) and is not described here.
+
+    Authentication: most endpoints require a bearer JWT (HS256) obtained from
+    `POST /api/auth/login`. A small set of agent-ingest endpoints use per-host or
+    per-agent HMAC headers instead (see the `agentAuth` scheme). `public` endpoints
+    need no credentials.
+
+    Multi-tenancy (WP-020): the JWT carries a `tenant` claim; the server scopes every
+    authoritative read, the migration write path, and WebSocket events to the caller's
+    tenant. The `default` tenant is transparent (single-tenant deployments are unaffected).
+  version: "1.0.0"
+  license:
+    name: Proprietary
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://{host}
+    description: Deployment
+    variables:
+      host:
+        default: janus.example.com
+
+tags:
+  - name: Auth
+  - name: Fleet & inventory
+  - name: Findings
+  - name: Policies & compliance
+  - name: Migrations
+  - name: Wave planning
+  - name: Crypto-agility
+  - name: LLM
+  - name: HSM
+  - name: Certificates
+  - name: Admin & governance
+  - name: Tenants
+  - name: Exports
+  - name: Agent ingest
+  - name: Observability
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and obtain a JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change the current user's password (invalidates prior tokens)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 12, description: "≥12 chars and ≠ current" }
+      responses:
+        '204': { description: Password changed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/health:
+    get:
+      tags: [Fleet & inventory]
+      summary: Liveness/readiness; reports "draining" during shutdown
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, draining] }
+                  api_version: { type: string }
+  /api/overview:
+    get:
+      tags: [Fleet & inventory]
+      summary: Fleet counts, readiness score, stalled agents, algorithm histogram (tenant-scoped)
+      responses:
+        '200':
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Overview' }
+  /api/assets:
+    get:
+      tags: [Fleet & inventory]
+      summary: Managed agents + latest heartbeat (tenant-scoped)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Search'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          description: Asset list
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Asset' }
+  /api/agents/{id}:
+    get:
+      tags: [Fleet & inventory]
+      summary: Per-agent detail (404 if the host is outside the caller's tenant)
+      parameters: [ { $ref: '#/components/parameters/HostId' } ]
+      responses:
+        '200':
+          description: Asset
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Asset' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/agents/{id}/scans:
+    get:
+      tags: [Fleet & inventory]
+      summary: Scan history for an agent
+      parameters:
+        - { $ref: '#/components/parameters/HostId' }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Scan runs }
+  /api/agents/{id}/connections:
+    get:
+      tags: [Fleet & inventory]
+      summary: Connection session history for an agent
+      parameters: [ { $ref: '#/components/parameters/HostId' } ]
+      responses:
+        '200': { description: Connection sessions }
+  /api/agents/{id}/config:
+    get:
+      tags: [Fleet & inventory]
+      summary: Per-agent effective scan config
+      parameters: [ { $ref: '#/components/parameters/HostId' } ]
+      responses: { '200': { description: Config } }
+    put:
+      tags: [Fleet & inventory]
+      summary: Update per-agent scan config (operator/admin)
+      parameters: [ { $ref: '#/components/parameters/HostId' } ]
+      responses: { '200': { description: Updated }, '403': { $ref: '#/components/responses/Forbidden' } }
+  /api/agents/{id}/commands:
+    post:
+      tags: [Fleet & inventory]
+      summary: Enqueue a scan-control command (operator/admin; tenant-checked)
+      parameters: [ { $ref: '#/components/parameters/HostId' } ]
+      responses:
+        '202': { description: Command queued }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/components:
+    get:
+      tags: [Fleet & inventory]
+      summary: Paginated CBOM components (tenant-scoped)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Search'
+      responses:
+        '200':
+          description: Components
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+  /api/findings:
+    get:
+      tags: [Findings]
+      summary: Paginated findings (tenant-scoped)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Search'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          description: Findings
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Finding' }
+  /api/hosts/{id}/findings:
+    get:
+      tags: [Findings]
+      summary: Findings from a host's latest scan (404 if outside the caller's tenant)
+      parameters: [ { $ref: '#/components/parameters/HostId' } ]
+      responses:
+        '200':
+          description: Findings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Finding' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/reports/{scan_id}/findings:
+    get:
+      tags: [Findings]
+      summary: Findings of a specific scan (tenant-scoped)
+      parameters:
+        - { name: scan_id, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Search'
+      responses:
+        '200':
+          description: Findings
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+  /api/findings/{id}/status:
+    put:
+      tags: [Findings]
+      summary: Update finding status (broadcasts WS finding_status to the tenant)
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [open, accepted_risk, false_positive, remediated] }
+                updated_by: { type: string }
+      responses:
+        '200': { description: Updated finding }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/findings/bulk-update:
+    post:
+      tags: [Findings]
+      summary: Bulk finding status change (operator/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  items: { $ref: '#/components/schemas/BulkUpdateItem' }
+                - type: object
+                  properties:
+                    updates:
+                      type: array
+                      items: { $ref: '#/components/schemas/BulkUpdateItem' }
+      responses:
+        '200': { description: Per-item results }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/scan-config/schema:
+    get:
+      tags: [Fleet & inventory]
+      summary: Canonical scan-parameter schema (defaults + limits)
+      responses: { '200': { description: Schema } }
+  /api/confidence/report:
+    get:
+      tags: [Findings]
+      summary: Per-rule finding confidence statistics
+      responses: { '200': { description: Confidence report } }
+  /api/sla/metrics:
+    get:
+      tags: [Fleet & inventory]
+      summary: Crypto-health SLA dashboard data (tenant-scoped)
+      responses: { '200': { description: SLA metrics } }
+  /api/report.html:
+    get:
+      tags: [Fleet & inventory]
+      summary: HTML compliance report (tenant-scoped)
+      responses:
+        '200': { description: HTML, content: { text/html: { schema: { type: string } } } }
+
+  /api/policies:
+    get:
+      tags: [Policies & compliance]
+      summary: Active + available policy profiles
+      responses:
+        '200':
+          description: Profiles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active: { type: string }
+                  available:
+                    type: array
+                    items: { $ref: '#/components/schemas/PolicyProfile' }
+  /api/policies/active:
+    post:
+      tags: [Policies & compliance]
+      summary: Switch active policy profile (broadcasts WS policy_switched)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [version], properties: { version: { type: string } } }
+      responses: { '200': { description: Switched } }
+  /api/policies/create:
+    post:
+      tags: [Policies & compliance]
+      summary: Create a policy profile (version sanitized to [A-Za-z0-9._-])
+      responses: { '201': { description: Created }, '400': { $ref: '#/components/responses/BadRequest' } }
+  /api/policies/{version}:
+    put:
+      tags: [Policies & compliance]
+      summary: Update a policy profile (operator/admin)
+      parameters: [ { name: version, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Updated }, '403': { $ref: '#/components/responses/Forbidden' } }
+    delete:
+      tags: [Policies & compliance]
+      summary: Delete a policy profile (admin)
+      parameters: [ { name: version, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Deleted }, '403': { $ref: '#/components/responses/Forbidden' } }
+  /api/policies/import:
+    post:
+      tags: [Policies & compliance]
+      summary: Import a policy profile (operator/admin)
+      responses: { '200': { description: Imported }, '403': { $ref: '#/components/responses/Forbidden' } }
+  /api/policy/rules:
+    get:
+      tags: [Policies & compliance]
+      summary: Versioned compliance control pack with a tamper-evident attestation (WP-017)
+      responses: { '200': { description: Control pack } }
+  /api/compliance/exceptions:
+    get:
+      tags: [Policies & compliance]
+      summary: List compliance exceptions (operator/admin, WP-017)
+      responses: { '200': { description: Exceptions }, '403': { $ref: '#/components/responses/Forbidden' } }
+    post:
+      tags: [Policies & compliance]
+      summary: Grant a compliance exception (operator/admin; audit-logged)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule_id, reason]
+              properties:
+                rule_id: { type: string }
+                reason: { type: string }
+                asset_ref: { type: string }
+                ttl_hours: { type: integer }
+      responses: { '201': { description: Granted }, '403': { $ref: '#/components/responses/Forbidden' } }
+  /api/compliance/exceptions/{id}:
+    delete:
+      tags: [Policies & compliance]
+      summary: Revoke a compliance exception (operator/admin; audit-logged)
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Revoked }, '403': { $ref: '#/components/responses/Forbidden' } }
+
+  /api/migrations:
+    get:
+      tags: [Migrations]
+      summary: Migration history (tenant-scoped)
+      responses:
+        '200':
+          description: Migrations
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Migration' }
+  /api/migrations/enqueue:
+    post:
+      tags: [Migrations]
+      summary: Enqueue an HMAC-signed migration (operator/admin; cross-tenant target rejected)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host_uuid, target_service, config_path]
+              properties:
+                host_uuid: { type: string }
+                target_service: { type: string }
+                migration_profile: { type: string }
+                config_path: { type: string }
+                patch_unified_diff: { type: string }
+                dry_run: { type: boolean, default: true }
+      responses:
+        '202': { description: Command queued }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/sandbox/simulate:
+    post:
+      tags: [Migrations]
+      summary: Dry-run migration preview (patch, impact, checklist, warnings)
+      responses: { '200': { description: Simulation } }
+  /api/lab/simulate:
+    post:
+      tags: [Migrations]
+      summary: PQC lab algorithm-migration preview
+      responses: { '200': { description: Lab simulation } }
+
+  /api/waves:
+    get:
+      tags: [Wave planning]
+      summary: Wave plans + readiness checklist (operator/admin)
+      responses: { '200': { description: Waves }, '403': { $ref: '#/components/responses/Forbidden' } }
+    post:
+      tags: [Wave planning]
+      summary: Create a wave plan (operator/admin)
+      responses: { '201': { description: Created }, '403': { $ref: '#/components/responses/Forbidden' } }
+  /api/waves/{id}:
+    put:
+      tags: [Wave planning]
+      summary: Wave state transition (operator/admin)
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Updated } }
+    delete:
+      tags: [Wave planning]
+      summary: Delete a planned/cancelled wave (operator/admin)
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '204': { description: Deleted } }
+
+  /api/agility/scorecard:
+    get:
+      tags: [Crypto-agility]
+      summary: Fleet + per-host crypto-agility scorecard (?host_uuid= for one)
+      responses: { '200': { description: Scorecard } }
+  /api/agility/exercise:
+    post:
+      tags: [Crypto-agility]
+      summary: Run the per-adapter negotiation/agility exercise (operator/admin)
+      responses: { '200': { description: Exercise result }, '403': { $ref: '#/components/responses/Forbidden' } }
+
+  /api/llm/status:
+    get:
+      tags: [LLM]
+      summary: LLM capability mode, models, config source
+      responses:
+        '200': { description: Status }
+        '503': { $ref: '#/components/responses/LLMDisabled' }
+  /api/llm/usage:
+    get:
+      tags: [LLM]
+      summary: Token/cost rollup + job success rate
+      responses: { '200': { description: Usage }, '503': { $ref: '#/components/responses/LLMDisabled' } }
+  /api/llm/analyze:
+    post:
+      tags: [LLM]
+      summary: Submit finding analysis (async job; operator/admin)
+      responses: { '202': { description: Job accepted }, '503': { $ref: '#/components/responses/LLMDisabled' } }
+  /api/llm/analyze/batch:
+    post:
+      tags: [LLM]
+      summary: Submit a batch finding analysis (operator/admin)
+      responses: { '202': { description: Batch accepted }, '503': { $ref: '#/components/responses/LLMDisabled' } }
+  /api/llm/jobs:
+    get:
+      tags: [LLM]
+      summary: List analysis jobs
+      responses: { '200': { description: Jobs } }
+  /api/llm/jobs/{id}:
+    get:
+      tags: [LLM]
+      summary: Fetch an analysis job (+verdict)
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Job }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/llm/verdicts/{finding_id}:
+    get:
+      tags: [LLM]
+      summary: Latest verdict for a finding
+      parameters: [ { name: finding_id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Verdict }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/llm/test-connection:
+    post:
+      tags: [LLM]
+      summary: Probe the configured provider (admin)
+      responses: { '200': { description: '{ok,error?}' }, '403': { $ref: '#/components/responses/Forbidden' } }
+  /api/llm/proxy:
+    post:
+      tags: [LLM]
+      summary: Raw provider passthrough
+      responses: { '200': { description: Provider response }, '503': { $ref: '#/components/responses/LLMDisabled' } }
+
+  /api/hsm/keys:
+    get:
+      tags: [HSM]
+      summary: List keys on the configured HSM backend (operator/admin)
+      responses:
+        '200': { description: Keys }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { description: HSM disabled (JANUS_HSM_MODE=disabled) }
+  /api/hsm/keys/generate:
+    post:
+      tags: [HSM]
+      summary: Generate a PQC key pair (ML-DSA; RSA/ECDSA refused) (operator/admin)
+      responses: { '200': { description: Generated }, '403': { $ref: '#/components/responses/Forbidden' }, '501': { description: HSM disabled } }
+  /api/hsm/sign:
+    post:
+      tags: [HSM]
+      summary: Sign with an HSM key (PQC ML-DSA) (operator/admin)
+      responses: { '200': { description: Signature }, '501': { description: HSM disabled } }
+  /api/hsm/verify:
+    post:
+      tags: [HSM]
+      summary: Verify with an HSM key (operator/admin)
+      responses: { '200': { description: Verification result }, '501': { description: HSM disabled } }
+
+  /api/certificates/csr:
+    post:
+      tags: [Certificates]
+      summary: Generate a PQC CSR (ML-DSA / SLH-DSA / ECDSA-P384) (operator/admin)
+      responses: { '200': { description: CSR }, '403': { $ref: '#/components/responses/Forbidden' } }
+
+  /api/fleet/config:
+    get:
+      tags: [Admin & governance]
+      summary: Fleet defaults (?host_uuid= for effective config; llm_api_key masked)
+      responses: { '200': { description: Config } }
+    post:
+      tags: [Admin & governance]
+      summary: Update fleet config (operator/admin)
+      responses: { '200': { description: Updated } }
+  /api/webhooks:
+    get:
+      tags: [Admin & governance]
+      summary: List SIEM webhooks
+      responses: { '200': { description: Webhooks } }
+    post:
+      tags: [Admin & governance]
+      summary: Create a SIEM webhook (URL SSRF-validated; operator/admin)
+      responses: { '201': { description: Created } }
+  /api/retention:
+    get:
+      tags: [Admin & governance]
+      summary: Retention policy
+      responses: { '200': { description: Retention } }
+    post:
+      tags: [Admin & governance]
+      summary: Update retention / manual purge (operator/admin)
+      responses: { '200': { description: Updated } }
+  /api/audit-logs:
+    get:
+      tags: [Admin & governance]
+      summary: Operator audit trail (hash-chained)
+      responses: { '200': { description: Audit logs } }
+  /api/audit-logs/verify:
+    get:
+      tags: [Admin & governance]
+      summary: Verify the audit-log hash chain (admin)
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+                  entries_checked: { type: integer }
+                  broken_at_log_id: { type: string }
+                  reason: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/tenants:
+    get:
+      tags: [Tenants]
+      summary: List tenants (admin, WP-020)
+      responses:
+        '200':
+          description: Tenants
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Tenant' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Tenants]
+      summary: Create a tenant (admin; audit-logged, WP-020)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,62}$' }
+                name: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/admin/release-check:
+    post:
+      tags: [Admin & governance]
+      summary: Release-evidence gate check (admin)
+      responses: { '200': { description: Result }, '403': { $ref: '#/components/responses/Forbidden' } }
+
+  /api/export/cyclonedx:
+    get:
+      tags: [Exports]
+      summary: CycloneDX v1.6 CBOM (JSON, tenant-scoped)
+      responses: { '200': { description: CBOM, content: { application/json: {} } } }
+  /api/export/sarif:
+    get:
+      tags: [Exports]
+      summary: SARIF v2.1.0 (tenant-scoped)
+      responses: { '200': { description: SARIF, content: { application/json: {} } } }
+  /api/export/csv:
+    get:
+      tags: [Exports]
+      summary: Findings CSV (tenant-scoped)
+      responses: { '200': { description: CSV, content: { text/csv: { schema: { type: string } } } } }
+  /api/export/siem:
+    get:
+      tags: [Exports]
+      summary: JSON-lines SIEM stream
+      responses: { '200': { description: NDJSON } }
+  /api/export/audit:
+    get:
+      tags: [Exports]
+      summary: Audit log export
+      parameters: [ { name: format, in: query, schema: { type: string, enum: [csv] } } ]
+      responses: { '200': { description: Export } }
+
+  /api/agent/heartbeat:
+    post:
+      tags: [Agent ingest]
+      summary: Agent scan progress, CPU/mem, phase, files_skipped
+      security: [ { agentAuth: [] } ]
+      responses: { '200': { description: Accepted } }
+  /api/agent/config:
+    get:
+      tags: [Agent ingest]
+      summary: Dynamic fleet config for an agent (HMAC token + ?host_uuid=)
+      security: [ { agentAuth: [] } ]
+      parameters: [ { name: host_uuid, in: query, required: true, schema: { type: string } } ]
+      responses: { '200': { description: Config }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /api/agent/scan-command:
+    get:
+      tags: [Agent ingest]
+      summary: Pending scan command for an agent
+      security: [ { agentAuth: [] } ]
+      responses: { '200': { description: Command } }
+  /api/agent/upgrade:
+    get:
+      tags: [Agent ingest]
+      summary: Server version + protocol; compatibility advisory
+      parameters:
+        - { name: agent_version, in: query, schema: { type: string } }
+        - { name: agent_protocol, in: query, schema: { type: string } }
+      responses: { '200': { description: Advisory } }
+
+  /metrics:
+    get:
+      tags: [Observability]
+      summary: Prometheus metrics (bearer JANUS_METRICS_TOKEN if set)
+      security:
+        - {}
+        - metricsToken: []
+      responses:
+        '200': { description: Prometheus text, content: { text/plain: { schema: { type: string } } } }
+        '401': { description: Missing/invalid metrics token }
+  /api/ws/ticket:
+    post:
+      tags: [Observability]
+      summary: Mint a short-lived single-use WebSocket ticket
+      responses:
+        '200':
+          description: Ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket: { type: string }
+                  expires_in: { type: integer }
+  /api/ws:
+    get:
+      tags: [Observability]
+      summary: WebSocket upgrade for real-time events (authorized by ?ticket=)
+      security: []
+      parameters: [ { name: ticket, in: query, required: true, schema: { type: string } } ]
+      responses:
+        '101': { description: Switching Protocols }
+        '401': { description: Invalid or expired ticket }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: HS256 JWT from POST /api/auth/login; carries sub, role, and tenant claims.
+    agentAuth:
+      type: apiKey
+      in: header
+      name: X-Janus-Agent-Auth
+      description: >
+        Per-agent HMAC (WP-029 P1): X-Janus-Agent-Id + X-Janus-Agent-Ts +
+        X-Janus-Agent-Auth = HMAC(agent_key, agent_id\nMETHOD\nPATH\nts). In legacy shared
+        mode, X-Janus-Agent-Token = HMAC(JANUS_COMMAND_SIGNING_KEY, host_uuid) with ?host_uuid=.
+    metricsToken:
+      type: http
+      scheme: bearer
+      description: JANUS_METRICS_TOKEN, required for /metrics only when that env var is set.
+  parameters:
+    Limit: { name: limit, in: query, schema: { type: integer, default: 50 }, description: Page size }
+    Offset: { name: offset, in: query, schema: { type: integer, default: 0 }, description: Page offset }
+    Search: { name: search, in: query, schema: { type: string }, description: Free-text filter }
+    Sort: { name: sort, in: query, schema: { type: string }, description: Sort column }
+    Order: { name: order, in: query, schema: { type: string, enum: [asc, desc] } }
+    HostId: { name: id, in: path, required: true, schema: { type: string }, description: Host UUID }
+  headers:
+    XTotalCount:
+      description: Total rows matching the query (for pagination)
+      schema: { type: integer }
+  responses:
+    BadRequest:
+      description: Bad request
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Unauthenticated or expired token
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Insufficient role
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Not found (or outside the caller's tenant)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unprocessable:
+      description: Validation error
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: Rate limited (Retry-After)
+      headers: { Retry-After: { schema: { type: integer } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    LLMDisabled:
+      description: LLM features disabled (JANUS_LLM_BASE_URL unset)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        correlation_id: { type: string, description: Present on 5xx responses }
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string }
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string }
+        role: { type: string, enum: [admin, operator, viewer] }
+    Overview:
+      type: object
+      properties:
+        assets: { type: integer }
+        components: { type: integer }
+        findings: { type: integer }
+        critical_findings: { type: integer }
+        high_findings: { type: integer }
+        open_migrations: { type: integer }
+        stalled_agents: { type: integer }
+        readiness_score: { type: integer }
+        readiness_breakdown: { type: object, additionalProperties: { type: integer } }
+        algorithm_histogram: { type: object, additionalProperties: { type: integer } }
+    Asset:
+      type: object
+      properties:
+        host_uuid: { type: string }
+        hostname: { type: string }
+        os_name: { type: string }
+        os_version: { type: string }
+        arch: { type: string }
+        last_seen: { type: string, format: date-time }
+        status: { type: string }
+        scan_progress: { type: integer }
+        agent_version: { type: string }
+        open_findings: { type: integer }
+    Finding:
+      type: object
+      properties:
+        finding_id: { type: string }
+        host_uuid: { type: string }
+        severity: { type: integer, minimum: 1, maximum: 5 }
+        title: { type: string }
+        description: { type: string }
+        asset_ref: { type: string }
+        algorithm: { type: string }
+        policy_rule_id: { type: string }
+        migration_profile: { type: string }
+        status: { type: string, enum: [open, accepted_risk, false_positive, remediated] }
+        confidence: { type: number }
+        created_at: { type: string, format: date-time }
+    BulkUpdateItem:
+      type: object
+      required: [finding_id, status]
+      properties:
+        finding_id: { type: string }
+        status: { type: string, enum: [open, accepted_risk, false_positive, remediated] }
+    PolicyProfile:
+      type: object
+      properties:
+        version: { type: string }
+        name: { type: string }
+        preferred_kem: { type: string }
+        preferred_signature: { type: string }
+    Migration:
+      type: object
+      properties:
+        command_id: { type: string }
+        host_uuid: { type: string }
+        target_service: { type: string }
+        migration_profile: { type: string }
+        target_kem: { type: string }
+        target_signature: { type: string }
+        state: { type: string }
+        dry_run: { type: boolean }
+        issued_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Tenant:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
