@@ -1,3 +1,5 @@
+mod command_cert;
+mod command_sig;
 mod comms;
 mod config;
 mod discovery;
@@ -7,6 +9,7 @@ mod mutation;
 mod policy;
 mod proto;
 mod report;
+mod revocation;
 mod storage;
 mod version;
 
@@ -34,14 +37,63 @@ pub enum Commands {
     Check {
         #[arg(default_value = ".")]
         path: String,
+        /// Only scan files changed between this git ref and HEAD (OPS-007 incremental
+        /// CI gate). Falls back to a full scan if git is unavailable.
+        #[arg(long, value_name = "GIT_REF")]
+        changed_since: Option<String>,
     },
+}
+
+/// OPS-007: absolute paths of files changed between `git_ref` and HEAD under `scan_path`.
+/// Returns None when git is unavailable (caller does a full scan); Some(list) — possibly
+/// empty — otherwise. Deleted files are excluded.
+fn changed_files_since(scan_path: &str, git_ref: &str) -> Option<Vec<String>> {
+    use std::process::Command;
+    let root_out = Command::new("git")
+        .args(["-C", scan_path, "rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !root_out.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&root_out.stdout).trim().to_string();
+    let diff = Command::new("git")
+        .args([
+            "-C",
+            scan_path,
+            "diff",
+            "--name-only",
+            "--diff-filter=d",
+            git_ref,
+            "HEAD",
+        ])
+        .output()
+        .ok()?;
+    if !diff.status.success() {
+        return None;
+    }
+    let files = String::from_utf8_lossy(&diff.stdout)
+        .lines()
+        .map(|l| {
+            std::path::Path::new(&root)
+                .join(l)
+                .to_string_lossy()
+                .to_string()
+        })
+        .filter(|p| std::path::Path::new(p).is_file())
+        .collect();
+    Some(files)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    if let Some(Commands::Check { path }) = args.command {
+    if let Some(Commands::Check {
+        path,
+        changed_since,
+    }) = args.command
+    {
         let mut cfg = if std::path::Path::new(&args.config).exists() {
             AgentConfig::load(&args.config).context("load config")?
         } else {
@@ -51,13 +103,32 @@ async fn main() -> Result<()> {
         cfg.report_path = String::new();
         cfg.sarif_path = String::new();
 
+        // OPS-007: restrict the scan to files changed since a git ref, if requested.
+        if let Some(git_ref) = &changed_since {
+            match changed_files_since(&path, git_ref) {
+                Some(files) => {
+                    eprintln!(
+                        "--changed-since {}: scanning {} changed file(s)",
+                        git_ref,
+                        files.len()
+                    );
+                    cfg.scan_roots = files;
+                }
+                None => eprintln!(
+                    "--changed-since {}: git unavailable; scanning full path",
+                    git_ref
+                ),
+            }
+        }
+
         // Run comprehensive offline scan: source + binary + dependency analysis
         let started = discovery::now_fn();
         let mut components = Vec::new();
         let mut evidence = Vec::new();
 
         // Static source analysis
-        let source_result = discovery::source::scan(&cfg, false).context("source scan")?;
+        let source_result =
+            discovery::source::scan(&cfg, false, None, true).context("source scan")?;
         components.extend(source_result.components);
         evidence.extend(source_result.evidence);
 
@@ -137,13 +208,22 @@ async fn main() -> Result<()> {
 
     // Heartbeat loop with cancellation support for --once mode
     let (hb_shutdown_tx, hb_shutdown_rx) = tokio::sync::watch::channel(false);
-    comms::start_heartbeat_loop(cfg.http_endpoint(), reg.host_uuid.clone(), hb_shutdown_rx).await;
+    comms::start_heartbeat_loop(
+        cfg.http_endpoint(),
+        reg.host_uuid.clone(),
+        cfg.tls_ca_cert.clone(),
+        hb_shutdown_rx,
+    )
+    .await;
 
     loop {
         if let Ok(remote) = comms::fetch_agent_config(
             &cfg.http_endpoint(),
             &reg.host_uuid,
             &cfg.command_signing_key,
+            cfg.agent_id.as_deref(),
+            cfg.agent_key.as_deref(),
+            cfg.tls_ca_cert.as_deref(),
         )
         .await
         {
@@ -192,9 +272,16 @@ async fn main() -> Result<()> {
             .scan_progress
             .store(0, std::sync::atomic::Ordering::SeqCst);
         discovery::status::set_phase("Starting scan");
-        let _ = comms::publish_scan_state(&cfg.http_endpoint(), &reg.host_uuid).await;
+        let _ = comms::publish_scan_state(
+            &cfg.http_endpoint(),
+            &reg.host_uuid,
+            cfg.tls_ca_cert.as_deref(),
+        )
+        .await;
 
-        let mut payload = discovery::collect(&cfg, &reg.host_uuid)
+        // Daemon scans are incremental: skip files unchanged since the last scan
+        // (scan_state cache). The server retains findings for skipped files (OPS-007).
+        let mut payload = discovery::collect(&cfg, &reg.host_uuid, Some(&db), false)
             .await
             .context("collect telemetry")?;
 
@@ -203,7 +290,12 @@ async fn main() -> Result<()> {
             .load(std::sync::atomic::Ordering::SeqCst);
         db.set_stat("total_files_scanned", total_scanned).ok();
         discovery::status::set_scan_complete(total_scanned);
-        let _ = comms::publish_scan_state(&cfg.http_endpoint(), &reg.host_uuid).await;
+        let _ = comms::publish_scan_state(
+            &cfg.http_endpoint(),
+            &reg.host_uuid,
+            cfg.tls_ca_cert.as_deref(),
+        )
+        .await;
 
         // Policy assessment is server-side during upload; only assess locally for check/offline
         // (assessment runs server-side in StreamTelemetry to avoid duplication)
@@ -233,7 +325,12 @@ async fn main() -> Result<()> {
             }
         }
         discovery::status::set_phase("Idle");
-        let _ = comms::publish_scan_state(&cfg.http_endpoint(), &reg.host_uuid).await;
+        let _ = comms::publish_scan_state(
+            &cfg.http_endpoint(),
+            &reg.host_uuid,
+            cfg.tls_ca_cert.as_deref(),
+        )
+        .await;
 
         if args.once {
             // Signal heartbeat loop to stop gracefully
@@ -251,6 +348,9 @@ async fn main() -> Result<()> {
                 &cfg.http_endpoint(),
                 &reg.host_uuid,
                 &cfg.command_signing_key,
+                cfg.agent_id.as_deref(),
+                cfg.agent_key.as_deref(),
+                cfg.tls_ca_cert.as_deref(),
             )
             .await
             .unwrap_or(false)
