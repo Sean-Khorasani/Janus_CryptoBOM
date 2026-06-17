@@ -14,6 +14,12 @@ const (
 	//   2.0 — injection-defense hardening: untrusted_evidence quarantine +
 	//         system-prompt authority reassertion (LLM-019)
 	VerdictPromptVersion = "2.0"
+
+	// RemediationPromptName identifies the remediation-suggestion prompt family (LLM-011).
+	RemediationPromptName = "remediation-suggestion"
+	// RemediationPromptVersion is bumped on every change to the remediation prompt.
+	//   1.0 — initial structured suggestion prompt (human_approval_required always true)
+	RemediationPromptVersion = "1.0"
 )
 
 // PromptSet is a named, versioned prompt the registry can hand out.
