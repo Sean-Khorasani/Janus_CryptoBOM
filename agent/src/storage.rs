@@ -26,7 +26,7 @@ impl OfflineStore {
     }
 
     pub fn ensure_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute_batch(
             r#"
 CREATE TABLE IF NOT EXISTS telemetry_queue (
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
 
     pub fn perform_maintenance(&self) -> Result<()> {
         {
-            let conn = self.conn.lock().expect("sqlite mutex poisoned");
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             let mut stmt = conn.prepare("PRAGMA integrity_check")?;
             let mut rows = stmt.query([])?;
             if let Some(row) = rows.next()? {
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
         if last_vacuum == 0 || now.saturating_sub(last_vacuum) > vacuum_interval {
             self.conn
                 .lock()
-                .expect("sqlite mutex poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .execute("VACUUM", [])?;
             self.set_stat("last_vacuum_unix", now)?;
         }
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     /// should be re-scanned (new file, changed content, or no previous scan record).
     #[allow(dead_code)]
     pub fn file_changed(&self, file_path: &str, content_hash: &str) -> bool {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt =
             match conn.prepare("SELECT content_sha256 FROM scan_state WHERE file_path = ?1") {
                 Ok(s) => s,
@@ -104,10 +104,42 @@ CREATE TABLE IF NOT EXISTS scan_state (
         }
     }
 
+    /// OPS-007: returns true when the file can be skipped — its content hash matches the
+    /// cached scan_state entry AND that entry was recorded within `max_age_secs`. A cache
+    /// miss, hash mismatch, or stale entry returns false (the file must be re-scanned).
+    pub fn unchanged_and_fresh(
+        &self,
+        file_path: &str,
+        content_hash: &str,
+        max_age_secs: i64,
+    ) -> bool {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut stmt = match conn.prepare(
+            "SELECT content_sha256, last_scanned_unix FROM scan_state WHERE file_path = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        match stmt.query_row([file_path], |row| {
+            let prev: String = row.get(0)?;
+            let scanned_at: i64 = row.get(1)?;
+            Ok((prev, scanned_at))
+        }) {
+            Ok((prev_hash, scanned_at)) => {
+                prev_hash == content_hash && (now - scanned_at) < max_age_secs
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Update the scan state for a file after scanning.
     #[allow(dead_code)]
     pub fn upsert_scan_state(&self, file_path: &str, content_hash: &str) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -122,7 +154,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     /// Purge stale scan state entries for files that no longer exist.
     #[allow(dead_code)]
     pub fn purge_stale_scan_state(&self, current_paths: &[String]) -> Result<usize> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut deleted = 0;
         let mut stmt = conn.prepare("SELECT file_path FROM scan_state")?;
         let rows = stmt.query_map([], |row| {
@@ -139,7 +171,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     pub fn get_stat(&self, key: &str) -> Result<usize> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT stat_value FROM scan_stats WHERE stat_key = ?1")?;
         let mut rows = stmt.query([key])?;
         if let Some(row) = rows.next()? {
@@ -151,7 +183,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     pub fn set_stat(&self, key: &str, val: usize) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO scan_stats (stat_key, stat_value) VALUES (?1, ?2)",
             params![key, val as i64],
@@ -162,7 +194,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     pub fn enqueue_payload(&self, payload: &CbomTelemetryPayload) -> Result<()> {
         let json = serde_json::to_string(payload)?;
         let protected = protect(json.as_bytes()).context("protect telemetry payload")?;
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO telemetry_queue (telemetry_id, payload_json, created_at_unix) VALUES (?1, ?2, ?3)",
             params![payload.telemetry_id, protected, now()],
@@ -171,7 +203,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     pub fn pending_payloads(&self, limit: usize) -> Result<Vec<CbomTelemetryPayload>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT payload_json FROM telemetry_queue ORDER BY created_at_unix ASC LIMIT ?1",
         )?;
@@ -190,7 +222,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     pub fn delete_payload(&self, telemetry_id: &str) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "DELETE FROM telemetry_queue WHERE telemetry_id = ?1",
             params![telemetry_id],
@@ -199,7 +231,7 @@ CREATE TABLE IF NOT EXISTS scan_state (
     }
 
     pub fn audit(&self, event_type: &str, detail: &str) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO sync_audit (event_type, detail, created_at_unix) VALUES (?1, ?2, ?3)",
             params![event_type, detail, now()],
@@ -255,7 +287,10 @@ pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
     };
 
     let Some(encoded) = raw.strip_prefix("dpapi:") else {
-        return Ok(raw.as_bytes().to_vec());
+        // Refuse to treat an unprefixed value as plaintext: stripping the prefix
+        // would otherwise silently downgrade DPAPI-protected storage to plaintext
+        // for a tampered DB (SEC). protect() always writes the dpapi: prefix.
+        anyhow::bail!("cache value missing dpapi: prefix; refusing plaintext downgrade");
     };
     let mut protected = STANDARD.decode(encoded)?;
     let mut input = CRYPT_INTEGER_BLOB {
@@ -413,11 +448,15 @@ pub fn unprotect(raw: &str) -> Result<Vec<u8>> {
         return Ok(plaintext);
     }
 
-    // Legacy plaintext fallback
+    // Legacy plaintext fallback — explicit opt-in prefix retained for upgrade
+    // compatibility with caches written before authenticated encryption.
     if let Some(encoded) = raw.strip_prefix("plain:") {
         return Ok(STANDARD.decode(encoded)?);
     }
-    Ok(raw.as_bytes().to_vec())
+    // No recognized prefix: refuse rather than silently returning the raw bytes
+    // as plaintext, which would let a tampered DB downgrade authenticated
+    // storage by stripping the aead-v1: prefix (SEC).
+    anyhow::bail!("cache value has no recognized encryption prefix; refusing plaintext downgrade")
 }
 
 fn now() -> i64 {
@@ -429,7 +468,10 @@ fn now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{protect, unprotect, OfflineStore};
+    use super::OfflineStore;
+    // protect/unprotect are only exercised by the non-Windows round-trip test.
+    #[cfg(not(target_os = "windows"))]
+    use super::{protect, unprotect};
 
     #[test]
     fn maintenance_completes_and_records_vacuum() {
