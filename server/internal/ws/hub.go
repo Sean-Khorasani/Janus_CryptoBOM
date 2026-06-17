@@ -37,9 +37,10 @@ type Event struct {
 
 // wsConn wraps a single WebSocket connection.
 type wsConn struct {
-	conn net.Conn
-	mu   sync.Mutex
-	done chan struct{}
+	conn   net.Conn
+	tenant string // owning tenant (WP-020); BroadcastTenant only reaches matching clients
+	mu     sync.Mutex
+	done   chan struct{}
 }
 
 func (w *wsConn) writeText(data []byte) error {
@@ -100,6 +101,33 @@ func (h *Hub) Broadcast(typ string, data any) {
 	}
 }
 
+// BroadcastTenant sends an event only to connected clients in the given tenant (WP-020).
+// Used for events that pertain to a specific host/finding/migration so a client never sees
+// another tenant's real-time activity. An empty tenant falls back to a fleet-wide Broadcast
+// (single-tenant default deployments, where every client is the default tenant).
+func (h *Hub) BroadcastTenant(tenant, typ string, data any) {
+	if tenant == "" {
+		h.Broadcast(typ, data)
+		return
+	}
+	event := Event{Type: typ, Timestamp: time.Now(), Data: data}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		slog.Error("failed to marshal websocket event", "type", typ, "error", err)
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for conn := range h.clients {
+		if conn.tenant != "" && conn.tenant != tenant {
+			continue
+		}
+		if err := conn.writeText(payload); err != nil {
+			slog.Debug("websocket write failed, client will be removed", "error", err)
+		}
+	}
+}
+
 // ClientCount returns the number of currently connected WebSocket clients.
 func (h *Hub) ClientCount() int {
 	h.mu.RLock()
@@ -108,7 +136,9 @@ func (h *Hub) ClientCount() int {
 }
 
 // ServeWS upgrades an HTTP connection to WebSocket and registers it with the hub.
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+// tenant tags the connection (WP-020) so BroadcastTenant can target it; pass "" for
+// fleet-wide (single-tenant) behavior.
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, tenant string) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		http.Error(w, "not a websocket request", http.StatusBadRequest)
 		return
@@ -151,7 +181,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wsc := &wsConn{conn: netConn, done: make(chan struct{})}
+	wsc := &wsConn{conn: netConn, tenant: tenant, done: make(chan struct{})}
 	h.register <- wsc
 	defer func() { h.unregister <- wsc }()
 
