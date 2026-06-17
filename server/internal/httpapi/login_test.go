@@ -22,7 +22,7 @@ func loginReq(body string) *http.Request {
 func TestLoginHandlerConfiguredCredentials(t *testing.T) {
 	hash, _ := bcrypt.GenerateFromPassword([]byte("s3cret-pw"), bcrypt.DefaultCost)
 	creds := []config.Credential{{Username: "admin", Role: "admin", Hash: hash}}
-	h := LoginHandler([]byte("0123456789abcdef0123456789abcdef"), false, creds)
+	h := LoginHandler([]byte("0123456789abcdef0123456789abcdef"), false, creds, nil)
 
 	// Valid credential -> 200 with a token + role.
 	w := httptest.NewRecorder()
@@ -58,7 +58,7 @@ func TestLoginHandlerConfiguredCredentials(t *testing.T) {
 
 // With no credentials configured and auth enabled, login fails closed.
 func TestLoginHandlerNoCredentialsFailsClosed(t *testing.T) {
-	h := LoginHandler([]byte("0123456789abcdef0123456789abcdef"), false, nil)
+	h := LoginHandler([]byte("0123456789abcdef0123456789abcdef"), false, nil, nil)
 	w := httptest.NewRecorder()
 	h(w, loginReq(`{"username":"admin","password":"anything"}`))
 	if w.Code != http.StatusUnauthorized {
