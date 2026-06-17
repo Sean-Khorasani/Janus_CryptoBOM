@@ -59,7 +59,7 @@ export function FleetManagement({
   const loadWebhooks = () => {
     fetch("/api/webhooks", { headers: getAuthHeaders() })
       .then(res => res.ok ? res.json() : [])
-      .then(data => setWebhooks(data))
+      .then(data => setWebhooks(data || []))
       .catch(err => console.error("Error loading webhooks:", err));
   };
 
