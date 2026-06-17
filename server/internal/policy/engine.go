@@ -119,6 +119,29 @@ func (e *Engine) AddProfile(p Profile) {
 	e.profiles[p.Version] = p
 }
 
+// GetProfile returns a profile by version (UX-006).
+func (e *Engine) GetProfile(version string) (Profile, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	p, ok := e.profiles[version]
+	return p, ok
+}
+
+// RemoveProfile deletes a profile from the in-memory set (UX-006). The active
+// profile cannot be removed — switch active first.
+func (e *Engine) RemoveProfile(version string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.profiles[version]; !ok {
+		return fmt.Errorf("profile %s not found", version)
+	}
+	if version == e.active {
+		return fmt.Errorf("cannot delete the active profile %s; switch the active profile first", version)
+	}
+	delete(e.profiles, version)
+	return nil
+}
+
 func (e *Engine) AvailableProfiles() []Profile {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
