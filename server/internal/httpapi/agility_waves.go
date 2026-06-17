@@ -19,8 +19,8 @@ func (a *API) agilityExercise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch findings for all hosts, same as the scorecard endpoint.
-	params := store.QueryParams{Limit: 5000}
+	// Fetch findings for all hosts in the caller's tenant (WP-020), same as the scorecard.
+	params := store.QueryParams{Limit: 5000, TenantID: TenantFromContext(r.Context())}
 	findings, _, err := a.store.FindingsPaginated(r.Context(), params)
 	if err != nil {
 		writeError(w, err)
@@ -101,8 +101,9 @@ func (a *API) agilityScorecard(w http.ResponseWriter, r *http.Request) {
 	}
 	hostUUID := r.URL.Query().Get("host_uuid")
 
-	// Fetch findings from DB.
-	params := store.QueryParams{Limit: 5000, HostUUID: hostUUID}
+	// Fetch findings from DB, scoped to the caller's tenant (WP-020). With a host_uuid
+	// filter the tenant clause also blocks reading another tenant's host by guessing its UUID.
+	params := store.QueryParams{Limit: 5000, HostUUID: hostUUID, TenantID: TenantFromContext(r.Context())}
 	findings, _, err := a.store.FindingsPaginated(r.Context(), params)
 	if err != nil {
 		writeError(w, err)
@@ -136,7 +137,7 @@ func (a *API) agilityScorecard(w http.ResponseWriter, r *http.Request) {
 // GET  /api/waves        — list all wave plans
 // POST /api/waves        — create a wave plan
 func (a *API) wavePlans(w http.ResponseWriter, r *http.Request) {
-	planner := waveplan.New(a.store)
+	planner := waveplan.New(a.store, TenantFromContext(r.Context()))
 	switch r.Method {
 	case http.MethodGet:
 		plans, err := planner.List(r.Context())
@@ -181,7 +182,7 @@ func (a *API) wavePlanByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "plan_id is required"})
 		return
 	}
-	planner := waveplan.New(a.store)
+	planner := waveplan.New(a.store, TenantFromContext(r.Context()))
 
 	// GET /api/waves/graph — dependency graph + budget rollup (WP-022).
 	if planID == "graph" {
