@@ -46,7 +46,9 @@ func TestWavePlanLiveRoundTrip(t *testing.T) {
 	})
 
 	// Read back and confirm depends_on round-trips through the new JSONB column.
-	plans, err := pg.GetWavePlans(ctx)
+	// Query with the default tenant to also exercise the WP-020 tenant filter (the plans
+	// above are created without an explicit tenant, so they default to "default").
+	plans, err := pg.GetWavePlans(ctx, "default")
 	if err != nil {
 		t.Fatalf("get plans: %v", err)
 	}
