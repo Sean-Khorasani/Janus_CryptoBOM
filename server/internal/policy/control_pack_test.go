@@ -5,6 +5,46 @@ import (
 	"testing"
 )
 
+// WP-017: every rule declares an evidence type, and the pack carries a verifiable
+// (tamper-evident) attestation under the command-signing key.
+func TestControlPackEvidenceAndAttestation(t *testing.T) {
+	pack := BuiltinControlPack()
+	for _, r := range pack.Rules {
+		if r.EvidenceType == "" {
+			t.Errorf("rule %s has no EvidenceType", r.RuleID)
+		}
+	}
+	// Network rules are substantiated by TLS/protocol probes.
+	for _, r := range pack.Rules {
+		if r.RuleID == "JANUS-PQC-005" && r.EvidenceType != "network-tls-probe" {
+			t.Errorf("JANUS-PQC-005 evidence = %q, want network-tls-probe", r.EvidenceType)
+		}
+	}
+
+	key := []byte("0123456789abcdef0123456789abcdef")
+	att := pack.Attestation(key)
+	if att == "" {
+		t.Fatal("attestation must not be empty")
+	}
+	if !pack.VerifyAttestation(key, att) {
+		t.Fatal("attestation must verify under the same key")
+	}
+	if pack.VerifyAttestation([]byte("wrong-key-wrong-key-wrong-key-32"), att) {
+		t.Fatal("attestation must not verify under a different key")
+	}
+	// Deterministic: same pack + key → same attestation.
+	if pack.Attestation(key) != att {
+		t.Fatal("attestation must be deterministic")
+	}
+	// Tamper: a changed rule changes the attestation.
+	tampered := pack
+	tampered.Rules = append([]ControlRule(nil), pack.Rules...)
+	tampered.Rules[0].Severity = 99
+	if tampered.Attestation(key) == att {
+		t.Fatal("a tampered pack must produce a different attestation")
+	}
+}
+
 func TestBuiltinControlPack(t *testing.T) {
 	pack := BuiltinControlPack()
 
