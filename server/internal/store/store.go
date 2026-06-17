@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/janus-cbom/janus/server/internal/metrics"
 	"github.com/janus-cbom/janus/server/internal/pb"
 	"github.com/janus-cbom/janus/server/internal/scanconfig"
 )
@@ -20,14 +21,20 @@ import (
 type Store interface {
 	EnsureSchema(context.Context) error
 	Ping(context.Context) error
-	UpsertAgent(context.Context, *pb.AgentRegistration, string) error
+	PoolStat() PoolStats
+	FindingSeverityStatusCounts(ctx context.Context) ([]FindingStatusCount, error)
+	GetCredentialOverride(ctx context.Context, username string) ([]byte, time.Time, bool, error)
+	SetCredentialOverride(ctx context.Context, username string, passwordHash []byte) (time.Time, error)
+	ListCredentialOverrides(ctx context.Context) (map[string]time.Time, error)
+	UpsertAgent(context.Context, *pb.AgentRegistration, string, string) error
 	InsertTelemetry(context.Context, *pb.CbomTelemetryPayload) error
 	InsertMigrationCommand(context.Context, *pb.MigrationCommand) error
 	UpdateMigrationStatus(context.Context, *pb.MigrationStatusReport) error
-	Overview(context.Context) (*Overview, error)
-	Assets(context.Context) ([]Asset, error)
+	Overview(context.Context, string) (*Overview, error)
+	Assets(context.Context, string) ([]Asset, error)
 	AssetsPaginated(context.Context, FleetQueryParams) ([]Asset, int64, error)
 	AgentByID(context.Context, string) (*Asset, error)
+	AssetTenant(context.Context, string) (string, error)
 	ScanRuns(context.Context, ScanQueryParams) ([]ScanRun, int64, error)
 	ConnectionHistory(context.Context, string, QueryParams) ([]ConnectionSession, int64, error)
 	ReportFindings(context.Context, string, QueryParams) ([]Finding, int64, error)
@@ -38,18 +45,29 @@ type Store interface {
 	AgentCommand(context.Context, string, string) (*AgentCommand, error)
 	GetAgentScanConfig(context.Context, string) (*AgentScanConfig, error)
 	UpdateAgentScanConfig(context.Context, *AgentScanConfig) error
-	Components(context.Context, int) ([]Component, error)
-	Findings(context.Context, int) ([]Finding, error)
+	Components(context.Context, int, string) ([]Component, error)
+	Findings(context.Context, int, string) ([]Finding, error)
 	FindingsPaginated(ctx context.Context, params QueryParams) ([]Finding, int64, error)
 	ComponentsPaginated(ctx context.Context, params QueryParams) ([]Component, int64, error)
 	UpdateFindingStatus(ctx context.Context, findingID, status, updatedBy string) error
-	Migrations(context.Context) ([]Migration, error)
+	Migrations(context.Context, string) ([]Migration, error)
 	GetLatestConfigHash(ctx context.Context, hostUUID, configPath string) (string, error)
 	UpdateAgentHeartbeat(ctx context.Context, hb *AgentHeartbeat) error
 	GetFleetConfig(ctx context.Context) (*FleetConfig, error)
 	UpdateFleetConfig(ctx context.Context, fc *FleetConfig) error
 	GetAuditLogs(ctx context.Context) ([]AuditLog, error)
 	InsertAuditLog(ctx context.Context, al *AuditLog) error
+	VerifyAuditChain(ctx context.Context) (*AuditChainResult, error)
+	GetAgentCredential(ctx context.Context, agentID string) (*AgentCredential, error)
+	UpsertAgentCredential(ctx context.Context, c *AgentCredential) error
+	SetAgentCredentialStatus(ctx context.Context, agentID, status, reason string) error
+	ListAgentCredentials(ctx context.Context) ([]AgentCredential, error)
+	TouchAgentCredential(ctx context.Context, agentID string) error
+	CreateComplianceException(ctx context.Context, e *ComplianceException) error
+	ListComplianceExceptions(ctx context.Context) ([]ComplianceException, error)
+	RevokeComplianceException(ctx context.Context, exceptionID string) error
+	CreateTenant(ctx context.Context, t *Tenant) error
+	ListTenants(ctx context.Context) ([]Tenant, error)
 	GetAgentDiagnostics(ctx context.Context, hostUUID string) (string, error)
 	UpdateAgentDiagnostics(ctx context.Context, hostUUID, logs string) error
 	GetWebhooks(ctx context.Context) ([]Webhook, error)
@@ -71,17 +89,29 @@ type Store interface {
 	CreateVerdict(ctx context.Context, verdict *LLMVerdict) error
 	GetVerdictByFinding(ctx context.Context, findingID string) (*LLMVerdict, error)
 	GetVerdictByJob(ctx context.Context, jobID string) (*LLMVerdict, error)
+	SetVerdictReview(ctx context.Context, verdictID, decision, reviewedBy, note string) (*LLMVerdict, error)
+	GetLLMUsage(ctx context.Context) (*LLMUsage, error)
 	RecordProvenance(ctx context.Context, prov *LLMProvenance) error
 	ListProvenance(ctx context.Context, findingID string) ([]LLMProvenance, error)
+	CreateSuggestion(ctx context.Context, s *LLMSuggestion) error
+	GetSuggestionByJob(ctx context.Context, jobID string) (*LLMSuggestion, error)
+	GetSuggestionByFinding(ctx context.Context, findingID string) (*LLMSuggestion, error)
+	GetSuggestionByID(ctx context.Context, suggestionID string) (*LLMSuggestion, error)
+	SetSuggestionReview(ctx context.Context, suggestionID, decision, reviewedBy, note string) (*LLMSuggestion, error)
 	UpsertAgilityMetrics(ctx context.Context, metrics *AgilityMetrics) error
 	GetAgilityMetrics(ctx context.Context, hostUUID string) (*AgilityMetrics, error)
 	GetFleetAgilityMetrics(ctx context.Context) ([]AgilityMetrics, error)
 	CreateWavePlan(ctx context.Context, plan *WavePlan) error
-	GetWavePlans(ctx context.Context) ([]WavePlan, error)
+	GetWavePlans(ctx context.Context, tenantID string) ([]WavePlan, error)
 	UpdateWavePlan(ctx context.Context, plan *WavePlan) error
 	DeleteWavePlan(ctx context.Context, planID string) error
 	RecordLifecycleEvent(ctx context.Context, evt *FindingLifecycleEvent) error
 	ListLifecycleEvents(ctx context.Context, findingID string) ([]FindingLifecycleEvent, error)
+	AddFindingComment(ctx context.Context, c *FindingComment) error
+	ListFindingComments(ctx context.Context, findingID string) ([]FindingComment, error)
+	UpsertFindingAssignment(ctx context.Context, a *FindingAssignment) error
+	ListFindingAssignments(ctx context.Context) ([]FindingAssignment, error)
+	GetFindingAssignment(ctx context.Context, findingID string) (*FindingAssignment, error)
 	GetCertHealth(ctx context.Context) (*CertHealth, error)
 	FindingsByHost(ctx context.Context, hostUUID string) ([]Finding, error)
 }
@@ -124,6 +154,7 @@ type Asset struct {
 	MemUsage          float64    `json:"mem_usage"`
 	Status            string     `json:"status"`
 	TotalFilesScanned int        `json:"total_files_scanned"`
+	FilesSkipped      int        `json:"files_skipped"` // OPS-007: unchanged files skipped last scan
 	AgentVersion      string     `json:"agent_version"`
 	ObservedIP        string     `json:"observed_ip"`
 	DNSName           string     `json:"dns_name"`
@@ -143,6 +174,7 @@ type AgentHeartbeat struct {
 	MemUsage          float64 `json:"mem_usage"`
 	Status            string  `json:"status"`
 	TotalFilesScanned int     `json:"total_files_scanned"`
+	FilesSkipped      int     `json:"files_skipped"` // OPS-007
 	MetricsPresent    *bool   `json:"metrics_present,omitempty"`
 }
 
@@ -180,6 +212,9 @@ type QueryParams struct {
 	AssetRef  string
 	DateFrom  *time.Time
 	DateTo    *time.Time
+	// TenantID, when non-empty, restricts results to the tenant's assets (WP-020). Only
+	// honored by queries that join assets (findings); empty = no tenant filter.
+	TenantID string
 }
 
 type FleetQueryParams struct {
@@ -189,6 +224,9 @@ type FleetQueryParams struct {
 	Severity int
 	DateFrom *time.Time
 	DateTo   *time.Time
+	// TenantID, when non-empty, restricts results to assets in that tenant (WP-020
+	// row-level scoping). Empty means no tenant filter (callers that don't scope).
+	TenantID string
 }
 
 type ScanQueryParams struct {
@@ -338,6 +376,12 @@ type LLMVerdict struct {
 	Model             string    `json:"model"`
 	PromptVersion     string    `json:"prompt_version"`
 	CreatedAt         time.Time `json:"created_at"`
+	// Human review of the verdict (LLM-022). Recording a decision does not itself
+	// change finding state — authority stays with the deterministic engine + operator.
+	ReviewDecision string     `json:"review_decision,omitempty"` // "" | "approved" | "rejected"
+	ReviewedBy     string     `json:"reviewed_by,omitempty"`
+	ReviewedAt     *time.Time `json:"reviewed_at,omitempty"`
+	ReviewNote     string     `json:"review_note,omitempty"`
 }
 
 type LLMProvenance struct {
@@ -354,6 +398,51 @@ type LLMProvenance struct {
 	TokensOut     int       `json:"tokens_output"`
 	LatencyMS     int       `json:"latency_ms"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// LLMSuggestion is a persisted remediation suggestion (LLM-011). human_approval_required
+// is always true — there is no automated application path (that would be LLM-014, deferred
+// pending per-agent command keys + replay resistance). validation_status records the result
+// of the deterministic LLM-013 patch check, which runs before persistence.
+type LLMSuggestion struct {
+	SuggestionID          string    `json:"suggestion_id"`
+	JobID                 string    `json:"job_id"`
+	FindingID             string    `json:"finding_id"`
+	RecommendationType    string    `json:"recommendation_type"`
+	TargetAlgorithm       string    `json:"target_algorithm"`
+	CandidatePatch        string    `json:"candidate_patch,omitempty"`
+	Assumptions           []string  `json:"assumptions"`
+	CompatibilityNotes    string    `json:"compatibility_notes"`
+	ValidationRequired    []string  `json:"validation_required"`
+	ValidationStatus      string    `json:"validation_status"` // "passed" | "failed"
+	ValidationDetail      string    `json:"validation_detail,omitempty"`
+	HumanApprovalRequired bool      `json:"human_approval_required"` // always true
+	Confidence            float64   `json:"confidence"`
+	Model                 string    `json:"model"`
+	PromptVersion         string    `json:"prompt_version"`
+	CreatedAt             time.Time `json:"created_at"`
+	// Human review of the suggestion — advisory only; recording a decision never applies
+	// the patch (authority inversion, parallels LLMVerdict review).
+	ReviewDecision string     `json:"review_decision,omitempty"` // "" | "approved" | "rejected"
+	ReviewedBy     string     `json:"reviewed_by,omitempty"`
+	ReviewedAt     *time.Time `json:"reviewed_at,omitempty"`
+	ReviewNote     string     `json:"review_note,omitempty"`
+}
+
+// LLMModelUsage aggregates provenance for one model (LLM-023). Cost is applied by the
+// caller (the DB layer holds no pricing).
+type LLMModelUsage struct {
+	Model        string `json:"model"`
+	Calls        int    `json:"calls"`
+	TokensIn     int    `json:"tokens_input"`
+	TokensOut    int    `json:"tokens_output"`
+	AvgLatencyMS int    `json:"avg_latency_ms"`
+}
+
+// LLMUsage is the raw usage rollup from llm_provenance + llm_analysis_jobs (LLM-023).
+type LLMUsage struct {
+	ByModel      []LLMModelUsage `json:"by_model"`
+	JobsByStatus map[string]int  `json:"jobs_by_status"`
 }
 
 type AgilityMetrics struct {
@@ -391,6 +480,8 @@ type WavePlan struct {
 	// be activated (WP-022 dependency graph). Used for cycle detection and
 	// dependency-safe activation ordering.
 	DependsOn []string `json:"depends_on,omitempty" db:"depends_on"`
+	// TenantID scopes the plan to a tenant (WP-020); defaults to "default".
+	TenantID string `json:"tenant_id,omitempty" db:"tenant_id"`
 }
 
 type FindingLifecycleEvent struct {
@@ -443,6 +534,53 @@ func NewPostgres(ctx context.Context, cfg PostgresConfig) (*Postgres, error) {
 
 func (p *Postgres) Close() {
 	p.pool.Close()
+}
+
+// PoolStats is a snapshot of the pgx connection pool for the /metrics endpoint
+// (OPS-006). Kept as a plain struct so callers don't import pgxpool.
+type PoolStats struct {
+	Acquired int32
+	Idle     int32
+	Total    int32
+	Max      int32
+}
+
+// PoolStat returns current connection-pool utilization (OPS-006).
+func (p *Postgres) PoolStat() PoolStats {
+	s := p.pool.Stat()
+	return PoolStats{
+		Acquired: s.AcquiredConns(),
+		Idle:     s.IdleConns(),
+		Total:    s.TotalConns(),
+		Max:      s.MaxConns(),
+	}
+}
+
+// FindingStatusCount is one (severity, status) bucket of the findings inventory.
+type FindingStatusCount struct {
+	Severity int
+	Status   string
+	Count    int64
+}
+
+// FindingSeverityStatusCounts groups findings by severity and status for the
+// labeled janus_findings_total{severity,status} metric (OPS-006).
+func (p *Postgres) FindingSeverityStatusCounts(ctx context.Context) ([]FindingStatusCount, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT severity, status, COUNT(*) FROM crypto_findings GROUP BY severity, status ORDER BY severity, status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FindingStatusCount
+	for rows.Next() {
+		var c FindingStatusCount
+		if err := rows.Scan(&c.Severity, &c.Status, &c.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (p *Postgres) Ping(ctx context.Context) error {
@@ -846,6 +984,119 @@ ADD COLUMN IF NOT EXISTS component_count INTEGER DEFAULT 0;
 ALTER TABLE wave_plans
 ADD COLUMN IF NOT EXISTS depends_on JSONB NOT NULL DEFAULT '[]'::jsonb;
 `},
+	{29, "Credential overrides for runtime password change (AUTH-002)", `
+CREATE TABLE IF NOT EXISTS credential_overrides (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`},
+	{30, "LLM verdict human review (LLM-022)", `
+ALTER TABLE llm_verdicts
+  ADD COLUMN IF NOT EXISTS review_decision TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS reviewed_by TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS review_note TEXT NOT NULL DEFAULT '';
+`},
+	{31, "Agent files-skipped heartbeat field (OPS-007)", `
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS files_skipped INTEGER NOT NULL DEFAULT 0;
+`},
+	{32, "Finding comments + assignment/SLA (UX-003)", `
+CREATE TABLE IF NOT EXISTS finding_comments (
+  comment_id TEXT PRIMARY KEY,
+  finding_id TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_comments ON finding_comments(finding_id, created_at);
+CREATE TABLE IF NOT EXISTS finding_assignments (
+  finding_id TEXT PRIMARY KEY,
+  assigned_to TEXT NOT NULL DEFAULT '',
+  due_date DATE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`},
+	{33, "LLM remediation suggestions (LLM-011/013)", `
+CREATE TABLE IF NOT EXISTS llm_suggestions (
+  suggestion_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES llm_analysis_jobs(job_id) ON DELETE CASCADE,
+  finding_id TEXT NOT NULL,
+  recommendation_type TEXT NOT NULL DEFAULT '',
+  target_algorithm TEXT NOT NULL DEFAULT '',
+  candidate_patch TEXT NOT NULL DEFAULT '',
+  assumptions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  compatibility_notes TEXT NOT NULL DEFAULT '',
+  validation_required JSONB NOT NULL DEFAULT '[]'::jsonb,
+  validation_status TEXT NOT NULL DEFAULT '',
+  validation_detail TEXT NOT NULL DEFAULT '',
+  human_approval_required BOOLEAN NOT NULL DEFAULT true,
+  confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  review_decision TEXT NOT NULL DEFAULT '',
+  reviewed_by TEXT NOT NULL DEFAULT '',
+  reviewed_at TIMESTAMPTZ,
+  review_note TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_suggestions_job ON llm_suggestions(job_id);
+CREATE INDEX IF NOT EXISTS idx_llm_suggestions_finding ON llm_suggestions(finding_id, created_at DESC);
+`},
+	{34, "Tamper-evident audit log: per-entry hash chain (FEAT-AUDIT-TAMPER)", `
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS prev_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS entry_hash TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_audit_logs_seq ON audit_logs(seq);
+`},
+	{35, "Per-agent identity credentials (WP-029 P1)", `
+CREATE TABLE IF NOT EXISTS agent_credentials (
+  agent_id        TEXT PRIMARY KEY,
+  host_uuid       TEXT,
+  key_mode        TEXT NOT NULL DEFAULT 'derived',
+  key_enc         BYTEA,
+  status          TEXT NOT NULL DEFAULT 'active',
+  label           TEXT NOT NULL DEFAULT '',
+  enrolled_by     TEXT NOT NULL DEFAULT '',
+  enrolled_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_auth_at    TIMESTAMPTZ,
+  revoked_at      TIMESTAMPTZ,
+  revoked_reason  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_credentials_status ON agent_credentials(status);
+`},
+	{36, "Compliance exception workflow (WP-017)", `
+CREATE TABLE IF NOT EXISTS compliance_exceptions (
+  exception_id  TEXT PRIMARY KEY,
+  rule_id       TEXT NOT NULL,
+  asset_ref     TEXT NOT NULL DEFAULT '',
+  reason        TEXT NOT NULL,
+  requested_by  TEXT NOT NULL DEFAULT '',
+  approved_by   TEXT NOT NULL DEFAULT '',
+  status        TEXT NOT NULL DEFAULT 'active',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_compliance_exceptions_rule ON compliance_exceptions(rule_id, status);
+`},
+	{37, "Multi-tenancy foundation: tenants + asset tenant scoping (WP-020)", `
+CREATE TABLE IF NOT EXISTS tenants (
+  tenant_id   TEXT PRIMARY KEY,
+  name        TEXT NOT NULL DEFAULT '',
+  status      TEXT NOT NULL DEFAULT 'active',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO tenants (tenant_id, name) VALUES ('default', 'Default Tenant') ON CONFLICT DO NOTHING;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default';
+CREATE INDEX IF NOT EXISTS idx_assets_tenant ON assets(tenant_id);
+`},
+	{38, "Per-agent tenant assignment (WP-020)", `
+ALTER TABLE agent_credentials ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default';
+`},
+	{39, "Wave-plan tenant scoping (WP-020)", `
+ALTER TABLE wave_plans ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default';
+CREATE INDEX IF NOT EXISTS idx_wave_plans_tenant ON wave_plans(tenant_id);
+`},
 }
 
 // SchemaVersion returns the number of schema migrations defined in this build.
@@ -854,14 +1105,67 @@ func SchemaVersion() int {
 	return len(migrations)
 }
 
-func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration, observedIP string) error {
+// GetCredentialOverride returns the stored bcrypt hash and last-updated time for a
+// username if a runtime password override exists (AUTH-002). ok is false when none.
+func (p *Postgres) GetCredentialOverride(ctx context.Context, username string) ([]byte, time.Time, bool, error) {
+	var hash string
+	var updated time.Time
+	err := p.pool.QueryRow(ctx,
+		`SELECT password_hash, updated_at FROM credential_overrides WHERE username = $1`, username).Scan(&hash, &updated)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, time.Time{}, false, nil
+	}
+	if err != nil {
+		return nil, time.Time{}, false, err
+	}
+	return []byte(hash), updated, true, nil
+}
+
+// SetCredentialOverride upserts a runtime password override and returns the new
+// updated_at, used to invalidate sessions minted before the change (AUTH-002).
+func (p *Postgres) SetCredentialOverride(ctx context.Context, username string, passwordHash []byte) (time.Time, error) {
+	var updated time.Time
+	err := p.pool.QueryRow(ctx, `
+INSERT INTO credential_overrides (username, password_hash, updated_at)
+VALUES ($1, $2, now())
+ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()
+RETURNING updated_at`, username, string(passwordHash)).Scan(&updated)
+	return updated, err
+}
+
+// ListCredentialOverrides returns username→last-updated for all overrides, used to
+// seed the in-memory session-revocation cache at startup (AUTH-002).
+func (p *Postgres) ListCredentialOverrides(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := p.pool.Query(ctx, `SELECT username, updated_at FROM credential_overrides`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var u string
+		var t time.Time
+		if err := rows.Scan(&u, &t); err != nil {
+			return nil, err
+		}
+		out[u] = t
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) UpsertAgent(ctx context.Context, reg *pb.AgentRegistration, observedIP, tenantID string) error {
 	caps, err := json.Marshal(reg.Capabilities)
 	if err != nil {
 		return err
 	}
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	// tenant_id is set on first registration only (not in DO UPDATE) so an admin can
+	// reassign an asset's tenant without it being reverted on the next heartbeat/register.
 	_, err = p.pool.Exec(ctx, `
-INSERT INTO assets (host_uuid, hostname, os_name, os_version, arch, execution_mode, capabilities, last_seen, agent_version, observed_ip, dns_name, first_registered_at, last_registered_at, managed_agent)
-VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), $8, $9, $2, now(), now(), true)
+INSERT INTO assets (host_uuid, hostname, os_name, os_version, arch, execution_mode, capabilities, last_seen, agent_version, observed_ip, dns_name, first_registered_at, last_registered_at, managed_agent, tenant_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), $8, $9, $2, now(), now(), true, $10)
 ON CONFLICT (host_uuid) DO UPDATE SET
   hostname = EXCLUDED.hostname,
   os_name = EXCLUDED.os_name,
@@ -875,7 +1179,7 @@ ON CONFLICT (host_uuid) DO UPDATE SET
   managed_agent = true,
   last_registered_at = now(),
   last_seen = now()`,
-		reg.HostUuid, reg.Hostname, reg.OsName, reg.OsVersion, reg.Arch, reg.ExecutionMode, string(caps), reg.AgentVersion, observedIP)
+		reg.HostUuid, reg.Hostname, reg.OsName, reg.OsVersion, reg.Arch, reg.ExecutionMode, string(caps), reg.AgentVersion, observedIP, tenantID)
 	if err != nil {
 		return err
 	}
@@ -1130,17 +1434,32 @@ func (p *Postgres) UpdateMigrationStatus(ctx context.Context, report *pb.Migrati
 	if report.ObservedTls != nil {
 		obsJSON, _ = json.Marshal(report.ObservedTls)
 	}
-	_, err := p.pool.Exec(ctx, `
+	var issuedAt time.Time
+	err := p.pool.QueryRow(ctx, `
 UPDATE migration_transactions
 SET state = $2, updated_at = to_timestamp($3), last_error = $4, output = $5, observed_tls = $6
-WHERE command_id = $1`,
+WHERE command_id = $1
+RETURNING issued_at`,
 		report.CommandId,
 		report.State,
 		report.ReportedAtUnix,
 		report.ErrorVector,
 		report.Output,
 		obsJSON,
-	)
+	).Scan(&issuedAt)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	// Record migration duration on terminal states (FEAT-METRICS); skipped on
+	// ErrNoRows (no matching transaction, so no issued_at to measure from).
+	if err == nil {
+		switch report.State {
+		case int32(pb.MigrationStateSucceeded):
+			metrics.ObserveMigration("succeeded", float64(report.ReportedAtUnix-issuedAt.Unix()))
+		case int32(pb.MigrationStateFailed):
+			metrics.ObserveMigration("failed", float64(report.ReportedAtUnix-issuedAt.Unix()))
+		}
+	}
 	status := ""
 	switch report.State {
 	case int32(pb.MigrationStateApplying):
@@ -1153,7 +1472,8 @@ WHERE command_id = $1`,
 	if status != "" {
 		_, _ = p.pool.Exec(ctx, `UPDATE agent_commands SET status=$2, completed_at=CASE WHEN $2 IN ('completed','failed') THEN now() ELSE completed_at END WHERE command_id=$1`, report.CommandId, status)
 	}
-	return err
+	// Real errors returned above; a benign ErrNoRows (unknown command_id) is a no-op.
+	return nil
 }
 
 func (p *Postgres) GetLatestConfigHash(ctx context.Context, hostUUID, configPath string) (string, error) {
@@ -1179,35 +1499,63 @@ LIMIT 1`, hostUUID).Scan(&raw)
 	return "", nil
 }
 
-func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
+func (p *Postgres) Overview(ctx context.Context, tenantID string) (*Overview, error) {
 	out := &Overview{AlgorithmHistogram: map[string]int64{}}
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE managed_agent`).Scan(&out.Assets); err != nil {
+	// Tenant scope (WP-020): when a tenant is given, every count is restricted to hosts
+	// in that tenant. `assetWhere`/`assetAnd` filter the assets table directly; `hostIn`
+	// filters child tables (findings, telemetry, migrations) by their host_uuid. With an
+	// empty tenant the clauses are blank and the original fleet-wide queries run unchanged.
+	assetAnd, hostIn := "", ""
+	args := []any{}
+	if tenantID != "" {
+		args = append(args, tenantID)
+		assetAnd = " AND tenant_id=$1"
+		hostIn = " AND host_uuid IN (SELECT host_uuid FROM assets WHERE tenant_id=$1)"
+	}
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE managed_agent`+assetAnd, args...).Scan(&out.Assets); err != nil {
 		return nil, err
 	}
-	if err := p.pool.QueryRow(ctx, `SELECT COALESCE(sum(component_count),0), COALESCE(sum(finding_count),0) FROM telemetry_payloads`).Scan(&out.Components, &out.Findings); err != nil {
+	// Components = the count of components in each host's LATEST scan (current posture),
+	// NOT the cumulative sum across historical scans. telemetry_payloads/scan_components
+	// accumulate one row-set per scan, so summing them inflated the tile on every rescan
+	// (BUG-AGG-1). Restrict scan_components to the newest scan_id per host; this also makes
+	// the tile equal the number of rows the CBOM tab shows.
+	if err := p.pool.QueryRow(ctx, `SELECT COALESCE(count(*),0) FROM scan_components WHERE scan_id IN (
+  SELECT DISTINCT ON (host_uuid) scan_id FROM scan_runs WHERE 1=1`+hostIn+` ORDER BY host_uuid, scan_finished DESC)`, args...).Scan(&out.Components); err != nil {
 		return nil, err
 	}
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE severity = $1`, pb.RiskSeverityCritical).Scan(&out.CriticalFindings); err != nil {
+	// Findings = distinct, lifecycle-aware findings (crypto_findings is deduped by
+	// asset_ref/algorithm/rule and tracks status), consistent with the critical/high counts
+	// below — so the tiles always satisfy critical+high ≤ findings. Summing per-scan
+	// finding_count would both inflate and contradict those counts.
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE 1=1`+hostIn, args...).Scan(&out.Findings); err != nil {
 		return nil, err
 	}
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE severity = $1`, pb.RiskSeverityHigh).Scan(&out.HighFindings); err != nil {
+	critArgs := append(append([]any(nil), args...), pb.RiskSeverityCritical)
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE severity = $`+fmt.Sprint(len(critArgs))+hostIn, critArgs...).Scan(&out.CriticalFindings); err != nil {
 		return nil, err
 	}
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM migration_transactions WHERE state NOT IN ($1, $2)`, pb.MigrationStateSucceeded, pb.MigrationStateFailed).Scan(&out.OpenMigrations); err != nil {
+	highArgs := append(append([]any(nil), args...), pb.RiskSeverityHigh)
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE severity = $`+fmt.Sprint(len(highArgs))+hostIn, highArgs...).Scan(&out.HighFindings); err != nil {
+		return nil, err
+	}
+	migArgs := append(append([]any(nil), args...), pb.MigrationStateSucceeded, pb.MigrationStateFailed)
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM migration_transactions WHERE state NOT IN ($`+fmt.Sprint(len(migArgs)-1)+`, $`+fmt.Sprint(len(migArgs))+`)`+hostIn, migArgs...).Scan(&out.OpenMigrations); err != nil {
 		return nil, err
 	}
 	// Count stalled agents (last_seen > 5 minutes ago)
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE managed_agent AND last_seen < now() - interval '5 minutes'`).Scan(&out.StalledAgents); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM assets WHERE managed_agent AND last_seen < now() - interval '5 minutes'`+assetAnd, args...).Scan(&out.StalledAgents); err != nil {
 		out.StalledAgents = 0
 	}
 
 	// Compute Fleet Quantum-Readiness Score (0-100)
 	// Formula: 100 - penalty, where penalty comes from critical/high findings and stalled agents
 	out.ReadinessBreakdown = make(map[string]int)
-	var totalFindings int64
+	// out.Findings is already COUNT(crypto_findings) for this tenant — reuse it as the
+	// remediation denominator instead of re-querying.
+	totalFindings := out.Findings
 	var remediatedFindings int64
-	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings`).Scan(&totalFindings)
-	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE status IN ('remediated','accepted_risk')`).Scan(&remediatedFindings)
+	_ = p.pool.QueryRow(ctx, `SELECT count(*) FROM crypto_findings WHERE status IN ('remediated','accepted_risk')`+hostIn, args...).Scan(&remediatedFindings)
 
 	penalty := int(out.CriticalFindings)*18 + int(out.HighFindings)*8 + int(out.StalledAgents)*15
 	// Bonus for remediation progress
@@ -1222,7 +1570,7 @@ func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
 	out.ReadinessBreakdown["remediation_bonus"] = remediationBonus
 	out.ReadinessBreakdown["total_score"] = out.ReadinessScore
 
-	rows, err := p.pool.Query(ctx, `SELECT algorithm, count(*) FROM crypto_findings GROUP BY algorithm ORDER BY count(*) DESC LIMIT 12`)
+	rows, err := p.pool.Query(ctx, `SELECT algorithm, count(*) FROM crypto_findings WHERE 1=1`+hostIn+` GROUP BY algorithm ORDER BY count(*) DESC LIMIT 12`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1238,8 +1586,8 @@ func (p *Postgres) Overview(ctx context.Context) (*Overview, error) {
 	return out, rows.Err()
 }
 
-func (p *Postgres) Assets(ctx context.Context) ([]Asset, error) {
-	assets, _, err := p.AssetsPaginated(ctx, FleetQueryParams{QueryParams: QueryParams{Limit: 5000, Sort: "last_seen", Order: "desc"}})
+func (p *Postgres) Assets(ctx context.Context, tenantID string) ([]Asset, error) {
+	assets, _, err := p.AssetsPaginated(ctx, FleetQueryParams{QueryParams: QueryParams{Limit: 5000, Sort: "last_seen", Order: "desc", TenantID: tenantID}})
 	return assets, err
 }
 
@@ -1255,7 +1603,7 @@ SELECT a.host_uuid, a.hostname, a.os_name, a.os_version, a.arch, a.execution_mod
        CASE WHEN a.last_seen < now() - interval '5 minutes' THEN '' ELSE a.current_scan_path END,
        a.cpu_usage, a.mem_usage,
        CASE WHEN a.last_seen < now() - interval '5 minutes' THEN 'offline' ELSE a.status END,
-       a.total_files_scanned, a.agent_version, a.observed_ip, a.dns_name,
+       a.total_files_scanned, a.files_skipped, a.agent_version, a.observed_ip, a.dns_name,
        a.first_registered_at, a.last_registered_at,
        COALESCE(sr.scan_id,''), sr.scan_finished, COALESCE(sr.max_severity,0),
        COALESCE((SELECT count(*) FROM crypto_findings cf WHERE cf.host_uuid=a.host_uuid AND cf.status='open'),0)
@@ -1272,7 +1620,7 @@ func scanAsset(rows pgx.Rows) ([]Asset, error) {
 		if err := rows.Scan(
 			&a.HostUUID, &a.Hostname, &a.OSName, &a.OSVersion, &a.Arch, &a.ExecutionMode,
 			&a.LastSeen, &a.ScanProgress, &a.CurrentScanPath, &a.CPUUsage, &a.MemUsage,
-			&a.Status, &a.TotalFilesScanned, &a.AgentVersion, &a.ObservedIP, &a.DNSName,
+			&a.Status, &a.TotalFilesScanned, &a.FilesSkipped, &a.AgentVersion, &a.ObservedIP, &a.DNSName,
 			&a.FirstRegisteredAt, &a.LastRegisteredAt, &a.LastScanID, &a.LastScanFinished,
 			&a.LastScanSeverity, &a.OpenFindings,
 		); err != nil {
@@ -1309,6 +1657,10 @@ func (p *Postgres) AssetsPaginated(ctx context.Context, params FleetQueryParams)
 	add := func(clause string, value any) {
 		args = append(args, value)
 		where += clause + "$" + fmt.Sprint(len(args))
+	}
+	// Row-level tenant scoping (WP-020): restrict to the caller's tenant when set.
+	if params.TenantID != "" {
+		add(" AND a.tenant_id = ", params.TenantID)
 	}
 	if params.Search != "" {
 		args = append(args, "%"+params.Search+"%")
@@ -1376,6 +1728,17 @@ func (p *Postgres) AgentByID(ctx context.Context, hostUUID string) (*Asset, erro
 		return nil, pgx.ErrNoRows
 	}
 	return &assets[0], nil
+}
+
+// AssetTenant returns the tenant_id that owns an asset (WP-020), or pgx.ErrNoRows if the
+// host is unknown. Used to gate per-host detail routes to the caller's tenant.
+func (p *Postgres) AssetTenant(ctx context.Context, hostUUID string) (string, error) {
+	var tenant string
+	err := p.pool.QueryRow(ctx, `SELECT COALESCE(tenant_id,'default') FROM assets WHERE host_uuid=$1`, hostUUID).Scan(&tenant)
+	if err != nil {
+		return "", err
+	}
+	return tenant, nil
 }
 
 func (p *Postgres) ScanRuns(ctx context.Context, params ScanQueryParams) ([]ScanRun, int64, error) {
@@ -1505,6 +1868,11 @@ func (p *Postgres) ReportFindings(ctx context.Context, scanID string, params Que
 	}
 	if params.AssetRef != "" {
 		add(" AND asset_ref=", params.AssetRef)
+	}
+	if params.TenantID != "" {
+		// Tenant scope (WP-020): finding_occurrences has no tenant column; scope by host.
+		add(" AND host_uuid IN (SELECT host_uuid FROM assets WHERE tenant_id=", params.TenantID)
+		where += ")"
 	}
 	countArgs := append([]any(nil), args...)
 	args = append(args, params.Limit, offset)
@@ -1645,15 +2013,30 @@ ON CONFLICT(host_uuid) DO UPDATE SET config=EXCLUDED.config,updated_at=now()`, c
 	return err
 }
 
-func (p *Postgres) Components(ctx context.Context, limit int) ([]Component, error) {
+func (p *Postgres) Components(ctx context.Context, limit int, tenantID string) ([]Component, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}
-	rows, err := p.pool.Query(ctx, `
-SELECT telemetry_id, host_uuid, payload
-FROM telemetry_payloads
+	// Current posture: one payload per host — its LATEST scan — not every historical
+	// payload (BUG-AGG-1). Reports/exports built from this must reflect the current fleet
+	// state, so repeated rescans must not multiply components. DISTINCT ON picks the newest
+	// payload per host; the outer LIMIT then caps how many hosts' payloads we read.
+	// Tenant scope (WP-020): telemetry_payloads has no tenant column, so restrict via assets.
+	tenantClause := ""
+	args := []any{limit}
+	if tenantID != "" {
+		tenantClause = " WHERE host_uuid IN (SELECT host_uuid FROM assets WHERE tenant_id=$2)"
+		args = append(args, tenantID)
+	}
+	query := `
+SELECT telemetry_id, host_uuid, payload FROM (
+  SELECT DISTINCT ON (host_uuid) telemetry_id, host_uuid, payload, received_at
+  FROM telemetry_payloads` + tenantClause + `
+  ORDER BY host_uuid, received_at DESC
+) latest
 ORDER BY received_at DESC
-LIMIT $1`, limit)
+LIMIT $1`
+	rows, err := p.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1698,17 +2081,25 @@ LIMIT $1`, limit)
 	return components, rows.Err()
 }
 
-func (p *Postgres) Findings(ctx context.Context, limit int) ([]Finding, error) {
+func (p *Postgres) Findings(ctx context.Context, limit int, tenantID string) ([]Finding, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
+	}
+	// Tenant scope (WP-020): the assets join lets us filter findings to the caller's tenant.
+	tenantClause := ""
+	args := []any{limit}
+	if tenantID != "" {
+		tenantClause = " AND a.tenant_id=$2"
+		args = append(args, tenantID)
 	}
 	rows, err := p.pool.Query(ctx, `
 SELECT cf.finding_id, cf.host_uuid, cf.severity, cf.title, cf.description, cf.asset_ref, cf.algorithm, cf.policy_rule_id, cf.migration_profile,
        COALESCE(cf.status,'open'), COALESCE(cf.updated_by,''), COALESCE(cf.updated_at, cf.created_at), cf.created_at, cf.confidence,
        cf.telemetry_id, a.hostname, a.agent_version, tp.scan_finished
 FROM crypto_findings cf JOIN assets a ON a.host_uuid=cf.host_uuid JOIN telemetry_payloads tp ON tp.telemetry_id=cf.telemetry_id
+WHERE 1=1`+tenantClause+`
 ORDER BY severity DESC, created_at DESC
-LIMIT $1`, limit)
+LIMIT $1`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1757,6 +2148,9 @@ func (p *Postgres) FindingsPaginated(ctx context.Context, params QueryParams) ([
 		args = append(args, "%"+params.Search+"%")
 		n := fmt.Sprint(len(args))
 		where += ` AND (cf.title ILIKE $` + n + ` OR cf.description ILIKE $` + n + ` OR cf.asset_ref ILIKE $` + n + ` OR cf.algorithm ILIKE $` + n + ` OR cf.policy_rule_id ILIKE $` + n + ` OR a.hostname ILIKE $` + n + `)`
+	}
+	if params.TenantID != "" {
+		add(" AND a.tenant_id=", params.TenantID) // WP-020 row-level scoping via the asset join
 	}
 	if params.HostUUID != "" {
 		add(" AND cf.host_uuid=", params.HostUUID)
@@ -1825,8 +2219,19 @@ func (p *Postgres) ComponentsPaginated(ctx context.Context, params QueryParams) 
 	if params.HostUUID != "" {
 		add(" AND host_uuid=", params.HostUUID)
 	}
+	if params.TenantID != "" {
+		// scan_components has no tenant column; scope through the owning asset.
+		add(" AND host_uuid IN (SELECT host_uuid FROM assets WHERE tenant_id=", params.TenantID)
+		where += ")"
+	}
 	if params.ScanID != "" {
 		add(" AND scan_id=", params.ScanID)
+	} else {
+		// Current posture by default: restrict to each host's newest scan so repeated agent
+		// scans don't surface duplicate/historical component rows (BUG-AGG-1). Combined with
+		// the host_uuid/tenant filters above this yields the matching host's latest scan.
+		// Pass an explicit scan_id to drill into a specific historical scan.
+		where += " AND scan_id IN (SELECT DISTINCT ON (host_uuid) scan_id FROM scan_runs ORDER BY host_uuid, scan_finished DESC)"
 	}
 	if params.AssetRef != "" {
 		add(" AND (bom_ref=", params.AssetRef)
@@ -1911,13 +2316,21 @@ ON CONFLICT (event_id) DO NOTHING`,
 	return tx.Commit(ctx)
 }
 
-func (p *Postgres) Migrations(ctx context.Context) ([]Migration, error) {
+func (p *Postgres) Migrations(ctx context.Context, tenantID string) ([]Migration, error) {
+	// Tenant scope (WP-020): restrict to migrations whose host belongs to the tenant.
+	hostIn := ""
+	args := []any{}
+	if tenantID != "" {
+		args = append(args, tenantID)
+		hostIn = " AND host_uuid IN (SELECT host_uuid FROM assets WHERE tenant_id=$1)"
+	}
 	rows, err := p.pool.Query(ctx, `
 SELECT command_id, host_uuid, target_service, migration_profile, target_kem, target_signature, config_path,
        state, dry_run, issued_at, updated_at, last_error, output, observed_tls
 FROM migration_transactions
+WHERE 1=1`+hostIn+`
 ORDER BY updated_at DESC
-LIMIT 200`)
+LIMIT 200`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1958,9 +2371,10 @@ SET scan_progress = $2,
     mem_usage = CASE WHEN $8 THEN $5 ELSE mem_usage END,
     status = $6,
     total_files_scanned = $7,
+    files_skipped = $9,
     last_seen = now()
 WHERE host_uuid = $1`,
-		hb.HostUUID, hb.ScanProgress, hb.CurrentScanPath, hb.CPUUsage, hb.MemUsage, hb.Status, hb.TotalFilesScanned, metricsPresent)
+		hb.HostUUID, hb.ScanProgress, hb.CurrentScanPath, hb.CPUUsage, hb.MemUsage, hb.Status, hb.TotalFilesScanned, metricsPresent, hb.FilesSkipped)
 	if err != nil {
 		return err
 	}
@@ -2065,6 +2479,84 @@ type AuditLog struct {
 	Action    string    `json:"action"`
 	Details   string    `json:"details"`
 	CreatedAt time.Time `json:"created_at"`
+	PrevHash  string    `json:"prev_hash,omitempty"`
+	EntryHash string    `json:"entry_hash,omitempty"`
+}
+
+// AuditChainResult is the outcome of verifying the tamper-evident audit-log hash chain.
+type AuditChainResult struct {
+	Valid          bool   `json:"valid"`
+	EntriesChecked int    `json:"entries_checked"`
+	BrokenAtLogID  string `json:"broken_at_log_id,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// AgentCredential is a per-agent identity record (WP-029 P1): a stable agent_id plus a
+// status for per-agent revocation. The key is HKDF-derived from the server master on
+// demand (key_mode='derived', nothing stored) or, for non-HSM setups, kept encrypted in
+// KeyEnc (key_mode='stored'). KeyEnc is never serialized to clients.
+type AgentCredential struct {
+	AgentID       string     `json:"agent_id"`
+	HostUUID      string     `json:"host_uuid,omitempty"`
+	KeyMode       string     `json:"key_mode"`
+	KeyEnc        []byte     `json:"-"`
+	Status        string     `json:"status"`
+	Label         string     `json:"label,omitempty"`
+	TenantID      string     `json:"tenant_id,omitempty"`
+	EnrolledBy    string     `json:"enrolled_by,omitempty"`
+	EnrolledAt    time.Time  `json:"enrolled_at"`
+	LastAuthAt    *time.Time `json:"last_auth_at,omitempty"`
+	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
+	RevokedReason string     `json:"revoked_reason,omitempty"`
+}
+
+// ComplianceException is an operator-approved, time-bounded exception that excludes a rule
+// (optionally scoped to one asset) from compliance failure until it expires or is revoked
+// (WP-017). It never deletes findings — it only marks them excepted in compliance scoring.
+type ComplianceException struct {
+	ExceptionID string     `json:"exception_id"`
+	RuleID      string     `json:"rule_id"`
+	AssetRef    string     `json:"asset_ref,omitempty"`
+	Reason      string     `json:"reason"`
+	RequestedBy string     `json:"requested_by,omitempty"`
+	ApprovedBy  string     `json:"approved_by,omitempty"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// Active reports whether the exception is in force at time `now`: status "active" and either
+// no expiry or an expiry still in the future.
+func (e ComplianceException) Active(now time.Time) bool {
+	if e.Status != "active" {
+		return false
+	}
+	return e.ExpiresAt == nil || e.ExpiresAt.After(now)
+}
+
+// Tenant is an isolation boundary (WP-020 row-level multi-tenancy). Assets (and, as scoping
+// rolls out, other resources) carry a tenant_id; a login only sees its own tenant's data.
+type Tenant struct {
+	TenantID  string    `json:"tenant_id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ExceptionSuppresses reports whether any active exception in `exs` covers (ruleID, assetRef)
+// at time `now`. A rule-scoped exception (empty AssetRef) covers every asset for that rule; an
+// asset-scoped one covers only the matching asset. Used by compliance scoring to exclude an
+// accepted-risk finding without deleting it (WP-017).
+func ExceptionSuppresses(exs []ComplianceException, ruleID, assetRef string, now time.Time) bool {
+	for _, e := range exs {
+		if !e.Active(now) || e.RuleID != ruleID {
+			continue
+		}
+		if e.AssetRef == "" || e.AssetRef == assetRef {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Postgres) GetFleetConfig(ctx context.Context) (*FleetConfig, error) {
@@ -2097,7 +2589,7 @@ ON CONFLICT (config_id) DO UPDATE SET
 }
 
 func (p *Postgres) GetAuditLogs(ctx context.Context) ([]AuditLog, error) {
-	rows, err := p.pool.Query(ctx, `SELECT log_id, username, action, details, created_at FROM audit_logs ORDER BY created_at DESC LIMIT 100`)
+	rows, err := p.pool.Query(ctx, `SELECT log_id, username, action, details, created_at, prev_hash, entry_hash FROM audit_logs ORDER BY seq DESC LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}
@@ -2105,7 +2597,7 @@ func (p *Postgres) GetAuditLogs(ctx context.Context) ([]AuditLog, error) {
 	var logs []AuditLog
 	for rows.Next() {
 		var al AuditLog
-		if err := rows.Scan(&al.LogID, &al.Username, &al.Action, &al.Details, &al.CreatedAt); err != nil {
+		if err := rows.Scan(&al.LogID, &al.Username, &al.Action, &al.Details, &al.CreatedAt, &al.PrevHash, &al.EntryHash); err != nil {
 			return nil, err
 		}
 		logs = append(logs, al)
@@ -2113,12 +2605,239 @@ func (p *Postgres) GetAuditLogs(ctx context.Context) ([]AuditLog, error) {
 	return logs, nil
 }
 
+// auditChainLockKey serializes hash-chain appends to audit_logs through a pg
+// advisory lock so concurrent inserts cannot fork the chain (FEAT-AUDIT-TAMPER).
+const auditChainLockKey int64 = 0x4a414e55534c4f47 // "JANUSLOG"
+
+// auditEntryHash chains an audit entry to its predecessor: SHA-256 over the previous
+// entry's hash plus this entry's content. created_at is hashed at microsecond
+// precision to match Postgres TIMESTAMPTZ storage so verification is stable.
+func auditEntryHash(prev, logID, username, action, details string, createdAt time.Time) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n%s\n%s\n%s\n%s\n%d", prev, logID, username, action, details, createdAt.UnixMicro())
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// InsertAuditLog appends a tamper-evident, hash-chained audit entry. Each row stores
+// prev_hash (the previous entry's hash) and entry_hash (its own), so editing,
+// deleting, inserting, or reordering any row is detectable via VerifyAuditChain.
 func (p *Postgres) InsertAuditLog(ctx context.Context, al *AuditLog) error {
 	if al.LogID == "" {
 		al.LogID = uuid.NewString()
 	}
-	_, err := p.pool.Exec(ctx, `INSERT INTO audit_logs (log_id, username, action, details) VALUES ($1, $2, $3, $4)`, al.LogID, al.Username, al.Action, al.Details)
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, auditChainLockKey); err != nil {
+		return err
+	}
+	var prev string
+	err = tx.QueryRow(ctx, `SELECT entry_hash FROM audit_logs WHERE entry_hash <> '' ORDER BY seq DESC LIMIT 1`).Scan(&prev)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	entryHash := auditEntryHash(prev, al.LogID, al.Username, al.Action, al.Details, createdAt)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_logs (log_id, username, action, details, created_at, prev_hash, entry_hash) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		al.LogID, al.Username, al.Action, al.Details, createdAt, prev, entryHash); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	al.CreatedAt = createdAt
+	al.PrevHash = prev
+	al.EntryHash = entryHash
+	return nil
+}
+
+// VerifyAuditChain walks the hash-chained audit entries in append order and confirms
+// each links to its predecessor and hashes to its stored value. Any edited, deleted,
+// inserted, or reordered row breaks the chain (FEAT-AUDIT-TAMPER).
+func (p *Postgres) VerifyAuditChain(ctx context.Context) (*AuditChainResult, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT log_id, username, action, details, created_at, prev_hash, entry_hash
+		   FROM audit_logs WHERE entry_hash <> '' ORDER BY seq ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	expectedPrev := ""
+	count := 0
+	for rows.Next() {
+		var logID, username, action, details, prevHash, entryHash string
+		var createdAt time.Time
+		if err := rows.Scan(&logID, &username, &action, &details, &createdAt, &prevHash, &entryHash); err != nil {
+			return nil, err
+		}
+		if prevHash != expectedPrev {
+			return &AuditChainResult{Valid: false, EntriesChecked: count, BrokenAtLogID: logID,
+				Reason: "chain link mismatch (entry inserted, deleted, or reordered)"}, nil
+		}
+		if auditEntryHash(prevHash, logID, username, action, details, createdAt) != entryHash {
+			return &AuditChainResult{Valid: false, EntriesChecked: count, BrokenAtLogID: logID,
+				Reason: "entry hash mismatch (row content was modified)"}, nil
+		}
+		expectedPrev = entryHash
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &AuditChainResult{Valid: true, EntriesChecked: count}, nil
+}
+
+// GetAgentCredential returns the per-agent identity record (incl. KeyEnc), or
+// pgx.ErrNoRows if the agent_id is unknown (WP-029 P1).
+func (p *Postgres) GetAgentCredential(ctx context.Context, agentID string) (*AgentCredential, error) {
+	var c AgentCredential
+	err := p.pool.QueryRow(ctx,
+		`SELECT agent_id, COALESCE(host_uuid,''), key_mode, key_enc, status, label, COALESCE(tenant_id,'default'), enrolled_by, enrolled_at, last_auth_at, revoked_at, revoked_reason
+		   FROM agent_credentials WHERE agent_id = $1`, agentID).
+		Scan(&c.AgentID, &c.HostUUID, &c.KeyMode, &c.KeyEnc, &c.Status, &c.Label, &c.TenantID, &c.EnrolledBy, &c.EnrolledAt, &c.LastAuthAt, &c.RevokedAt, &c.RevokedReason)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// UpsertAgentCredential creates or updates an agent identity (enrollment).
+func (p *Postgres) UpsertAgentCredential(ctx context.Context, c *AgentCredential) error {
+	if c.AgentID == "" {
+		return fmt.Errorf("agent_id is required")
+	}
+	if c.KeyMode == "" {
+		c.KeyMode = "derived"
+	}
+	if c.Status == "" {
+		c.Status = "active"
+	}
+	if c.TenantID == "" {
+		c.TenantID = "default"
+	}
+	_, err := p.pool.Exec(ctx, `
+INSERT INTO agent_credentials (agent_id, host_uuid, key_mode, key_enc, status, label, tenant_id, enrolled_by)
+VALUES ($1, NULLIF($2,''), $3, $4, $5, $6, $7, $8)
+ON CONFLICT (agent_id) DO UPDATE SET
+  host_uuid = EXCLUDED.host_uuid,
+  key_mode = EXCLUDED.key_mode,
+  key_enc = EXCLUDED.key_enc,
+  status = EXCLUDED.status,
+  label = EXCLUDED.label,
+  tenant_id = EXCLUDED.tenant_id,
+  enrolled_by = EXCLUDED.enrolled_by`,
+		c.AgentID, c.HostUUID, c.KeyMode, c.KeyEnc, c.Status, c.Label, c.TenantID, c.EnrolledBy)
 	return err
+}
+
+// SetAgentCredentialStatus transitions an agent between active/disabled/revoked.
+// Revoking stamps revoked_at + reason; any other status clears them.
+func (p *Postgres) SetAgentCredentialStatus(ctx context.Context, agentID, status, reason string) error {
+	_, err := p.pool.Exec(ctx, `
+UPDATE agent_credentials
+SET status = $2,
+    revoked_at = CASE WHEN $2 = 'revoked' THEN now() ELSE NULL END,
+    revoked_reason = CASE WHEN $2 = 'revoked' THEN $3 ELSE '' END
+WHERE agent_id = $1`, agentID, status, reason)
+	return err
+}
+
+// ListAgentCredentials returns all agent identities (without key material).
+func (p *Postgres) ListAgentCredentials(ctx context.Context) ([]AgentCredential, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT agent_id, COALESCE(host_uuid,''), key_mode, status, label, COALESCE(tenant_id,'default'), enrolled_by, enrolled_at, last_auth_at, revoked_at, revoked_reason
+		   FROM agent_credentials ORDER BY enrolled_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentCredential
+	for rows.Next() {
+		var c AgentCredential
+		if err := rows.Scan(&c.AgentID, &c.HostUUID, &c.KeyMode, &c.Status, &c.Label, &c.TenantID, &c.EnrolledBy, &c.EnrolledAt, &c.LastAuthAt, &c.RevokedAt, &c.RevokedReason); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// TouchAgentCredential bumps last_auth_at after a successful authentication.
+func (p *Postgres) TouchAgentCredential(ctx context.Context, agentID string) error {
+	_, err := p.pool.Exec(ctx, `UPDATE agent_credentials SET last_auth_at = now() WHERE agent_id = $1`, agentID)
+	return err
+}
+
+// CreateComplianceException persists a new compliance exception (WP-017).
+func (p *Postgres) CreateComplianceException(ctx context.Context, e *ComplianceException) error {
+	if e.Status == "" {
+		e.Status = "active"
+	}
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO compliance_exceptions (exception_id, rule_id, asset_ref, reason, requested_by, approved_by, status, expires_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		e.ExceptionID, e.RuleID, e.AssetRef, e.Reason, e.RequestedBy, e.ApprovedBy, e.Status, e.ExpiresAt)
+	return err
+}
+
+// ListComplianceExceptions returns all compliance exceptions, newest first.
+func (p *Postgres) ListComplianceExceptions(ctx context.Context) ([]ComplianceException, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT exception_id, rule_id, COALESCE(asset_ref,''), reason, requested_by, approved_by, status, created_at, expires_at
+		   FROM compliance_exceptions ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ComplianceException
+	for rows.Next() {
+		var e ComplianceException
+		if err := rows.Scan(&e.ExceptionID, &e.RuleID, &e.AssetRef, &e.Reason, &e.RequestedBy, &e.ApprovedBy, &e.Status, &e.CreatedAt, &e.ExpiresAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// RevokeComplianceException marks an exception revoked (it no longer suppresses compliance).
+func (p *Postgres) RevokeComplianceException(ctx context.Context, exceptionID string) error {
+	_, err := p.pool.Exec(ctx, `UPDATE compliance_exceptions SET status='revoked' WHERE exception_id = $1`, exceptionID)
+	return err
+}
+
+// CreateTenant inserts a tenant (idempotent on tenant_id) for WP-020 multi-tenancy.
+func (p *Postgres) CreateTenant(ctx context.Context, t *Tenant) error {
+	if t.Status == "" {
+		t.Status = "active"
+	}
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO tenants (tenant_id, name, status) VALUES ($1,$2,$3)
+		 ON CONFLICT (tenant_id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status`,
+		t.TenantID, t.Name, t.Status)
+	return err
+}
+
+// ListTenants returns all tenants, newest first.
+func (p *Postgres) ListTenants(ctx context.Context) ([]Tenant, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT tenant_id, name, status, created_at FROM tenants ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Tenant
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(&t.TenantID, &t.Name, &t.Status, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 func (p *Postgres) GetAgentDiagnostics(ctx context.Context, hostUUID string) (string, error) {
@@ -2410,36 +3129,53 @@ ON CONFLICT (verdict_id) DO NOTHING`,
 	return err
 }
 
-func (p *Postgres) GetVerdictByFinding(ctx context.Context, findingID string) (*LLMVerdict, error) {
+// ErrVerdictNotFound is returned by SetVerdictReview when no verdict matches the id.
+var ErrVerdictNotFound = errors.New("verdict not found")
+
+const verdictColumns = `verdict_id, job_id, finding_id, verdict, adjusted_severity, confidence, reasoning,
+  evidence_citations, abstention_reason, model, prompt_version, created_at,
+  review_decision, reviewed_by, reviewed_at, review_note`
+
+func scanVerdict(row interface{ Scan(...any) error }) (*LLMVerdict, error) {
 	var v LLMVerdict
 	var cites []byte
-	err := p.pool.QueryRow(ctx, `
-SELECT verdict_id, job_id, finding_id, verdict, adjusted_severity, confidence, reasoning,
-  evidence_citations, abstention_reason, model, prompt_version, created_at
-FROM llm_verdicts WHERE finding_id=$1 ORDER BY created_at DESC LIMIT 1`, findingID).Scan(
+	var reviewedAt *time.Time
+	err := row.Scan(
 		&v.VerdictID, &v.JobID, &v.FindingID, &v.Verdict, &v.AdjustedSeverity, &v.Confidence,
-		&v.Reasoning, &cites, &v.AbstentionReason, &v.Model, &v.PromptVersion, &v.CreatedAt)
+		&v.Reasoning, &cites, &v.AbstentionReason, &v.Model, &v.PromptVersion, &v.CreatedAt,
+		&v.ReviewDecision, &v.ReviewedBy, &reviewedAt, &v.ReviewNote)
 	if err != nil {
 		return nil, err
 	}
+	v.ReviewedAt = reviewedAt
 	_ = json.Unmarshal(cites, &v.EvidenceCitations)
 	return &v, nil
 }
 
+func (p *Postgres) GetVerdictByFinding(ctx context.Context, findingID string) (*LLMVerdict, error) {
+	return scanVerdict(p.pool.QueryRow(ctx,
+		`SELECT `+verdictColumns+` FROM llm_verdicts WHERE finding_id=$1 ORDER BY created_at DESC LIMIT 1`, findingID))
+}
+
 func (p *Postgres) GetVerdictByJob(ctx context.Context, jobID string) (*LLMVerdict, error) {
-	var v LLMVerdict
-	var cites []byte
-	err := p.pool.QueryRow(ctx, `
-SELECT verdict_id, job_id, finding_id, verdict, adjusted_severity, confidence, reasoning,
-  evidence_citations, abstention_reason, model, prompt_version, created_at
-FROM llm_verdicts WHERE job_id=$1`, jobID).Scan(
-		&v.VerdictID, &v.JobID, &v.FindingID, &v.Verdict, &v.AdjustedSeverity, &v.Confidence,
-		&v.Reasoning, &cites, &v.AbstentionReason, &v.Model, &v.PromptVersion, &v.CreatedAt)
-	if err != nil {
-		return nil, err
+	return scanVerdict(p.pool.QueryRow(ctx,
+		`SELECT `+verdictColumns+` FROM llm_verdicts WHERE job_id=$1`, jobID))
+}
+
+// SetVerdictReview records a human approve/reject decision on an LLM verdict (LLM-022)
+// and returns the updated row. It does not change finding state — the decision is an
+// audit record; applying it stays an explicit operator action (authority inversion).
+// Returns pgx.ErrNoRows if the verdict_id does not exist.
+func (p *Postgres) SetVerdictReview(ctx context.Context, verdictID, decision, reviewedBy, note string) (*LLMVerdict, error) {
+	v, err := scanVerdict(p.pool.QueryRow(ctx, `
+UPDATE llm_verdicts
+SET review_decision=$2, reviewed_by=$3, review_note=$4, reviewed_at=now()
+WHERE verdict_id=$1
+RETURNING `+verdictColumns, verdictID, decision, reviewedBy, note))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrVerdictNotFound
 	}
-	_ = json.Unmarshal(cites, &v.EvidenceCitations)
-	return &v, nil
+	return v, err
 }
 
 // ---------------------------------------------------------------------------
@@ -2480,6 +3216,51 @@ FROM llm_provenance WHERE finding_id=$1 ORDER BY created_at DESC`, findingID)
 		list = append(list, pr)
 	}
 	return list, rows.Err()
+}
+
+// GetLLMUsage rolls up token/latency usage per model from llm_provenance and job
+// outcomes from llm_analysis_jobs (LLM-023). Pricing is applied by the caller.
+func (p *Postgres) GetLLMUsage(ctx context.Context) (*LLMUsage, error) {
+	out := &LLMUsage{JobsByStatus: map[string]int{}}
+
+	rows, err := p.pool.Query(ctx, `
+SELECT COALESCE(NULLIF(model,''),'(unknown)') AS model,
+       COUNT(*),
+       COALESCE(SUM(tokens_in),0),
+       COALESCE(SUM(tokens_out),0),
+       COALESCE(ROUND(AVG(latency_ms)),0)
+FROM llm_provenance
+GROUP BY 1
+ORDER BY COUNT(*) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m LLMModelUsage
+		if err := rows.Scan(&m.Model, &m.Calls, &m.TokensIn, &m.TokensOut, &m.AvgLatencyMS); err != nil {
+			return nil, err
+		}
+		out.ByModel = append(out.ByModel, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	jrows, err := p.pool.Query(ctx, `SELECT status, COUNT(*) FROM llm_analysis_jobs GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer jrows.Close()
+	for jrows.Next() {
+		var status string
+		var n int
+		if err := jrows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		out.JobsByStatus[status] = n
+	}
+	return out, jrows.Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -2561,18 +3342,21 @@ func (p *Postgres) CreateWavePlan(ctx context.Context, plan *WavePlan) error {
 	// planner treats "" as "use the default", so coerce it to the column default
 	// here rather than sending '' (which would violate the constraint).
 	plan.ApprovalPolicy = defaultApprovalPolicy(plan.ApprovalPolicy)
+	if plan.TenantID == "" {
+		plan.TenantID = "default"
+	}
 	_, err := p.pool.Exec(ctx, `
 INSERT INTO wave_plans (plan_id, name, description, wave_number, asset_ids, algorithm_targets,
   start_date, target_date, status, created_by, created_at, updated_at,
   canary_targets, maintenance_window, approval_policy,
-  budget_hours, actual_hours, component_count, depends_on)
-VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,now(),now(),$11,$12,$13,$14,$15,$16,$17::jsonb)
+  budget_hours, actual_hours, component_count, depends_on, tenant_id)
+VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,now(),now(),$11,$12,$13,$14,$15,$16,$17::jsonb,$18)
 ON CONFLICT (plan_id) DO NOTHING`,
 		plan.PlanID, plan.Name, plan.Description, plan.WaveNumber,
 		string(assetIDs), string(algTargets),
 		plan.StartDate, plan.TargetDate, plan.Status, plan.CreatedBy,
 		canaryTargets, plan.MaintenanceWindow, plan.ApprovalPolicy,
-		plan.BudgetHours, plan.ActualHours, plan.ComponentCount, string(dependsOn))
+		plan.BudgetHours, plan.ActualHours, plan.ComponentCount, string(dependsOn), plan.TenantID)
 	return err
 }
 
@@ -2594,14 +3378,24 @@ func defaultApprovalPolicy(p string) string {
 	return p
 }
 
-func (p *Postgres) GetWavePlans(ctx context.Context) ([]WavePlan, error) {
+func (p *Postgres) GetWavePlans(ctx context.Context, tenantID string) ([]WavePlan, error) {
+	// Tenant scope (WP-020): wave plans belong to a tenant; an empty tenant lists all
+	// (preserves single-tenant behavior). The list is the chokepoint the planner's
+	// update/delete/graph paths read through, so scoping here also blocks cross-tenant
+	// mutation by plan_id (the plan simply won't be found in the caller's tenant).
+	where := ""
+	args := []any{}
+	if tenantID != "" {
+		args = append(args, tenantID)
+		where = " WHERE tenant_id=$1"
+	}
 	rows, err := p.pool.Query(ctx, `
 SELECT plan_id, name, description, wave_number, asset_ids, algorithm_targets,
   start_date, target_date, status, created_by, created_at, updated_at,
   COALESCE(canary_targets, '{}'), COALESCE(maintenance_window, ''), COALESCE(approval_policy, 'operator'),
   COALESCE(budget_hours, 0), COALESCE(actual_hours, 0), COALESCE(component_count, 0),
-  COALESCE(depends_on, '[]'::jsonb)
-FROM wave_plans ORDER BY wave_number, created_at`)
+  COALESCE(depends_on, '[]'::jsonb), COALESCE(tenant_id, 'default')
+FROM wave_plans`+where+` ORDER BY wave_number, created_at`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2614,7 +3408,7 @@ FROM wave_plans ORDER BY wave_number, created_at`)
 			&assetIDs, &algTargets, &wp.StartDate, &wp.TargetDate,
 			&wp.Status, &wp.CreatedBy, &wp.CreatedAt, &wp.UpdatedAt,
 			&wp.CanaryTargets, &wp.MaintenanceWindow, &wp.ApprovalPolicy,
-			&wp.BudgetHours, &wp.ActualHours, &wp.ComponentCount, &dependsOn); err != nil {
+			&wp.BudgetHours, &wp.ActualHours, &wp.ComponentCount, &dependsOn, &wp.TenantID); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(assetIDs, &wp.AssetIDs)
