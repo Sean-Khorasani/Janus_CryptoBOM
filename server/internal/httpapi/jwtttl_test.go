@@ -29,11 +29,11 @@ func TestJWTTTLConfigurableAndClamped(t *testing.T) {
 func TestGenerateTokenHonorsTTL(t *testing.T) {
 	t.Setenv("JANUS_JWT_TTL", "1h")
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := GenerateToken("admin", "admin", secret)
+	tok, err := GenerateToken("admin", "admin", "default", secret)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	_, _, err = VerifyToken(tok, secret)
+	_, _, _, _, err = VerifyToken(tok, secret)
 	if err != nil {
 		t.Fatalf("freshly minted token should verify: %v", err)
 	}
