@@ -38,7 +38,36 @@ pub struct AgentConfig {
     pub scan_interval_seconds: u64,
     pub max_file_bytes: u64,
     pub max_binary_bytes: u64,
+    /// OPS-007 incremental scan: a file is skipped when its content hash matches the
+    /// scan_state cache and that cache entry is younger than this many hours.
+    #[serde(default = "default_max_cache_age_hours")]
+    pub max_cache_age_hours: u64,
     pub command_signing_key: String,
+    /// Optional: hex SHA-256 fingerprint of the server's ML-DSA command-signing public
+    /// key. When set, migration commands must ALSO carry a valid ML-DSA signature from
+    /// the key with this fingerprint (additional layer + downgrade protection). Obtain it
+    /// from `janus-server hsm pubkey` / the server startup log. Empty = HMAC baseline only.
+    #[serde(default)]
+    pub command_pqc_fingerprint: String,
+    /// Path to the bundled ML-DSA command Root CA certificate (PEM or DER), the trust anchor
+    /// for CA-chained command signing (WP-029 P3, `janus-sig-v2`). When set, commands MUST
+    /// carry a v2 envelope whose leaf command cert chains to this root (the fingerprint-pin
+    /// model is bypassed). Fail-closed: if set but unreadable/invalid, commands are rejected.
+    /// Unset = fall back to `command_pqc_fingerprint` / HMAC baseline.
+    #[serde(default)]
+    pub command_root_ca: Option<String>,
+    /// Reject migration commands whose `issued_at_unix` is older (or more than this far
+    /// in the future) than this many seconds — a replay-window guard (REM-3). 0 disables
+    /// the check. Default 300.
+    #[serde(default = "default_max_command_age_seconds")]
+    pub max_command_age_seconds: i64,
+    /// Per-agent identity (WP-029 P1), provisioned by `janus-server agent enroll`. When both
+    /// are set the agent authenticates to the server's agent endpoints with a per-agent HMAC
+    /// token (X-Janus-Agent-{Id,Ts,Auth}) in addition to the legacy shared token.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_key: Option<String>,
     pub scan_roots: Vec<String>,
     pub exclude_dirs: Vec<String>,
     #[serde(default)]
@@ -56,6 +85,12 @@ pub struct AgentConfig {
     pub plugin_dirs: Vec<String>,
     #[serde(default)]
     pub plugin_commands: Vec<PluginCommandConfig>,
+    /// Optional hex HMAC-SHA256 key (SEC-02 / FEAT-PLUGIN-SIG). When set, every plugin
+    /// manifest discovered under `plugin_dirs` must have a matching `plugin.toml.sig`
+    /// (hex HMAC of the manifest bytes with this key) or the agent refuses to load it.
+    /// Empty/unset = no plugin signature requirement (current behaviour).
+    #[serde(default)]
+    pub plugin_signing_key: Option<String>,
     #[serde(default = "default_intercept_mode")]
     pub intercept_mode: String,
     /// Directory containing versioned prompt YAML templates.
@@ -149,6 +184,10 @@ fn default_intercept_mode() -> String {
     "passive".to_string()
 }
 
+fn default_max_cache_age_hours() -> u64 {
+    24
+}
+
 fn default_prompts_dir() -> String {
     std::env::var("JANUS_PROMPTS_DIR").unwrap_or_else(|_| "config/prompts".to_string())
 }
@@ -163,6 +202,10 @@ fn default_plugin_max_memory() -> u64 {
 
 fn default_plugin_max_cpu() -> u8 {
     50
+}
+
+fn default_max_command_age_seconds() -> i64 {
+    300
 }
 
 impl Default for AgentConfig {
@@ -181,7 +224,13 @@ impl Default for AgentConfig {
             scan_interval_seconds: DEFAULT_SCAN_INTERVAL_SECONDS,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_binary_bytes: DEFAULT_MAX_BINARY_BYTES,
+            max_cache_age_hours: default_max_cache_age_hours(),
             command_signing_key: String::new(), // must be set explicitly — no insecure default
+            command_pqc_fingerprint: String::new(), // empty = HMAC baseline only
+            command_root_ca: None,              // unset = fingerprint-pin / HMAC baseline
+            max_command_age_seconds: default_max_command_age_seconds(),
+            agent_id: None,
+            agent_key: None,
             scan_roots: vec![".".to_string()],
             exclude_dirs: vec![],
             include_extensions: vec![],
@@ -192,6 +241,7 @@ impl Default for AgentConfig {
             enable_active_tls_probing: false,
             plugin_dirs: vec![],
             plugin_commands: vec![],
+            plugin_signing_key: None,
             intercept_mode: "passive".to_string(),
             prompts_dir: default_prompts_dir(),
             binary_llm_policy: BinaryLLMPolicy::default(),
@@ -264,6 +314,23 @@ impl AgentConfig {
                 "enable_process_memory_scraping requires enable_runtime_discovery = true"
             );
         }
+        // REM-5: a malformed fingerprint would silently reject every command, so fail loudly.
+        let fp = self.command_pqc_fingerprint.trim();
+        if !fp.is_empty() && (fp.len() != 64 || !fp.chars().all(|c| c.is_ascii_hexdigit())) {
+            anyhow::bail!(
+                "command_pqc_fingerprint must be empty or a 64-character hex SHA-256 fingerprint"
+            );
+        }
+        if self.max_command_age_seconds < 0 {
+            anyhow::bail!(
+                "max_command_age_seconds must be >= 0 (0 disables the replay-window check)"
+            );
+        }
+        if let Some(key) = &self.plugin_signing_key {
+            if key.trim().is_empty() {
+                anyhow::bail!("plugin_signing_key, if set, must be a non-empty hex key");
+            }
+        }
         Ok(())
     }
 
@@ -316,6 +383,23 @@ impl AgentConfig {
                 }
                 let raw = fs::read_to_string(&manifest)
                     .with_context(|| format!("read plugin manifest {}", manifest.display()))?;
+                // SEC-02: when a signing key is configured, the manifest must carry a valid
+                // detached HMAC signature (plugin.toml.sig) or we refuse to load it.
+                if let Some(key) = &self.plugin_signing_key {
+                    let sig_path = entry.path().join("plugin.toml.sig");
+                    let sig = fs::read_to_string(&sig_path).with_context(|| {
+                        format!(
+                            "plugin signing is enabled but signature {} is missing",
+                            sig_path.display()
+                        )
+                    })?;
+                    if !crate::command_sig::verify_blob_hmac(key.as_bytes(), raw.as_bytes(), &sig) {
+                        anyhow::bail!(
+                            "plugin manifest signature mismatch for {}; refusing to load unverified plugin",
+                            manifest.display()
+                        );
+                    }
+                }
                 let mut plugin: PluginCommandConfig = toml::from_str(&raw)
                     .with_context(|| format!("parse {}", manifest.display()))?;
                 if plugin.name.is_empty() {
