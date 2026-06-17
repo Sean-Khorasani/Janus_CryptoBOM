@@ -31,6 +31,54 @@ func newTestSimulator() *Simulator {
 }
 
 // ---------------------------------------------------------------------------
+// Golden migration outputs (WP-015): lock the exact generated patch + impact for
+// representative migrations so an unintended change to migration generation is caught.
+// ---------------------------------------------------------------------------
+
+func TestGoldenMigrationPatch(t *testing.T) {
+	cases := []struct {
+		name       string
+		configPath string
+		algorithm  string
+		kem        string
+		sig        string
+		wantPatch  string
+		wantImpact string
+	}{
+		{
+			name:       "rsa-signature-to-mldsa",
+			configPath: "/etc/nginx/nginx.conf",
+			algorithm:  "RSA-2048",
+			kem:        "X25519MLKEM768",
+			sig:        "ML-DSA-65",
+			// RSA is a signature algorithm → replaced with the target signature.
+			wantPatch:  "--- /etc/nginx/nginx.conf\n+++ /etc/nginx/nginx.conf\n@@ -1,5 +1,5 @@\n-RSA-2048\n+ML-DSA-65\n",
+			wantImpact: "MEDIUM",
+		},
+		{
+			name:       "classical-kex-to-hybrid-kem",
+			configPath: "/etc/ssh/sshd_config",
+			algorithm:  "ECDH",
+			kem:        "X25519MLKEM768",
+			sig:        "ML-DSA-65",
+			// ECDH is key-exchange → replaced with the target KEM.
+			wantPatch:  "--- /etc/ssh/sshd_config\n+++ /etc/ssh/sshd_config\n@@ -1,5 +1,5 @@\n-ECDH\n+X25519MLKEM768\n",
+			wantImpact: "LOW",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := generatePatch(c.configPath, c.algorithm, c.kem, c.sig); got != c.wantPatch {
+				t.Errorf("generatePatch golden mismatch:\n got: %q\nwant: %q", got, c.wantPatch)
+			}
+			if got := estimateImpact(c.algorithm); got != c.wantImpact {
+				t.Errorf("estimateImpact(%s) = %q, want %q", c.algorithm, got, c.wantImpact)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // buildCompatibilityAnalysis tests
 // ---------------------------------------------------------------------------
 
