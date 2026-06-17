@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { X, Clock, RefreshCw, ArrowRight, RotateCcw, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
 import { formatDate, Empty } from "./FindingsGrid";
+import { errorMessage } from "../apiError";
 import { FocusTrap } from "../a11y/FocusTrap";
 
 interface FindingLifecycleEvent {
@@ -82,10 +83,78 @@ interface FindingTimelineProps {
   onClose: () => void;
 }
 
+interface FindingComment {
+  comment_id: string;
+  finding_id: string;
+  actor: string;
+  body: string;
+  created_at: string;
+}
+
 export function FindingTimeline({ findingId, onClose }: FindingTimelineProps) {
   const [events, setEvents] = useState<FindingLifecycleEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // UX-003: comments + assignment.
+  const role = (typeof localStorage !== "undefined" && localStorage.getItem("janus_role")) || "";
+  const canManage = role === "admin" || role === "operator";
+  const [comments, setComments] = useState<FindingComment[]>([]);
+  const [newComment, setNewComment] = useState("");
+  const [assignee, setAssignee] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [metaMsg, setMetaMsg] = useState("");
+
+  const loadComments = () => {
+    fetch(`/api/findings/${findingId}/comments`, { headers: getAuthHeaders() })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((d: FindingComment[]) => setComments(Array.isArray(d) ? d : []))
+      .catch(() => { /* non-fatal */ });
+  };
+  useEffect(loadComments, [findingId]);
+
+  // Load the current assignment so the form shows the existing owner/due (UX-003).
+  useEffect(() => {
+    fetch(`/api/findings/${findingId}/assign`, { headers: getAuthHeaders() })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((a: { assigned_to?: string; due_date?: string } | null) => {
+        if (a) {
+          setAssignee(a.assigned_to || "");
+          setDueDate(a.due_date ? a.due_date.slice(0, 10) : "");
+        }
+      })
+      .catch(() => { /* non-fatal */ });
+  }, [findingId]);
+
+  const addComment = async () => {
+    if (!newComment.trim()) return;
+    try {
+      const res = await fetch(`/api/findings/${findingId}/comments`, {
+        method: "POST",
+        headers: { ...getAuthHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ body: newComment.trim() }),
+      });
+      if (!res.ok) throw new Error(await errorMessage(res));
+      setNewComment("");
+      loadComments();
+    } catch (e) {
+      setMetaMsg(e instanceof Error ? e.message : "Failed to add comment");
+    }
+  };
+
+  const saveAssignment = async () => {
+    try {
+      const res = await fetch(`/api/findings/${findingId}/assign`, {
+        method: "POST",
+        headers: { ...getAuthHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ assigned_to: assignee.trim(), due_date: dueDate }),
+      });
+      if (!res.ok) throw new Error(await errorMessage(res));
+      setMetaMsg(`Assigned${assignee ? ` to ${assignee}` : ""}${dueDate ? `, due ${dueDate}` : ""}.`);
+    } catch (e) {
+      setMetaMsg(e instanceof Error ? e.message : "Failed to save assignment");
+    }
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -203,6 +272,81 @@ export function FindingTimeline({ findingId, onClose }: FindingTimelineProps) {
                 ))}
               </ol>
             )}
+
+            {/* Assignment + comments (UX-003) */}
+            <div className="mt-6 space-y-4 border-t border-[#dfe5dc] pt-4 dark:border-[#2a3a30]">
+              {canManage && (
+                <div>
+                  <h4 className="mb-2 text-xs font-bold uppercase tracking-wider text-[#697469] dark:text-[#8fa991]">Assignment</h4>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={assignee}
+                      onChange={(e) => setAssignee(e.target.value)}
+                      placeholder="Assign to (username)"
+                      aria-label="Assign finding to"
+                      className="flex-1 min-w-[8rem] rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#3a7d44] dark:border-[#2a3a30] dark:bg-[#0d1210] dark:text-[#e8ede9]"
+                    />
+                    <input
+                      type="date"
+                      value={dueDate}
+                      onChange={(e) => setDueDate(e.target.value)}
+                      aria-label="Due date"
+                      className="rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#3a7d44] dark:border-[#2a3a30] dark:bg-[#0d1210] dark:text-[#e8ede9]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void saveAssignment()}
+                      className="rounded bg-[#17211c] px-3 py-1 text-xs font-semibold text-white hover:bg-[#25322b] dark:bg-[#2a3a32] dark:hover:bg-[#3a4a42]"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <h4 className="mb-2 text-xs font-bold uppercase tracking-wider text-[#697469] dark:text-[#8fa991]">
+                  Comments {comments.length > 0 && `(${comments.length})`}
+                </h4>
+                {comments.length === 0 ? (
+                  <p className="text-xs text-[#697469] dark:text-[#8fa991]">No comments yet.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {comments.map((c) => (
+                      <li key={c.comment_id} className="rounded-md border border-[#edf1ea] bg-[#f7f8f5] p-2.5 dark:border-[#2a3a30] dark:bg-[#0d1210]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-semibold text-[#4d594f] dark:text-[#6b7e6f]">{c.actor || "—"}</span>
+                          <span className="text-[10px] text-[#697469] dark:text-[#8fa991]">{formatDate(c.created_at)}</span>
+                        </div>
+                        <p className="mt-1 whitespace-pre-wrap text-xs text-[#17211c] dark:text-[#e8ede9]">{c.body}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {canManage && (
+                  <div className="mt-2 flex flex-col gap-2">
+                    <textarea
+                      value={newComment}
+                      onChange={(e) => setNewComment(e.target.value)}
+                      placeholder="Add an investigation note…"
+                      aria-label="Add a comment"
+                      rows={2}
+                      className="w-full rounded border border-[#dfe5dc] px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#3a7d44] dark:border-[#2a3a30] dark:bg-[#0d1210] dark:text-[#e8ede9]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void addComment()}
+                      disabled={!newComment.trim()}
+                      className="self-end rounded bg-[#3a7d44] px-3 py-1 text-xs font-bold text-white hover:bg-[#2f6638] disabled:opacity-50 dark:bg-[#2f6638] dark:hover:bg-[#3a7d44]"
+                    >
+                      Comment
+                    </button>
+                  </div>
+                )}
+                {metaMsg && <p className="mt-1 text-[11px] text-[#697469] dark:text-[#8fa991]" role="status">{metaMsg}</p>}
+              </div>
+            </div>
           </div>
         </div>
       </div>
