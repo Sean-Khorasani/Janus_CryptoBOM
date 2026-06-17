@@ -541,11 +541,16 @@ fn eq_directive_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn directive_present(text: &str, directive: &str) -> bool {
+    // Compare on bytes, not string slices: directive keywords are ASCII, but the scanned
+    // line may contain multi-byte UTF-8 (e.g. '→' in a comment). Slicing the &str at
+    // `directive.len()` could land inside a multi-byte char and panic, so match the ASCII
+    // prefix byte-wise and require an ASCII-whitespace byte immediately after it.
+    let d = directive.as_bytes();
     text.lines().any(|l| {
-        let l = l.trim();
-        l.len() >= directive.len()
-            && l[..directive.len()].eq_ignore_ascii_case(directive)
-            && l[directive.len()..].starts_with(char::is_whitespace)
+        let b = l.trim().as_bytes();
+        b.len() > d.len()
+            && b[..d.len()].eq_ignore_ascii_case(d)
+            && b[d.len()].is_ascii_whitespace()
     })
 }
 
@@ -579,6 +584,22 @@ mod tests {
 
     fn names(scan: &ConfigScan) -> Vec<String> {
         scan.algorithms.iter().map(|a| a.name.clone()).collect()
+    }
+
+    #[test]
+    fn directive_present_handles_multibyte_lines_without_panicking() {
+        // Regression: a line containing a multi-byte UTF-8 char (here '→') must not cause a
+        // byte-index slice panic in directive_present. Lines shorter than the directive,
+        // exact-length lines, and matches followed by a multi-byte char must all be safe.
+        assert!(!directive_present(
+            "rsa → ecdsa migration note\n",
+            "Protocol"
+        ));
+        assert!(!directive_present("→\n", "Protocol"));
+        assert!(!directive_present("Protocol→1.2\n", "Protocol")); // no whitespace after keyword
+        assert!(directive_present("Protocol TLSv1.2\n", "Protocol"));
+        assert!(directive_present("  protocol\tTLSv1.2\n", "Protocol")); // trimmed + case-insensitive + tab
+        assert!(!directive_present("Protocol\n", "Protocol")); // keyword only, no value
     }
 
     #[test]
