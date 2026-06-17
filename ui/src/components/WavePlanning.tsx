@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Waves, Plus, Trash2, CheckSquare, Square, ChevronRight, X, AlertCircle, Loader2 } from "lucide-react";
 import { FocusTrap } from "../a11y/FocusTrap";
+import { WaveDependencyGraph } from "./WaveDependencyGraph";
 
 interface WavePlan {
   plan_id: string;
@@ -555,6 +556,9 @@ export function WavePlanning() {
 
       {/* Action error (status/delete) */}
       {actionError && <InlineError message={actionError} />}
+
+      {/* Dependency graph, topological order, blocked plans + budget rollup (UX-007). */}
+      <WaveDependencyGraph />
 
       {/* Readiness checklist — shown when any wave is in planned status */}
       {hasPlannedWave && checklist.length > 0 && (
