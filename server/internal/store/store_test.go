@@ -14,6 +14,7 @@ package store
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 // Compile-time assertion: *Postgres must satisfy the Store interface.
@@ -87,4 +88,32 @@ func TestIntegrationAutoReopenFindings(t *testing.T) {
 	//   4. Assert status is back to 'open', reopen_count == 1, reopened_at is set.
 	//   5. Assert a 'reopened' lifecycle event exists in finding_lifecycle_events.
 	t.Log("integration tests not yet implemented — provide JANUS_DATABASE_URL and extend this test")
+}
+
+// TestAuditEntryHashChainsAndDetectsChange verifies the tamper-evident audit chain
+// hash (FEAT-AUDIT-TAMPER) is deterministic, sensitive to every field, and chained.
+func TestAuditEntryHashChainsAndDetectsChange(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	base := auditEntryHash("", "id1", "alice", "LOGIN", "ok", now)
+	if base != auditEntryHash("", "id1", "alice", "LOGIN", "ok", now) {
+		t.Fatal("hash must be deterministic for identical input")
+	}
+	mutations := map[string]string{
+		"prev":     auditEntryHash("x", "id1", "alice", "LOGIN", "ok", now),
+		"logID":    auditEntryHash("", "id2", "alice", "LOGIN", "ok", now),
+		"username": auditEntryHash("", "id1", "bob", "LOGIN", "ok", now),
+		"action":   auditEntryHash("", "id1", "alice", "LOGOUT", "ok", now),
+		"details":  auditEntryHash("", "id1", "alice", "LOGIN", "tampered", now),
+		"time":     auditEntryHash("", "id1", "alice", "LOGIN", "ok", now.Add(time.Second)),
+	}
+	for field, h := range mutations {
+		if h == base {
+			t.Fatalf("changing %s must change the entry hash", field)
+		}
+	}
+	// The previous entry's hash must propagate into the next entry's hash.
+	if auditEntryHash(base, "id2", "alice", "LOGOUT", "ok", now) ==
+		auditEntryHash("", "id2", "alice", "LOGOUT", "ok", now) {
+		t.Fatal("prev_hash must affect the chained entry hash")
+	}
 }
