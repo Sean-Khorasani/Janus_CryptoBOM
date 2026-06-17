@@ -9,7 +9,7 @@ use std::{fs, path::Path};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use object::Object;
+use object::{Object, ObjectSection};
 
 const SYMBOLS: &[(&str, &str, CryptoRole)] = &[
     (
@@ -107,9 +107,15 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
             }
             let mut algorithms = Vec::new();
             let mut parsed_ok = false;
+            // Optional static disassembly of the code section (LLM-007), gated by the
+            // binary-analysis policy. Static decode only — no execution, no sandbox.
+            let mut disasm_summary = String::new();
 
             if let Ok(binary_file) = object::File::parse(&*raw) {
                 parsed_ok = true;
+                if cfg.binary_llm_policy.allow_hexdump_window {
+                    disasm_summary = disassemble_text_section(&binary_file);
+                }
 
                 // Enumerate imports
                 if let Ok(imports) = binary_file.imports() {
@@ -203,6 +209,11 @@ pub fn scan(cfg: &AgentConfig) -> Result<ScanResult> {
 
             if algorithms.is_empty() {
                 continue;
+            }
+            // Attach the disassembly summary (if collected) to the first finding as
+            // instruction-level evidence for downstream binary-analysis reports (LLM-007).
+            if !disasm_summary.is_empty() {
+                algorithms[0].context_snippet = disasm_summary;
             }
             let path = entry.path().display().to_string();
             out.evidence.push(Evidence {
@@ -321,4 +332,72 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// disassemble_text_section statically decodes a bounded window of the binary's executable
+/// code (`.text`) into human-readable x86/x64 instructions for binary-analysis evidence
+/// (LLM-007). Returns "" for non-x86 architectures or when no code section is present. This is
+/// static byte decoding only — no execution, hence no sandbox is required.
+fn disassemble_text_section(file: &object::File<'_>) -> String {
+    let bitness: u32 = match file.architecture() {
+        object::Architecture::X86_64 => 64,
+        object::Architecture::I386 => 32,
+        _ => return String::new(),
+    };
+    let section = match file.section_by_name(".text") {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let data = match section.data() {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+    let window = &data[..data.len().min(64)];
+    disassemble(window, section.address(), bitness, 12).join("\n")
+}
+
+/// disassemble statically decodes up to `max` x86/x64 instructions from `code` (starting
+/// instruction pointer `rip`, `bitness` 32 or 64) and returns "address  mnemonic operands"
+/// lines. Pure decode; never executes the bytes.
+fn disassemble(code: &[u8], rip: u64, bitness: u32, max: usize) -> Vec<String> {
+    use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+    let mut decoder = Decoder::with_ip(bitness, code, rip, DecoderOptions::NONE);
+    let mut formatter = NasmFormatter::new();
+    let mut instr = Instruction::default();
+    let mut out = Vec::new();
+    while decoder.can_decode() && out.len() < max {
+        decoder.decode_out(&mut instr);
+        let mut text = String::new();
+        formatter.format(&instr, &mut text);
+        out.push(format!("{:016X}  {}", instr.ip(), text));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // LLM-007 static disassembly: decode known x86-64 machine code into mnemonics. No execution.
+    #[test]
+    fn disassembles_known_x64_bytes() {
+        // 48 89 E5 = `mov rbp, rsp`; C3 = `ret`.
+        let code = [0x48u8, 0x89, 0xE5, 0xC3];
+        let out = disassemble(&code, 0x1000, 64, 8);
+        assert_eq!(out.len(), 2, "expected two instructions, got {out:?}");
+        let first = out[0].to_lowercase();
+        assert!(
+            first.contains("mov") && first.contains("rbp"),
+            "got {}",
+            out[0]
+        );
+        assert!(out[1].to_lowercase().contains("ret"), "got {}", out[1]);
+        // The starting IP is rendered.
+        assert!(out[0].starts_with("0000000000001000"), "got {}", out[0]);
+    }
+
+    #[test]
+    fn empty_code_yields_no_instructions() {
+        assert!(disassemble(&[], 0, 64, 8).is_empty());
+    }
 }
