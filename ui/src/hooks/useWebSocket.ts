@@ -13,9 +13,10 @@ export type WsEvent = { type: string; [key: string]: unknown };
  * exponential backoff. Disabled (and any open socket closed) when `enabled`
  * is false, so it never runs on the login screen.
  *
- * NOTE: the access token is passed as a query parameter to match the server's
- * /api/ws auth path. This is a known security caveat (token leaks into logs);
- * see docs/analysis/PROJECT-REVIEW.md S3 — tracked for a signed-ticket fix.
+ * Auth: the connection is authorized by a short-lived single-use ticket. We
+ * POST /api/ws/ticket with the bearer token in the Authorization header, then
+ * connect with ?ticket=. This keeps the session JWT out of the URL (it would
+ * otherwise leak into proxy/access logs and browser history).
  */
 export function useWebSocket(onEvent: (event: WsEvent) => void, enabled = true): { connected: boolean } {
   const [connected, setConnected] = useState(false);
@@ -34,10 +35,31 @@ export function useWebSocket(onEvent: (event: WsEvent) => void, enabled = true):
     let attempt = 0;
     let closedByUs = false;
 
-    const connect = () => {
+    const connect = async () => {
       const token = localStorage.getItem("janus_token") || "";
+
+      // Exchange the session token for a single-use WS ticket (token stays in
+      // the Authorization header, never the URL).
+      let ticket = "";
+      try {
+        const res = await fetch("/api/ws/ticket", {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) {
+          scheduleReconnect();
+          return;
+        }
+        ticket = ((await res.json()) as { ticket?: string }).ticket || "";
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      // The effect may have been torn down while awaiting the ticket.
+      if (closedByUs) return;
+
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      const url = `${scheme}://${window.location.host}/api/ws?access_token=${encodeURIComponent(token)}`;
+      const url = `${scheme}://${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`;
 
       try {
         socket = new WebSocket(url);
