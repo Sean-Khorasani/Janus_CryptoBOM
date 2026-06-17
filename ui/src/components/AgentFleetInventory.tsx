@@ -291,6 +291,7 @@ export function AgentFleetInventory() {
             <div><dt className="font-semibold">Network</dt><dd>{selected.observed_ip || "unknown"} / {selected.dns_name || "unknown"}</dd></div>
             <div><dt className="font-semibold">Registered</dt><dd>{new Date(selected.first_registered_at).toLocaleString()}</dd></div>
             <div><dt className="font-semibold">Current progress</dt><dd>{selected.status}: {selected.scan_progress}% {selected.current_scan_path}</dd></div>
+            <div><dt className="font-semibold">Files</dt><dd>{selected.total_files_scanned || 0} scanned{(selected.files_skipped ?? 0) > 0 ? ` · ${selected.files_skipped} unchanged skipped` : ""}</dd></div>
           </dl>
           {detailsStatus && <div className="my-3 rounded bg-[#edf1ea] p-3 text-xs dark:bg-[#22302a]" role="status">{detailsStatus}</div>}
           <h3 className="mt-5 font-semibold">Latest Scan Findings</h3>
