@@ -3414,6 +3414,17 @@ FROM wave_plans`+where+` ORDER BY wave_number, created_at`, args...)
 		_ = json.Unmarshal(assetIDs, &wp.AssetIDs)
 		_ = json.Unmarshal(algTargets, &wp.AlgorithmTargets)
 		_ = json.Unmarshal(dependsOn, &wp.DependsOn)
+		// Serialize empty list fields as [] not null so clients can map/.length them
+		// safely (a plan created with no assets/targets otherwise crashes the UI).
+		if wp.AssetIDs == nil {
+			wp.AssetIDs = []string{}
+		}
+		if wp.AlgorithmTargets == nil {
+			wp.AlgorithmTargets = []string{}
+		}
+		if wp.DependsOn == nil {
+			wp.DependsOn = []string{}
+		}
 		plans = append(plans, wp)
 	}
 	return plans, rows.Err()
