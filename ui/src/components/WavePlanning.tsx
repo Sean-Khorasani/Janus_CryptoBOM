@@ -753,7 +753,7 @@ export function WavePlanning() {
               <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-[#dfe5dc] pt-3 dark:border-[#2a3a30]">
                 <span className="text-xs text-[#697469] dark:text-[#8fa991]">
                   <span className="font-medium text-[#4d594f] dark:text-[#8fa991]">Assets:</span>{" "}
-                  {plan.asset_ids.length}
+                  {(plan.asset_ids ?? []).length}
                 </span>
 
                 {(plan.start_date || plan.target_date) && (
@@ -775,10 +775,10 @@ export function WavePlanning() {
                 </span>
               </div>
 
-              {plan.algorithm_targets.length > 0 && (
+              {(plan.algorithm_targets ?? []).length > 0 && (
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <span className="text-xs font-medium text-[#697469] dark:text-[#8fa991]">Targets:</span>
-                  {plan.algorithm_targets.map((algo) => (
+                  {(plan.algorithm_targets ?? []).map((algo) => (
                     <AlgoChip key={algo} label={algo} />
                   ))}
                 </div>
