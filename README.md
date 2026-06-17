@@ -2,21 +2,24 @@
 
 Janus CryptoBOM is an enterprise post-quantum cryptographic posture management (PQC-PM), discovery, and automated migration platform. It enables organizations to discover legacy cryptographic vulnerabilities, assess quantum readiness, align with emerging standards, and orchestrate safe, automated migrations to Post-Quantum Cryptography (PQC).
 
+> **New here?** Jump to [Getting Started](#getting-started), then follow [`docs/QUICKSTART.md`](docs/QUICKSTART.md). For the full picture, see the [Documentation](#documentation) index. The canonical release version is tracked in [`VERSION.env`](VERSION.env).
+
 ---
 
 ## Table of Contents
 - [Executive Briefing: The Post-Quantum Business Risk](#executive-briefing-the-post-quantum-business-risk)
 - [The Janus Value Proposition](#the-janus-value-proposition)
-- [Enterprise Dashboard Previews](#enterprise-dashboard-previews)
+- [Enterprise Dashboard](#enterprise-dashboard)
 - [Direct Comparison Matrix](#direct-comparison-matrix)
 - [Competitive Analysis & Strategic Roadmap](#competitive-analysis--strategic-roadmap)
 - [Platform Architecture](#platform-architecture)
-- [Building from Source](#building-from-source)
-- [Quickstart & Running Instructions](#quickstart--running-instructions)
+- [Getting Started](#getting-started)
 - [Safety Model & Security Controls](#safety-model--security-controls)
-- [Platform Support & Windows Coverage](#platform-support--windows-coverage)
+- [Platform Support](#platform-support)
 - [Observability & Real-Time Updates](#observability--real-time-updates)
-- [API Reference](#api-reference)
+- [API & Integration](#api--integration)
+- [Capability Maturity](#capability-maturity)
+- [Documentation](#documentation)
 - [License](#license)
 
 ---
@@ -45,22 +48,30 @@ Janus supports both NIST PQC 2026.1 and CNSA 2.0 compliance profiles, with CNSA-
 1. **Post-Quantum Cryptographic Posture Management (PQC-PM)**: Complete visibility across codebases, compiled binaries, OS trust stores, network protocol suites, and process memory footprints.
 2. **Context-Aware Semantic Intent Analysis**: AST-based semantic analysis distinguishes active cryptographic protection from legacy verification-only paths, reducing SOC alert fatigue. Optional LLM-powered intent classification provides higher confidence.
 
-   > **Experimental (not production-ready):** LLM intent classification requires a separately configured OpenAI-compatible provider (`JANUS_LLM_API_KEY` / `JANUS_LLM_API_URL`). When no provider is configured the agent falls back to offline heuristics only. LLM-generated results are proposals requiring human review and must not be used as the sole basis for production remediation decisions.
+   > **Experimental (not production-ready):** LLM intent classification requires a separately configured OpenAI-compatible provider (`JANUS_LLM_BASE_URL`, with the API key supplied via `JANUS_LLM_API_KEY_ENV` or `JANUS_LLM_API_KEY_FILE`). When no provider is configured the agent falls back to offline heuristics only. LLM-generated results are proposals requiring human review and must not be used as the sole basis for production remediation decisions. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §8 *LLM capability & safety contract*.
 3. **Automated Sandboxed Migration**: Signed, atomic migration directives with automated backup, validation, reload, TLS verification, and rollback.
 
 ---
 
-## Enterprise Dashboard Previews
+## Enterprise Dashboard
 
-### Centralized CISO Fleet Safety Dashboard
-Real-time posture reporting with aggregated Fleet Safety Scores, active monitored assets, real-time cryptographic vulnerability alerts, and overall NIST FIPS / CNSA compliance index.
+The React dashboard is the operator's control plane — a real-time, light/dark-themeable SPA over the server's REST + WebSocket API. It opens on an **Overview** that aggregates the fleet's Safety Score, tracked assets, CBOM component count, critical findings, certificate health, and per-agent status, and maps host → component → algorithm relationships in an interactive crypto-exposure graph. Nine tabs cover the full workflow: Overview, CBOM, Compliance Matrix, Policy Studio, Migrations, Fleet Command, Agility, Wave Plans, and LLM Analysis.
 
-![Centralized CISO Fleet Safety Dashboard](docs/images/dashboard_preview_1780620392773.png)
+A tab-by-tab walkthrough with role permissions is in [`docs/GUIDE.md`](docs/GUIDE.md) §5 *Roles & user manual*. The screenshots below are from a live `0.14.0` instance; to refresh them after UI/data changes, follow [`docs/images/CAPTURE.md`](docs/images/CAPTURE.md).
 
-### Interactive Crypto Exposure Graph & Live Scan Status
-Interactive Crypto Exposure Graph maps host-to-host and component-to-component cryptographic dependencies. Below the graph, the active scanning status banner displays client-side telemetry throughput and queue status.
+### Interactive Crypto Exposure Graph
+Maps host → component → algorithm relationships, with nodes colored by severity (Critical / High / Medium / Compliant). Click to highlight a node's connections; drag to recustomize the layout.
 
-![Interactive Crypto Exposure Graph & Live Scan Status](docs/images/dashboard_preview_1780512832245.png)
+![Janus interactive crypto-exposure graph: hosts linked to discovered components and the cryptographic algorithms they use, color-coded by severity](docs/images/crypto-graph-dark.png)
+
+### Overview — fleet posture at a glance
+![Janus Overview dashboard: Safety Score, tracked assets, CBOM components, critical findings, certificate health, and agent status](docs/images/dashboard-overview-dark.png)
+
+### CBOM — asset inventory & cryptographic bill of materials
+![Janus CBOM tab: per-host asset inventory and the CBOM findings matrix of discovered cryptographic components](docs/images/dashboard-cbom-dark.png)
+
+### LLM Analysis — optional AI triage with usage & cost tracking
+![Janus LLM Analysis tab: provider status, per-model usage and cost, and completed analysis jobs](docs/images/dashboard-llm-dark.png)
 
 ---
 
@@ -81,7 +92,7 @@ Interactive Crypto Exposure Graph maps host-to-host and component-to-component c
 
 ## Competitive Analysis & Strategic Roadmap
 
-A comprehensive competitive analysis of 10 enterprise PQC platforms (SandboxAQ, Keyfactor, IBM, Thales, PQShield, QuSecure, Crypto4A, DigiCert, Entrust, ISARA/Cisco) plus open-source alternatives is maintained in **[docs/competitive-analysis.md](docs/competitive-analysis.md)**.
+Janus is compared against 10 enterprise PQC platforms (SandboxAQ, Keyfactor, IBM, Thales, PQShield, QuSecure, Crypto4A, DigiCert, Entrust, ISARA/Cisco) plus open-source alternatives — see the Direct Comparison Matrix above.
 
 Key findings:
 - **Janus has the broadest discovery surface** (7 modalities vs. max 4 for competitors)
@@ -101,301 +112,73 @@ Janus CryptoBOM is divided into four main layers connected via a single protobuf
 - **Rust Endpoint Agent (`agent/`)**: High-performance daemon running on Windows, Linux, and macOS. Executes scheduled passive scans (source, binary, dependency, runtime memory, Windows registry, plugin), generates CycloneDX v1.6 CBOM outputs, enforces resource limits on plugins via cgroups/Job objects, and executes signed active mutation instructions with atomic rollback.
 - **Protobuf Contracts (`proto/janus.proto`)**: Canonical definitions of the bidirectional streaming gRPC protocol linking agents to the server, with cryptographically signed directives for secure control transactions.
 
-### Internal Server Packages
-| Package | Purpose |
-|---|---|
-| `server/internal/config/` | Environment-based configuration with validation |
-| `server/internal/store/` | PostgreSQL persistence with versioned schema migrations, connection pooling |
-| `server/internal/grpcserver/` | gRPC handler for agent telemetry and webhook dispatch |
-| `server/internal/httpapi/` | REST API with JWT auth, CORS control, paginated endpoints |
-| `server/internal/policy/` | Policy engine with NIST/CNSA profiles, OSV.dev vulnerability queries |
-| `server/internal/orchestrator/` | HMAC-signed migration command queuing |
-| `server/internal/certmanager/` | PQC CSR generation (ML-DSA, SLH-DSA, hybrid) |
-| `server/internal/pb/` | Generated protobuf types |
-| `server/internal/ws/` | WebSocket hub for real-time dashboard updates |
-
-### Agent Module Layout
-| Module | Purpose |
-|---|---|
-| `agent/src/main.rs` | CLI entry with `--once`, daemon, and `check` subcommand |
-| `agent/src/config.rs` | TOML-based configuration with plugin manifest loading |
-| `agent/src/discovery/source.rs` | Static source analysis with comment/string stripping, LLM intent classification (experimental — requires configured provider) |
-| `agent/src/discovery/binary.rs` | PE/ELF/Mach-O import/export symbol scanning |
-| `agent/src/discovery/dependency.rs` | Package manifest parsing (npm, Go, Python, Rust, Maven) |
-| `agent/src/discovery/network.rs` | TLS handshake probing (SMTP/LDAP/PgSQL/MySQL STARTTLS) |
-| `agent/src/discovery/runtime.rs` | Process memory scanning (Windows + Linux private key detection) |
-| `agent/src/discovery/windows.rs` | Windows cert store, Schannel, CNG, GPO, HTTP.sys inspection |
-| `agent/src/discovery/plugin.rs` | External plugin execution with resource limits |
-| `agent/src/comms.rs` | gRPC telemetry streaming + HTTP heartbeat with shutdown signal |
-| `agent/src/mutation.rs` | Active migration engine with HMAC verification, atomic rollback |
-| `agent/src/storage.rs` | SQLite offline store with DPAPI (Windows) / AES-CTR (Linux) encryption |
-| `agent/src/policy.rs` | Offline policy assessment for `check` subcommand |
-| `agent/src/interceptor.rs` | OpenSSL function hooking cdylib for DLL injection |
+A per-package breakdown of the server (`config`, `store`, `grpcserver`, `httpapi`, `policy`, `orchestrator`, `certmanager`, `ws`, …) and a module-by-module map of the agent (`discovery/*`, `comms`, `mutation`, `storage`, `interceptor`, …) are maintained in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §1 *System architecture*, alongside the agent–server protocol (§2) and data model (§3).
 
 ---
 
-## Building from Source
+## Getting Started
 
-### Prerequisites
-- **Go 1.21+** (for building the server)
-- **Rust & Cargo** (for building the agent)
-- **Node.js v18+ & npm** (for building the dashboard)
-- **MSBuild** or **make** (based on operating system)
+Janus ships three supported deployment paths — **Docker Compose**, **portable bundles** (copy-and-run, no toolchain), and **native/local install** (build from source) — plus a server-less **CI gate** that runs the agent's `check` subcommand against a codebase. The control plane needs a PostgreSQL database and a `JANUS_COMMAND_SIGNING_KEY` (32-byte hex, no default — generate with `janus-server gen-hmac-key`, no external tools); the agent runs passive-only until explicitly switched to active mode.
 
-### Windows Build (via MSBuild)
-From a Visual Studio 2022 Developer PowerShell or Developer Command Prompt:
-
-1. **Standard Build** (bootstraps portable Go and Rust toolchains locally):
-   ```powershell
-   msbuild JanusCryptoBOM.msbuild.proj /t:Build
-   ```
-2. **System Toolchain Build** (uses system-installed Go, Rust, npm):
-   ```powershell
-   msbuild JanusCryptoBOM.msbuild.proj /t:BuildNoTools
-   ```
-
-Built binaries: `bin/janus-server.exe`, `bin/janus-agent.exe`, `bin/janus_interceptor.dll`, `bin/janus-cli.exe`. Static frontend: `ui/dist`.
-
-End-to-end testing:
-```powershell
-.\scripts\test-e2e-windows.ps1 -SkipBuild
-```
-
-### Linux & macOS Build (via Makefile)
-```bash
-make test       # Build everything (UI + Server + Agent)
-make ui         # npm install && npm run build
-make server     # go mod tidy && go test ./... && go build
-make agent      # cargo test && cargo build --release
-```
-
----
-
-## Quickstart & Running Instructions
-
-### 1. Database Setup (PostgreSQL)
-
-#### Option A: Local Setup
-```sql
-CREATE ROLE janus WITH LOGIN PASSWORD 'janus';
-CREATE DATABASE janus OWNER janus;
-GRANT ALL PRIVILEGES ON DATABASE janus TO janus;
-```
-Ensure `pg_hba.conf` allows password authentication from localhost.
-
-#### Option B: Docker
-```bash
-docker compose -f docker-compose.yml up -d postgres
-```
-
-### 2. Launching the Go Server
-
-**Required environment variables:**
-```powershell
-$env:JANUS_DATABASE_URL="postgres://janus:janus@127.0.0.1:5432/janus?sslmode=disable"
-$env:JANUS_GRPC_ADDR="127.0.0.1:9443"
-$env:JANUS_HTTP_ADDR="127.0.0.脸上:8080"
-$env:JANUS_COMMAND_SIGNING_KEY="<32-byte-random-hex-key>"
-```
-
-**Optional configuration:**
-```powershell
-# Logging
-$env:JANUS_LOG_LEVEL="debug"            # info, debug, warn, error
-
-# Database pool
-$env:JANUS_DB_MAX_CONNS=25
-$env:JANUS_DB_MIN_CONNS=5
-
-# CORS
-$env:JANUS_CORS_ORIGIN="https://dashboard.example.com"
-
-# TLS/mTLS
-$env:JANUS_TLS_CERT_FILE="./certs/server.crt"
-$env:JANUS_TLS_KEY_FILE="./certs/server.key"
-$env:JANUS_CLIENT_CA_FILE="./certs/ca.crt"
-
-# Auth
-$env:JANUS_DISABLE_AUTH="false"
-
-# Agent stall detection
-$env:JANUS_AGENT_STALL_SECONDS=300
-
-# LLM integration (experimental — not required for core operation)
-# Enables optional intent classification in the agent and the /api/llm/proxy endpoint.
-# Results are proposals; require human review before acting on them.
-$env:JANUS_LLM_API_KEY="sk-..."
-$env:JANUS_LLM_API_URL="https://api.openai.com/v1"
-
-# Run
-.\bin\janus-server.exe
-```
-
-**Important:** `JANUS_COMMAND_SIGNING_KEY` has no default fallback — the server will refuse to start if unset. Generate with `openssl rand -hex 32`.
-
-### 3. Deploying the Rust Agent
-
-1. Copy and customize the configuration:
-   ```powershell
-   copy .\agent\janus-agent.example.toml .\janus-agent.toml
-   # Edit: set command_signing_key, controller_endpoint, scan_roots
-   ```
-2. Run a single scan (CI-friendly gate):
-   ```powershell
-   .\bin\janus-agent.exe check ./path/to/code    # exit 0 if clean, exit 1 with findings
-   ```
-3. Run one full scan cycle and sync:
-   ```powershell
-   .\bin\janus-agent.exe --once
-   ```
-4. Run as daemon (continuous monitoring):
-   ```powershell
-   .\bin\janus-agent.exe
-   ```
-5. Install as Windows service:
-   ```powershell
-   .\scripts\install-agent-windows-service.ps1 -Start
-   ```
-
-### 4. Running the Dashboard
-
-```bash
-cd ui
-npm install
-npm run dev        # Starts on http://127.0.0.1:5173, proxies API to :8080
-```
-Production build: `npm run build` → static output in `ui/dist/`.
+Pick a path and follow it end to end in [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — §0 *Prerequisites*, §A *Docker Compose*, §B *Portable bundles*, §C *Native / local install*, *Serving the dashboard*, and *Use Janus in CI*. For production deployment topologies, installation playbooks, and the complete settings/environment-variable reference, see [`docs/GUIDE.md`](docs/GUIDE.md) §2–§4. Building from source (MSBuild on Windows, `make` on Linux/macOS) is covered in [`docs/QUICKSTART.md`](docs/QUICKSTART.md) §C *Native / local install*.
 
 ---
 
 ## Safety Model & Security Controls
 
-1. **Explicit Opt-in**: Agent runs passive-only unless `execution_mode = "active"` in `janus-agent.toml`.
-2. **No Default Secrets**: `JANUS_COMMAND_SIGNING_KEY` is required at server startup (no fallback). Agent config also validates key presence.
-3. **Cryptographic Directives**: All active mutation commands are validated against the `signed_directive` field using HMAC-SHA256.
-4. **Sandbox Whitelisting**: Path traversal protection restricts config alterations to approved paths (`allowed_config_roots`) with file extension allowlisting.
-5. **Atomic Rollbacks**: Every migration executes inside a transaction: backup → write → validate → reload → TLS verify → auto-restore on failure.
-6. **Encrypted Storage**: Agent offline queue encrypted via Windows DPAPI or AES-CTR (Linux). LLM API keys encrypted at rest in PostgreSQL.
-7. **Webhook Resilience**: Critical finding webhook dispatch uses 3-retry exponential backoff with circuit breaker (5 consecutive failures → 60s cooldown).
-8. **Session Security**: JWT authentication with configurable expiry. CORS restricted to configured dashboard origin. Auth-disabled mode only for local development.
-9. **Plugin Sandboxing**: External plugins run with OS-enforced resource limits (cgroups v2 on Linux, Job objects on Windows).
+Active migration is **off by default**: the agent is passive-only until an operator sets active mode, and every mutation command must carry a valid HMAC-SHA256 `signed_directive`. The HMAC key can be held in an HSM (`JANUS_HSM_SIGN_COMMANDS`), and an optional asymmetric layer (`JANUS_COMMAND_SIG_SCHEME=ml-dsa`) has the server sign commands with **ML-DSA (FIPS 204)** while agents verify against an operator-pinned public-key fingerprint — so a compromised agent cannot forge commands, and stripping the signature is rejected (downgrade-resistant), and a configurable replay window rejects stale or future-dated commands. Configuration changes are sandboxed to operator-approved `allowed_config_roots` with a file-extension **allowlist**, applied atomically (backup → write → validate → reload → TLS verify → auto-restore on any failure), and protected against config drift via SHA-256 checksum comparison. Secrets never ship with defaults — `JANUS_COMMAND_SIGNING_KEY` is required at startup — and the agent's offline queue is encrypted at rest (DPAPI on Windows, authenticated AES-256-GCM on Linux). Dashboard sessions use JWT auth with origin-restricted CORS, and state-changing admin actions require operator/admin (viewers are read-only); critical-finding webhooks dispatch through a retrying circuit breaker; and external plugins run under OS-enforced resource limits (cgroups v2 / Job objects).
+
+The full control list, trust boundaries, and adversary assumptions are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §9 *Security architecture & threat model*, with data handling in §10 *Privacy & data governance*. Vulnerability reporting and supported versions are in [`SECURITY.md`](SECURITY.md).
 
 ---
 
-## Platform Support & Windows Coverage
+## Platform Support
 
-Janus provides deep integrations for Microsoft Windows:
-- **Windows Certificate Stores**: Discovery using `certutil` and PowerShell bindings.
-- **Crypto Abstraction Parsing**: Active CNG and CryptoAPI (CAPI) provider mapping via `certutil -csplist`.
-- **HTTP.sys SSL Binding Sweeps**: Active HTTPS binding inspection via `netsh http show sslcert`.
-- **Schannel Registry Enforcements**: Parsing and updating `HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL`.
-- **DPAPI Data Shielding**: Windows Data Protection API for encrypting local configuration secrets and telemetry.
-- **Process Memory Scanning**: `ReadProcessMemory` for unencrypted private key detection in running processes.
+Janus runs on Windows, Linux, and macOS, with the deepest integrations on Windows — certificate stores (`certutil` / PowerShell), CNG and CryptoAPI (CAPI) provider mapping, HTTP.sys SSL binding sweeps (`netsh http show sslcert`), Schannel registry enforcement, DPAPI secret shielding, and process-memory private-key detection via `ReadProcessMemory`. On Linux, memory scanning uses `/proc/PID/maps` + `/proc/PID/mem`, encryption keys derive from machine identity, and plugins are constrained with cgroups v2.
 
-Linux coverage:
-- `/proc/PID/maps`-based memory region enumeration
-- `/proc/PID/mem` reading via `pread` for PEM private key detection
-- `/etc/machine-id`-based encryption key derivation
-- cgroups v2 resource limits for plugin execution
+The per-platform support matrix — including which discovery modules require elevation and which are Windows-only — is in [`docs/GUIDE.md`](docs/GUIDE.md) §6 *Platform support*.
 
 ---
 
 ## Observability & Real-Time Updates
 
-### Structured Logging
-- **Server**: `log/slog` with JSON handler. Configurable via `JANUS_LOG_LEVEL` (debug, info, warn, error).
-- **Agent**: `tracing` crate with JSON output. Configurable via `RUST_LOG` env.
-- **SIEM Export**: `/api/export/siem` endpoint streams compliance findings as JSON lines.
-- **Prometheus Metrics**: `/metrics` endpoint exposes asset/finding/migration gauges.
+The server emits structured JSON logs (`log/slog`, level via `JANUS_LOG_LEVEL`) and the agent logs via the `tracing` crate (`RUST_LOG`). Operational signals include a Prometheus `/metrics` endpoint (asset/finding/migration gauges, optionally bearer-token protected), a JSON-lines SIEM export at `/api/export/siem`, agent HTTP heartbeats every 5 seconds (scan progress, CPU, memory, phase) with stalled-agent detection, and a dashboard WebSocket at `/api/ws` that streams `telemetry_update`, `finding_status`, `migration_enqueued` / `migration_status`, and `policy_switched` events.
 
-### WebSocket Real-Time Updates
-The dashboard maintains a persistent WebSocket connection at `/api/ws` receiving events for:
-- `telemetry_update` — new scan data ingested
-- `finding_status` — operator triage actions
-- `migration_enqueued` / `migration_status` — migration lifecycle
-- `policy_switched` — active compliance profile changes
-
-### Agent Health Monitoring
-- HTTP heartbeat every 5 seconds reports scan progress, CPU, memory, and current phase.
-- Server detects stalled agents (no heartbeat in configurable interval, default 300s) and exposes count in `/api/overview`.
-- Diagnostics logs streamed from agent to server with auto-clear after successful upload.
+Metrics, dashboards, log fields, and routine maintenance (retention, VACUUM, backups) are detailed in [`docs/GUIDE.md`](docs/GUIDE.md) §13 *Observability & maintenance*.
 
 ---
 
-## API Reference
+## API & Integration
 
-### Authentication
-All dashboard endpoints require `Authorization: Bearer <jwt>` header. Obtain tokens via `POST /api/auth/login`.
+The Go server exposes a JSON REST API (JWT bearer auth, obtained via `POST /api/auth/login`) plus a WebSocket event stream, covering fleet inventory, findings triage, policy management, migration orchestration, wave planning, crypto-agility scoring, exports (CycloneDX 1.6, SARIF 2.1.0, CSV, SIEM), and agent ingest. The protobuf contract for agent↔server streaming lives in [`proto/janus.proto`](proto/janus.proto).
 
-### Core Endpoints
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/health` | Database connectivity check |
-| GET | `/api/overview` | Aggregated fleet stats (assets, findings, stalled agents, algorithm histogram) |
-| GET | `/api/assets` | All registered agents with heartbeat telemetry |
-| GET | `/api/components` | Paginated CBOM component catalog (`?limit=&offset=&search=&sort=`) |
-| GET | `/api/findings` | Paginated crypto findings with status (`?limit=&offset=&search=&sort=&order=`) |
-| PUT | `/api/findings/{id}/status` | Update finding status (open, accepted_risk, false_positive, remediated) |
-| GET | `/api/findings/{id}/timeline` | Ordered lifecycle event history for a finding |
-| GET | `/api/hosts/{uuid}/findings` | All findings scoped to a specific host UUID |
-| GET | `/api/migrations` | Migration transaction history |
-| POST | `/api/migrations/enqueue` | Enqueue a migration command (operator/admin role) |
-| POST | `/api/migrations/simulate` | Dry-run migration simulation with compatibility analysis |
-| GET/POST | `/api/policies` | List policies / create custom profile |
-| POST | `/api/policies/active` | Switch active compliance profile |
-| GET | `/api/policy/rules` | Versioned control pack (12 PQC/CNSA rules with framework mappings) |
-| GET | `/api/policy/rules/{id}` | Single control rule by ID (e.g. JANUS-PQC-001) |
-| GET/POST | `/api/waves` | Migration wave plans (CRUD) |
-| GET | `/api/agility/scorecard` | Per-host crypto agility scores (6 dimensions) |
-| POST | `/api/agility/exercise` | Dry-run agility assessment across fleet |
-| GET | `/api/sla/metrics` | SLA metrics including real cert health (expired/expiring counts) |
-| GET | `/api/admin/release-check` | Release readiness check (admin role) |
-| GET/POST | `/api/fleet/config` | Global fleet configuration |
-| GET/POST/DELETE | `/api/fleet/profiles` | Configuration profile CRUD |
-| GET/POST | `/api/fleet/profiles/mapping` | Agent-to-profile mappings |
-| GET/POST | `/api/webhooks` | SIEM webhook URL management |
-| GET/POST | `/api/retention` | Data retention policy + manual purge |
-| GET | `/api/audit-logs` | Operator audit trail |
-| GET/POST | `/api/agent/diagnostics` | Agent diagnostic log retrieval |
-| POST | `/api/agent/heartbeat` | Agent heartbeat telemetry |
-| POST | `/api/auth/login` | JWT token issuance |
-| POST | `/api/certificates/csr` | PQC certificate signing request generation |
-| POST | `/api/llm/proxy` | LLM API proxy for agent-side intent classification (experimental — forwards to configured provider; no structured output or evidence citation) |
-| GET | `/api/export/cyclonedx` | CycloneDX v1.6 CBOM export |
-| GET | `/api/export/csv` | CSV findings export |
-| GET | `/api/export/sarif` | SARIF v2.1.0 findings export |
-| GET | `/api/export/siem` | JSON-lines SIEM export |
-| GET | `/metrics` | Prometheus metrics endpoint |
-| WS | `/api/ws` | WebSocket real-time event stream |
+The complete endpoint catalog — methods, paths, roles, request/response shapes, and `curl` examples — is in [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) (see *Authentication* and *Conventions* first, then the per-area sections). REST design notes and the data model are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §4 *HTTP REST API*. To extend discovery with your own scanners, see [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md).
 
 ---
 
 ## Capability Maturity
 
-Features are classified by operational maturity. Do not use `experimental` or lower features for production remediation decisions without manual review.
+Janus is honest about feature maturity: most **discovery** capabilities (source, binary, dependency, network/PKI, Windows cert-store, process-memory, CBOM/SARIF export, control pack) are **Experimental**, and the **orchestration** capabilities (wave planning, agility scorecard, LLM analysis, sandbox simulation, active migration, HSM/PKCS#11) are **Prototype**. Treat anything marked Experimental or Prototype as decision-support only — **do not** use it as the sole basis for autonomous production remediation without manual review.
 
-| Feature | Maturity | Notes |
-|---|---|---|
-| **Source crypto detection** (regex + comment stripping) | Experimental | Precision/recall measured; no AST flow analysis yet |
-| **Binary import/export scanning** | Experimental | Import table only; no disassembly |
-| **Dependency manifest scanning** | Experimental | npm/go/cargo/pip/maven; no transitive graph |
-| **TLS/PKI network probing** | Experimental | 9 assessment categories; no live OCSP/CRL |
-| **Windows cert-store scanning** | Experimental | certutil/CNG/SChannel/CAPI; Windows agent only |
-| **Process memory scanning** | Experimental | Linux `/proc/mem`; Windows `ReadProcessMemory`; elevated privilege required |
-| **CycloneDX 1.6 CBOM export** | Experimental | cryptoProperties included; schema validation pending |
-| **SARIF 2.1.0 export** | Experimental | Source locations and rules list included |
-| **Versioned compliance control pack** | Experimental | 12 JANUS-PQC/CNSA rules; exception workflow pending |
-| **Migration wave planning** | Prototype | CRUD + state machine; dependency graph pending |
-| **Crypto agility scorecard** | Prototype | 6 dimensions; no live negotiation tests |
-| **LLM finding analysis** | Prototype | Async job queue with provenance; provider config required; **not for autonomous remediation** |
-| **Sandbox migration simulation** | Prototype | Compatibility analysis + dependency hints; no compiler-aware transforms |
-| **Active migration execution** | Prototype | HMAC-signed, atomic, rollback-tested; requires explicit operator enablement |
-| **HSM/PKCS#11 key operations** | Prototype | SoftHSM2 via syscall; production HSM wiring pending |
+The full maturity table with per-feature caveats and graduation criteria is in [`docs/GUIDE.md`](docs/GUIDE.md) §9 *Capability maturity framework*.
 
-Full maturity definitions and per-dimension breakdowns: [`docs/CAPABILITY_MATURITY.md`](docs/CAPABILITY_MATURITY.md).  
-Security policy and supported versions: [`SECURITY.md`](SECURITY.md).  
-Support tiers and deprecation policy: [`SUPPORT.md`](SUPPORT.md).  
-Privacy and data governance: [`docs/PRIVACY_DATA_GOVERNANCE.md`](docs/PRIVACY_DATA_GOVERNANCE.md).
+---
+
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Get running in minutes — Docker / portable / native, dashboard serving, CI usage, troubleshooting |
+| [`docs/GUIDE.md`](docs/GUIDE.md) | Complete operator guide — deployment topologies, installation playbooks, settings reference, roles, platform support, HSM, capability maturity, wave planning, observability & maintenance, versioning |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Architecture & technical reference — system design, agent–server protocol, data model, REST API, policy engine, network/PKI assessment, migration matrix, LLM safety contract, threat model, privacy |
+| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Full HTTP/WS API catalog with examples |
+| [`docs/openapi.yaml`](docs/openapi.yaml) | Machine-readable OpenAPI 3.0 spec (Swagger UI / Postman / codegen) |
+| [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md) | Writing, configuring, and testing agent discovery plugins |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Runbook — common startup/auth/agent/migration/HSM/build errors and fixes |
+| [`SECURITY.md`](SECURITY.md) | Security policy, supported versions, vulnerability reporting |
+| [`SUPPORT.md`](SUPPORT.md) | Support tiers and deprecation policy |
+
+The canonical release version is defined in [`VERSION.env`](VERSION.env) and injected into binaries at build time.
 
 ---
 
