@@ -11,6 +11,7 @@ import { FleetManagement } from "./components/FleetManagement";
 import { LLMAnalysis } from "./components/LLMAnalysis";
 import { AgilityDashboard } from "./components/AgilityDashboard";
 import { WavePlanning } from "./components/WavePlanning";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SkipLink } from "./a11y/SkipLink";
 import { useI18n } from "./i18n";
 import { useToast } from "./hooks/useToast";
@@ -200,6 +201,20 @@ function App() {
           </div>
         )}
 
+        {/* First-run onboarding (UX-005): no agents have registered yet. */}
+        {!loading && !error && assets.length === 0 && (
+          <div className="mb-5 rounded-md border border-[#cfe3d4] bg-[#eef7f0] px-4 py-3 dark:border-[#2f6638] dark:bg-[#16281e]">
+            <h2 className="text-sm font-semibold text-[#17211c] dark:text-[#e8ede9]">Welcome to Janus — no agents are registered yet</h2>
+            <p className="mt-1 text-xs text-[#4d594f] dark:text-[#8fa991]">
+              Run an agent against a codebase to populate the dashboard. The agent registers automatically on first contact:
+            </p>
+            <code className="mt-2 inline-block rounded border border-[#cfe3d4] bg-white px-2.5 py-1 font-mono text-xs text-[#3a7d44] dark:border-[#2f6638] dark:bg-[#0d1210] dark:text-[#4ade80]">
+              janus-agent --config janus-agent.toml --once
+            </code>
+            <p className="mt-2 text-xs text-[#697469] dark:text-[#8fa991]">See <span className="font-medium">docs/QUICKSTART.md</span> for setup, credentials, and env vars.</p>
+          </div>
+        )}
+
         <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
           <nav className="inline-flex rounded-md border border-[#dfe5dc] bg-white p-1 dark:border-[#2a3a30] dark:bg-[#1a2620]" role="tablist" aria-label="Main navigation tabs">
             {tabs.map((t) => (
@@ -238,7 +253,7 @@ function App() {
             <span className="sr-only">{t("msg.loading")}</span>
           </div>
         ) : (
-          <>
+          <ErrorBoundary key={tab} label={tab}>
             {tab === "overview" && (
               <div role="tabpanel" id="tabpanel-overview" aria-labelledby="tab-overview">
                 <OverviewView
@@ -306,7 +321,7 @@ function App() {
                 <LLMAnalysis />
               </div>
             )}
-          </>
+          </ErrorBoundary>
         )}
       </section>}
     </main>
