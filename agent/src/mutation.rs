@@ -5,7 +5,6 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use diffy::{apply, Patch};
-use hmac::{Hmac, Mac};
 #[cfg(target_os = "windows")]
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -17,10 +16,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
 };
-use subtle::ConstantTimeEq;
 use tokio::process::Command;
-
-type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
 pub struct MutationEngine {
@@ -56,6 +52,9 @@ impl MutationEngine {
         }
         if !self.verify(cmd) {
             anyhow::bail!("migration command signature verification failed");
+        }
+        if let Some(reason) = self.command_too_old(cmd) {
+            anyhow::bail!("{reason}");
         }
         if !self
             .cfg
@@ -164,14 +163,71 @@ impl MutationEngine {
     }
 
     fn verify(&self, cmd: &MigrationCommand) -> bool {
-        let mut mac = HmacSha256::new_from_slice(self.cfg.command_signing_key.as_bytes())
-            .expect("HMAC accepts any key length");
-        mac.update(canonical_command(cmd).as_bytes());
-        let expected = hex::encode(mac.finalize().into_bytes());
-        expected
-            .as_bytes()
-            .ct_eq(cmd.signed_directive.as_slice())
-            .into()
+        let canonical = canonical_command(cmd);
+
+        // CA-chained command trust (WP-029 P3) takes precedence when a command Root CA is
+        // bundled: require a janus-sig-v2 envelope whose leaf cert chains to that root.
+        // Fail closed if the configured root can't be loaded (rejects rather than downgrading).
+        if let Some(path) = self
+            .cfg
+            .command_root_ca
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let root_der = match crate::command_cert::read_cert_der(path) {
+                Some(d) => d,
+                None => return false,
+            };
+            return crate::command_sig::verify_command_v2(
+                &cmd.signed_directive,
+                canonical.as_bytes(),
+                self.cfg.command_signing_key.as_bytes(),
+                &root_der,
+            );
+        }
+
+        // HMAC baseline (mandatory) + optional ML-DSA layer when the operator pinned the
+        // server's command-signing public-key fingerprint (command_pqc_fingerprint).
+        let fp = self.cfg.command_pqc_fingerprint.trim();
+        let pinned = if fp.is_empty() { None } else { Some(fp) };
+        crate::command_sig::verify_command(
+            &cmd.signed_directive,
+            canonical.as_bytes(),
+            self.cfg.command_signing_key.as_bytes(),
+            pinned,
+        )
+    }
+
+    /// Replay-window guard (REM-3): rejects a command whose `issued_at_unix` is older
+    /// than `max_command_age_seconds`, or more than that far in the future (clock skew /
+    /// forgery). Returns `Some(reason)` when the command should be rejected. A
+    /// `max_command_age_seconds` of 0 disables the check. The signature already
+    /// authenticates the command; this bounds how long a captured one stays usable.
+    fn command_too_old(&self, cmd: &MigrationCommand) -> Option<String> {
+        let max_age = self.cfg.max_command_age_seconds;
+        if max_age <= 0 {
+            return None;
+        }
+        if cmd.issued_at_unix <= 0 {
+            return Some(
+                "migration command has no issued_at_unix timestamp; rejecting (replay-window guard)"
+                    .to_string(),
+            );
+        }
+        let age = now() - cmd.issued_at_unix;
+        if age > max_age {
+            return Some(format!(
+                "migration command is {age}s old (max {max_age}s); rejecting as possible replay"
+            ));
+        }
+        if age < -max_age {
+            return Some(format!(
+                "migration command was issued {}s in the future (max skew {max_age}s); rejecting",
+                -age
+            ));
+        }
+        None
     }
 
     fn checked_config_path(&self, raw: &str) -> Result<PathBuf> {
@@ -180,18 +236,38 @@ impl MutationEngine {
             .canonicalize()
             .with_context(|| format!("canonicalize {raw}"))?;
 
-        if let Some(ext) = canonical.extension().and_then(|s| s.to_str()) {
-            let ext_lower = ext.to_ascii_lowercase();
-            if [
-                "exe", "dll", "bat", "sh", "cmd", "bin", "msi", "com", "vbs", "ps1",
-            ]
-            .contains(&ext_lower.as_str())
-            {
-                anyhow::bail!(
-                    "mutation blocked: target file extension '.{}' is restricted",
-                    ext
-                );
-            }
+        // Allowlist, not blocklist (SEC): only known configuration file types may
+        // be mutated. A blocklist silently permitted scripts/units with no
+        // extension (e.g. ~/.bashrc) or unlisted dangerous types. The allowed
+        // extensions cover the supported services (nginx/apache/ssh) plus common
+        // config formats; ALLOWED_NO_EXT_NAMES covers config files that
+        // legitimately have no extension (OpenSSH's sshd_config/ssh_config).
+        const ALLOWED_EXTENSIONS: &[&str] = &[
+            "conf",
+            "config",
+            "cnf",
+            "json",
+            "toml",
+            "yaml",
+            "yml",
+            "xml",
+            "ini",
+            "properties",
+        ];
+        const ALLOWED_NO_EXT_NAMES: &[&str] = &["sshd_config", "ssh_config"];
+        let permitted = match canonical.extension().and_then(|s| s.to_str()) {
+            Some(ext) => ALLOWED_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+            None => canonical
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|name| ALLOWED_NO_EXT_NAMES.contains(&name))
+                .unwrap_or(false),
+        };
+        if !permitted {
+            anyhow::bail!(
+                "mutation blocked: target {} is not an allowed configuration file type",
+                canonical.display()
+            );
         }
 
         for root in &self.cfg.active.allowed_config_roots {
@@ -1014,6 +1090,9 @@ mod tests {
         let cfg = AgentConfig {
             execution_mode: "active".to_string(),
             command_signing_key: "test-signing-key-long-enough".to_string(),
+            // Existing tests use placeholder issued_at_unix; disable the replay window
+            // here and exercise it explicitly in command_too_old_* tests.
+            max_command_age_seconds: 0,
             active: crate::config::ActiveConfig {
                 allowed_services: vec![service.to_string()],
                 allowed_config_roots: vec![dir.0.display().to_string()],
@@ -1049,6 +1128,41 @@ mod tests {
         mac.update(canonical_command(&cmd).as_bytes());
         cmd.signed_directive = hex::encode(mac.finalize().into_bytes()).into_bytes();
         cmd
+    }
+
+    #[test]
+    fn command_too_old_flags_stale_future_and_respects_disable() {
+        let dir = TestDir::new();
+        let mut engine = active_engine(&dir, "nginx");
+        engine.cfg.max_command_age_seconds = 300;
+        let target = dir.0.join("service.conf");
+        fs::write(&target, "x").expect("write target");
+        let mut cmd = signed_command(&engine, "nginx", &target);
+
+        cmd.issued_at_unix = super::now();
+        assert!(
+            engine.command_too_old(&cmd).is_none(),
+            "fresh command accepted"
+        );
+
+        cmd.issued_at_unix = 1; // 1970 — well outside the window
+        assert!(
+            engine.command_too_old(&cmd).is_some(),
+            "stale command rejected"
+        );
+
+        cmd.issued_at_unix = super::now() + 10_000; // far future
+        assert!(
+            engine.command_too_old(&cmd).is_some(),
+            "future command rejected"
+        );
+
+        cmd.issued_at_unix = 1;
+        engine.cfg.max_command_age_seconds = 0; // disabled
+        assert!(
+            engine.command_too_old(&cmd).is_none(),
+            "window disabled accepts anything"
+        );
     }
 
     #[cfg(unix)]
