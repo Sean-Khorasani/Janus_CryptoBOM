@@ -59,7 +59,7 @@ export function AgentFleetInventory() {
     fetch(`/api/assets?${query}`, { headers: headers(), signal: controller.signal })
       .then(async response => {
         setTotal(Number(response.headers.get("X-Total-Count") || "0"));
-        setAgents(response.ok ? await response.json() : []);
+        setAgents(response.ok ? (await response.json()) || [] : []);
       })
       .catch(() => {});
     return () => controller.abort();
