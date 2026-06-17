@@ -49,3 +49,20 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_JobObjects",
 ] }
+fips204 = "0.4.6"
+# Structural X.509/DER parsing for ML-DSA command-cert verification (WP-029 P3). The cert
+# signature itself is verified with fips204 (ML-DSA), which no X.509 crate supports; this only
+# parses the structure (raw TBS bytes, SPKI, issuer/subject, validity).
+x509-parser = "0.16"
+# Online OCSP revocation checking for discovered TLS endpoints (FEAT-OCSP / WP-016). The
+# responder-signature verification x509-ocsp does NOT do is implemented on top with `ring`.
+x509-cert = { version = "0.2", features = ["pem"] }
+x509-ocsp = { version = "0.2", features = ["builder"] }
+der = "0.7"
+const-oid = { version = "0.9", features = ["db"] }
+sha1 = { version = "0.10", features = ["oid"] }
+# RFC 3339 timestamps for CycloneDX/SARIF exports (WP-021 standards compliance).
+time = { version = "0.3", features = ["formatting"] }
+# Pure-Rust x86/x64 static disassembler for binary-analysis evidence (LLM-007). Static byte
+# decoding only — no execution, so no sandbox is required.
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "nasm"] }
