@@ -17,7 +17,7 @@ import (
 func TestCSREndpointRequiresAuth(t *testing.T) {
 	secret := []byte("test-signing-key-aaaaaaaaaaaaaaaa")
 	reached := false
-	guarded := AuthMiddleware(secret, false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	guarded := AuthMiddleware(secret, secret, false, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true
 		w.WriteHeader(http.StatusOK)
 	}))
