@@ -1,10 +1,15 @@
 package httpapi
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,13 +28,13 @@ func (a *API) complianceReport(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	overview, err := a.store.Overview(r.Context())
+	overview, err := a.store.Overview(r.Context(), TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	assets, _ := a.store.Assets(r.Context())
-	findings, _ := a.store.Findings(r.Context(), 500)
+	assets, _ := a.store.Assets(r.Context(), TenantFromContext(r.Context()))
+	findings, _ := a.store.Findings(r.Context(), 500, TenantFromContext(r.Context()))
 	profile := a.engine.GetActiveProfile()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -160,13 +165,14 @@ func (a *API) slaMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	overview, err := a.store.Overview(ctx)
+	tenant := TenantFromContext(ctx)
+	overview, err := a.store.Overview(ctx, tenant)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
-	migrations, err := a.store.Migrations(ctx)
+	migrations, err := a.store.Migrations(ctx, tenant)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -187,7 +193,7 @@ func (a *API) slaMetrics(w http.ResponseWriter, r *http.Request) {
 		successRatePct = &v
 	}
 
-	findings, _ := a.store.Findings(ctx, 10000)
+	findings, _ := a.store.Findings(ctx, 10000, tenant)
 	var critTotal, critResolved, highTotal, highResolved int
 	for _, f := range findings {
 		switch f.Severity {
@@ -211,6 +217,32 @@ func (a *API) slaMetrics(w http.ResponseWriter, r *http.Request) {
 	if highTotal > 0 {
 		v := float64(highResolved) * 100.0 / float64(highTotal)
 		highPct = &v
+	}
+
+	// SLA assignment breaches (UX-003): an assigned finding whose due_date has
+	// passed while it is not in a closed state is "breached". Computed from
+	// finding_assignments joined with current finding status.
+	closedStatuses := map[string]bool{
+		"remediated": true, "resolved": true, "accepted": true,
+		"accepted_risk": true, "false-positive": true, "false_positive": true,
+	}
+	statusByID := make(map[string]string, len(findings))
+	for _, f := range findings {
+		statusByID[f.FindingID] = f.Status
+	}
+	assignments, _ := a.store.ListFindingAssignments(ctx)
+	now := time.Now()
+	var assignedTotal, breached int
+	breachIDs := []string{}
+	for _, asn := range assignments {
+		if asn.AssignedTo == "" && asn.DueDate == nil {
+			continue
+		}
+		assignedTotal++
+		if asn.DueDate != nil && asn.DueDate.Before(now) && !closedStatuses[statusByID[asn.FindingID]] {
+			breached++
+			breachIDs = append(breachIDs, asn.FindingID)
+		}
 	}
 
 	certHealth, certErr := a.store.GetCertHealth(ctx)
@@ -247,26 +279,81 @@ func (a *API) slaMetrics(w http.ResponseWriter, r *http.Request) {
 			"high_resolved":           highResolved,
 			"high_remediated_pct":     highPct,
 		},
+		"sla_assignments": map[string]interface{}{
+			"assigned_total":     assignedTotal,
+			"breached":           breached,
+			"on_track":           assignedTotal - breached,
+			"breach_finding_ids": breachIDs,
+		},
 	})
 }
 
 // ---------------------------------------------------------------------------
 // Agent Auto-Upgrade Info (F12)
 // ---------------------------------------------------------------------------
+// signedUpdateManifest builds an authenticated version advisory (WP-018): a canonical JSON
+// string of the authoritative server/agent versions + a fresh timestamp, plus an HMAC over it
+// keyed by the command-signing key. An agent verifies it with command_sig::verify_blob_hmac,
+// so a MITM cannot spoof or downgrade the recommended version even independent of transport
+// security. Returns (manifest JSON, hex signature).
+func signedUpdateManifest(key []byte, nowUnix int64) (string, string) {
+	manifest, _ := json.Marshal(map[string]interface{}{
+		"server_version":         version.Version,
+		"agent_protocol_version": version.AgentProtocolVersion,
+		"recommended_version":    version.Version,
+		"signed_at_unix":         nowUnix,
+	})
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(manifest)
+	return string(manifest), hex.EncodeToString(mac.Sum(nil))
+}
+
 func (a *API) agentUpgradeInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	// Agent auto-upgrade distribution is not yet implemented. Return the
-	// server's own version so agents can compare protocol compatibility;
-	// omit fields that would require a signed update manifest.
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	// F12 version-compatibility advisory. Self-updating binary distribution is out of scope
+	// (it needs safe in-place swap); the advisory itself is now a SIGNED update manifest
+	// (WP-018) — the agent authenticates the server/recommended version with the command key
+	// (verify_blob_hmac), so the advisory cannot be spoofed or downgraded by a MITM.
+	manifest, manifestSig := signedUpdateManifest(a.cfg.CommandSigningKey, time.Now().Unix())
+	resp := map[string]interface{}{
 		"server_version":         version.Version,
 		"agent_protocol_version": version.AgentProtocolVersion,
 		"auto_upgrade_available": false,
-		"note":                   "Agent binary distribution not yet implemented. Deploy agents via your package manager or container image.",
-	})
+		"note":                   "Self-updating binary distribution is not enabled; deploy agents via your package manager, container image, or portable bundle.",
+		"signed_manifest":        manifest,
+		"manifest_signature":     manifestSig,
+	}
+	agentProto := strings.TrimSpace(r.URL.Query().Get("agent_protocol"))
+	agentVer := strings.TrimSpace(r.URL.Query().Get("agent_version"))
+	if agentProto != "" || agentVer != "" {
+		outdated := false
+		reason := ""
+		// Protocol is a monotonically increasing integer; lower means the agent is behind.
+		if agentProto != "" && agentProto != version.AgentProtocolVersion {
+			ai, e1 := strconv.Atoi(agentProto)
+			si, e2 := strconv.Atoi(version.AgentProtocolVersion)
+			switch {
+			case e1 == nil && e2 == nil && ai < si:
+				outdated = true
+				reason = fmt.Sprintf("agent protocol v%s is older than the server's v%s; upgrade the agent", agentProto, version.AgentProtocolVersion)
+			case e1 == nil && e2 == nil && ai > si:
+				reason = fmt.Sprintf("agent protocol v%s is newer than the server's v%s; upgrade the server", agentProto, version.AgentProtocolVersion)
+			}
+		}
+		if reason == "" && agentVer != "" && agentVer != version.Version {
+			reason = fmt.Sprintf("agent version %s differs from server %s", agentVer, version.Version)
+		}
+		resp["agent_outdated"] = outdated
+		resp["upgrade_recommended"] = outdated
+		resp["recommended_version"] = version.Version
+		if reason != "" {
+			resp["reason"] = reason
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -308,9 +395,23 @@ func RateLimit(maxPerMinute int, next http.Handler) http.Handler {
 	clients := make(map[string]*clientWindow)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Key by client IP, not ip:port — the ephemeral source port varies per
+		// connection and would otherwise let a single host bypass the limit.
 		key := r.RemoteAddr
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			key = host
+		}
 		mu.Lock()
 		now := time.Now()
+		// Bound memory: sweep expired windows when the table grows (the original
+		// implementation never evicted, leaking one entry per distinct client).
+		if len(clients) > 4096 {
+			for k, v := range clients {
+				if now.After(v.resetAt) {
+					delete(clients, k)
+				}
+			}
+		}
 		cw, ok := clients[key]
 		if !ok || now.After(cw.resetAt) {
 			cw = &clientWindow{resetAt: now.Add(1 * time.Minute)}
