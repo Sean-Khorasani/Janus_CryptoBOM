@@ -654,12 +654,17 @@ fn read_tlv(mut data: &[u8]) -> Vec<Element<'_>> {
             }
             (l, 2 + num_bytes)
         };
-        if data.len() < header_len + len {
+        // checked_add guards against a crafted long-form length wrapping usize,
+        // which would otherwise make the bounds check pass and panic on the slice.
+        let Some(end) = header_len.checked_add(len) else {
+            break;
+        };
+        if data.len() < end {
             break;
         }
-        let value = &data[header_len..header_len + len];
+        let value = &data[header_len..end];
         elements.push(Element { tag, value });
-        data = &data[header_len + len..];
+        data = &data[end..];
     }
     elements
 }
@@ -738,6 +743,11 @@ pub(crate) fn parse_x509_der(der: &[u8]) -> (String, String, i64, String) {
 
     fn parse_time(tag: u8, val: &[u8]) -> i64 {
         let s = String::from_utf8_lossy(val);
+        // ASN.1 time values are ASCII. Bail on anything else so the byte-index
+        // slices below cannot panic on a non-char-boundary from a crafted cert.
+        if !s.is_ascii() {
+            return 0;
+        }
         let format = if tag == 0x17 {
             let year_prefix = if s.len() >= 2 {
                 let yy: i32 = s[0..2].parse().unwrap_or(0);
