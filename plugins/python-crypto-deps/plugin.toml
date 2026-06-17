@@ -1,0 +1,6 @@
+name = "python-crypto-deps"
+command = "python3"
+args = ["-u", "plugins/python-crypto-deps/python_crypto_deps.py"]
+timeout_seconds = 20
+max_memory_mb = 256
+max_cpu_percent = 25
