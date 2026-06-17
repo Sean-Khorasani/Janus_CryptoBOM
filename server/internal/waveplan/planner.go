@@ -2,13 +2,14 @@
 //
 // Wave plans are planning artifacts — they group assets and algorithm targets into
 // sequenced migration batches. They do NOT drive automated execution.
-// See docs/WAVE_PLANNING_GUIDE.md for operator usage.
+// See docs/GUIDE.md §10 (migration wave planning) for operator usage.
 package waveplan
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,11 +34,13 @@ var ValidStatuses = map[string]bool{
 
 // Planner provides wave plan CRUD operations and basic validation.
 type Planner struct {
-	store store.Store
+	store  store.Store
+	tenant string // WP-020: scopes all reads/writes to this tenant ("" = fleet-wide)
 }
 
-func New(s store.Store) *Planner {
-	return &Planner{store: s}
+// New builds a Planner scoped to a tenant. Pass "" for fleet-wide (single-tenant) behavior.
+func New(s store.Store, tenant string) *Planner {
+	return &Planner{store: s, tenant: tenant}
 }
 
 // Create validates and persists a new wave plan.
@@ -49,7 +52,7 @@ func (p *Planner) Create(ctx context.Context, plan *store.WavePlan, createdBy st
 	// plan cannot form a cycle (existing plans cannot reference its new ID), so
 	// we only need to reject references to non-existent plans here.
 	if len(plan.DependsOn) > 0 {
-		existing, err := p.store.GetWavePlans(ctx)
+		existing, err := p.store.GetWavePlans(ctx, p.tenant)
 		if err != nil {
 			return err
 		}
@@ -68,12 +71,13 @@ func (p *Planner) Create(ctx context.Context, plan *store.WavePlan, createdBy st
 	plan.CreatedBy = createdBy
 	plan.CreatedAt = time.Now().UTC()
 	plan.UpdatedAt = plan.CreatedAt
+	plan.TenantID = p.tenant
 	return p.store.CreateWavePlan(ctx, plan)
 }
 
 // List returns all wave plans ordered by wave_number then created_at.
 func (p *Planner) List(ctx context.Context) ([]store.WavePlan, error) {
-	return p.store.GetWavePlans(ctx)
+	return p.store.GetWavePlans(ctx, p.tenant)
 }
 
 // UpdateStatus transitions a wave plan to a new status, enforcing allowed transitions.
@@ -82,7 +86,7 @@ func (p *Planner) UpdateStatus(ctx context.Context, planID, newStatus string) er
 	if !ValidStatuses[newStatus] {
 		return fmt.Errorf("invalid status %q", newStatus)
 	}
-	plans, err := p.store.GetWavePlans(ctx)
+	plans, err := p.store.GetWavePlans(ctx, p.tenant)
 	if err != nil {
 		return err
 	}
@@ -132,7 +136,7 @@ func incompleteDependencies(plan *store.WavePlan, all []store.WavePlan) []string
 
 // Delete removes a wave plan. Only planned or cancelled plans can be deleted.
 func (p *Planner) Delete(ctx context.Context, planID string) error {
-	plans, err := p.store.GetWavePlans(ctx)
+	plans, err := p.store.GetWavePlans(ctx, p.tenant)
 	if err != nil {
 		return err
 	}
@@ -145,6 +149,43 @@ func (p *Planner) Delete(ctx context.Context, planID string) error {
 		}
 	}
 	return errors.New("wave plan not found")
+}
+
+// SuggestCanaryCohort returns a deterministic canary subset of a wave plan's assets — the
+// first ceil(percent%) of the wave's unique host ids in sorted order. It is a PLANNING aid
+// (consistent with this package's planning-only design, WP-022): it does not enqueue or
+// execute anything; operators review the suggestion and set plan.CanaryTargets before
+// activating the wave. percent must be 1..100; a wave with assets always yields at least one
+// canary host, and the result never exceeds the wave's asset count.
+func (p *Planner) SuggestCanaryCohort(plan *store.WavePlan, percent int) ([]string, error) {
+	if plan == nil {
+		return nil, errors.New("wave plan is required")
+	}
+	if percent < 1 || percent > 100 {
+		return nil, fmt.Errorf("canary percent must be between 1 and 100 (got %d)", percent)
+	}
+	// Deterministic, deduplicated ordering so the same wave always yields the same cohort.
+	seen := make(map[string]bool, len(plan.AssetIDs))
+	hosts := make([]string, 0, len(plan.AssetIDs))
+	for _, a := range plan.AssetIDs {
+		if a != "" && !seen[a] {
+			seen[a] = true
+			hosts = append(hosts, a)
+		}
+	}
+	if len(hosts) == 0 {
+		return nil, errors.New("wave plan has no assets to select a canary cohort from")
+	}
+	sort.Strings(hosts)
+	// Ceiling division so a non-zero percent of a non-empty fleet is always >= 1 host.
+	n := (len(hosts)*percent + 99) / 100
+	if n < 1 {
+		n = 1
+	}
+	if n > len(hosts) {
+		n = len(hosts)
+	}
+	return hosts[:n], nil
 }
 
 // ReadinessChecklist returns the pre-activation checklist items for a wave plan.
