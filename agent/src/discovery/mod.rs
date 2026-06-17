@@ -24,7 +24,8 @@ pub fn collect_static(cfg: &AgentConfig) -> Result<CbomTelemetryPayload> {
     let mut evidence = Vec::new();
 
     status::set_phase("Static Source Analysis");
-    let static_result = source::scan(cfg, false)?;
+    // collect_static is the stateless path (e.g. CI check) — no scan_state cache.
+    let static_result = source::scan(cfg, false, None, true)?;
     components.extend(static_result.components);
     evidence.extend(static_result.evidence);
 
@@ -43,7 +44,12 @@ pub fn collect_static(cfg: &AgentConfig) -> Result<CbomTelemetryPayload> {
     })
 }
 
-pub async fn collect(cfg: &AgentConfig, host_uuid: &str) -> Result<CbomTelemetryPayload> {
+pub async fn collect(
+    cfg: &AgentConfig,
+    host_uuid: &str,
+    db: Option<&crate::storage::OfflineStore>,
+    force_full: bool,
+) -> Result<CbomTelemetryPayload> {
     let started = now_fn();
     let mut components = Vec::new();
     let mut evidence = Vec::new();
@@ -56,10 +62,12 @@ pub async fn collect(cfg: &AgentConfig, host_uuid: &str) -> Result<CbomTelemetry
     let llm_available = check_llm_available(&cfg.http_endpoint()).await;
 
     status::set_phase("Static Source Analysis");
-    let static_result = source::scan(cfg, llm_available)?;
+    let static_result = source::scan(cfg, llm_available, db, force_full)?;
+    status::set_files_skipped(static_result.skipped);
     status::log_event(&format!(
-        "Static source scan completed, cataloged {} components",
-        static_result.components.len()
+        "Static source scan completed, cataloged {} components ({} unchanged files skipped)",
+        static_result.components.len(),
+        static_result.skipped
     ));
     components.extend(static_result.components);
     evidence.extend(static_result.evidence);
@@ -163,6 +171,9 @@ pub(crate) struct ScanResult {
     pub(crate) components: Vec<crate::proto::CbomComponent>,
     pub(crate) evidence: Vec<crate::proto::Evidence>,
     pub(crate) findings: Vec<CryptoFinding>,
+    /// OPS-007: number of source files skipped because their content was unchanged
+    /// since the last scan (hash hit in scan_state, within the cache-age window).
+    pub(crate) skipped: usize,
 }
 
 /// Check once per scan whether the controller's LLM proxy is enabled.
