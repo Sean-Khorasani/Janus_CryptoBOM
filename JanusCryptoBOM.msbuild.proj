@@ -4,10 +4,35 @@
   </PropertyGroup>
 
   <Target Name="Build">
-    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)build-windows.ps1&quot;" />
+    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)win-build.ps1&quot;" />
   </Target>
 
   <Target Name="BuildNoTools">
-    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)build-windows.ps1&quot; -SkipToolInstall" />
+    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)win-build.ps1&quot; -SkipToolInstall" />
   </Target>
+
+  <!-- Portable "copy and run" Windows agent zip (run.ps1 + janus.env). Builds
+       the project first so bin\janus-agent.exe exists, then packages it. -->
+  <Target Name="PortableAgent" DependsOnTargets="Build">
+    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)packaging\windows\build-portable-agent.ps1&quot;" />
+  </Target>
+
+  <!-- Same, but assumes the project is already built (no toolchain install). -->
+  <Target Name="PortableAgentNoBuild">
+    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)packaging\windows\build-portable-agent.ps1&quot;" />
+  </Target>
+
+  <!-- Portable "copy and run" Windows server+UI zip (run.ps1 + janus.env + ui\).
+       Builds the project first so bin\janus-server.exe and ui\dist exist. -->
+  <Target Name="PortableServer" DependsOnTargets="Build">
+    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)packaging\windows\build-portable-server.ps1&quot;" />
+  </Target>
+
+  <!-- Same, but assumes the project is already built (no toolchain install). -->
+  <Target Name="PortableServerNoBuild">
+    <Exec Command="powershell -ExecutionPolicy Bypass -File &quot;$(RootDir)packaging\windows\build-portable-server.ps1&quot;" />
+  </Target>
+
+  <!-- Build both portable bundles (agent + server+UI). Builds the project once. -->
+  <Target Name="Portable" DependsOnTargets="Build;PortableAgentNoBuild;PortableServerNoBuild" />
 </Project>
