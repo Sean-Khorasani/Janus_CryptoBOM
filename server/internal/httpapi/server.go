@@ -1397,6 +1397,9 @@ func (a *API) webhooks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		if list == nil {
+			list = []store.Webhook{} // return [] not null so clients can map/.length safely
+		}
 		writeJSON(w, http.StatusOK, list)
 		return
 	}
