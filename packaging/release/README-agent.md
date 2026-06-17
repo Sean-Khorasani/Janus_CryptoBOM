@@ -6,5 +6,5 @@ Edit `janus-agent.toml` for the target endpoint, then run:
 bin/janus-agent --config janus-agent.toml
 ```
 
-Use the native DEB or RPM package for managed systemd installation. Keep the
-command-signing key and generated agent state outside this bundle.
+Keep the command-signing key and generated agent state outside this bundle, so
+replacing the bundle on upgrade never touches your secrets or queued data.
