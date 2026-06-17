@@ -18,8 +18,11 @@ var injectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)new\s+(instructions?|rules?|prompt)\s*:`),
 	regexp.MustCompile(`(?i)\bverdict\s*[:=]\s*"?\s*(false_positive|confirmed|abstain|severity_adjusted)`),
 	regexp.MustCompile(`(?i)respond\s+(with|only)\b[^.]{0,40}\b(false_positive|json|verdict)`),
-	regexp.MustCompile(`(?i)classify\s+(this|it|the\s+finding)\s+as\b`),
-	regexp.MustCompile(`(?i)mark\s+(this|it|the\s+finding)\s+as\s+(a\s+)?(false[\s_-]?positive|safe|benign)`),
+	// Allow an optional noun (e.g. "this finding as", "the result as") between the
+	// determiner and "as" — a corpus entry surfaced that "mark this finding as a false
+	// positive" slipped past the determiner-then-"as" form (LLM-019).
+	regexp.MustCompile(`(?i)classify\s+(this|it|that|the)(\s+\w+){0,2}\s+as\b`),
+	regexp.MustCompile(`(?i)mark\s+(this|it|that|the)(\s+\w+){0,2}\s+as\s+(a\s+)?(false[\s_-]?positive|safe|benign)`),
 	regexp.MustCompile(`(?i)override\b[^.]{0,40}\b(severity|verdict|finding|rule)`),
 	regexp.MustCompile(`(?i)</?\s*(system|assistant|instructions?|prompt)\s*>`),
 	regexp.MustCompile(`(?i)\b(assistant|ai|model)\s*:\s*`),
