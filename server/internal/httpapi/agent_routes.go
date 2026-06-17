@@ -39,6 +39,17 @@ func (a *API) agentRoutes(w http.ResponseWriter, r *http.Request) {
 		sub = parts[1]
 	}
 
+	// Tenant isolation (WP-020): a caller may only reach hosts in its own tenant. We
+	// resolve the asset's tenant once here so every per-host sub-route is covered; an
+	// unknown host falls through to the handlers (which return 404 themselves).
+	if tenant := TenantFromContext(r.Context()); tenant != "" {
+		owner, err := a.store.AssetTenant(r.Context(), hostUUID)
+		if err == nil && owner != "" && owner != tenant {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+			return
+		}
+	}
+
 	switch sub {
 	case "":
 		a.agentDetail(w, r, hostUUID)
@@ -172,13 +183,25 @@ func (a *API) agentEnqueueCommand(w http.ResponseWriter, r *http.Request, hostUU
 	}
 	var req struct {
 		Command string `json:"command"`
+		Path    string `json:"path"` // optional, for scan-target
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if req.Command != "scan-now" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported command; only scan-now is allowed"})
+	// UX-001 scan control verbs. The agent recognizes these by
+	// target_service="janus-agent" + migration_profile=<verb>; none reach the
+	// HMAC-signed mutation path.
+	allowed := map[string]bool{
+		"scan-now": true, "scan-pause": true, "scan-resume": true,
+		"scan-cancel": true, "scan-target": true,
+	}
+	if !allowed[req.Command] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported command; expected scan-now|scan-pause|scan-resume|scan-cancel|scan-target"})
+		return
+	}
+	if req.Command == "scan-target" && strings.TrimSpace(req.Path) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "scan-target requires a non-empty path"})
 		return
 	}
 	commandID := uuid.NewString()
@@ -186,7 +209,8 @@ func (a *API) agentEnqueueCommand(w http.ResponseWriter, r *http.Request, hostUU
 		CommandId:        commandID,
 		HostUuid:         hostUUID,
 		TargetService:    "janus-agent",
-		MigrationProfile: "scan-now",
+		MigrationProfile: req.Command,
+		ConfigPath:       req.Path, // carries the target path for scan-target
 		DryRun:           false,
 	}
 	if err := a.store.EnqueueAgentCommand(r.Context(), cmd); err != nil {
@@ -195,11 +219,12 @@ func (a *API) agentEnqueueCommand(w http.ResponseWriter, r *http.Request, hostUU
 	}
 	username, _ := r.Context().Value(UserContextKey).(string)
 	_ = a.store.InsertAuditLog(r.Context(), &store.AuditLog{
-		Username: username, Action: "AGENT_SCAN_REQUEST", Details: "host_uuid=" + hostUUID + " command_id=" + commandID,
+		Username: username, Action: "AGENT_SCAN_CONTROL", Details: "host_uuid=" + hostUUID + " command=" + req.Command + " command_id=" + commandID,
 	})
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"command_id": commandID,
-		"message":    "Scan queued for delivery to the agent",
+		"command":    req.Command,
+		"message":    "Command queued for delivery to the agent",
 	})
 }
 
