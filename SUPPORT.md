@@ -11,7 +11,7 @@ Janus CryptoBOM features are governed by a four-tier product maturity system. **
 | **Supported** | Stable interfaces; breaking changes require a major version bump and 90-day deprecation notice; security patches provided | Suitable for production use |
 | **Certified** | All release gates passed; external review completed; benchmark corpus published; interoperability matrix verified | Suitable for regulated or high-assurance deployments |
 
-**Current overall status (v0.14.x):** The platform is **experimental**. All five capability dimensions sit at Level 2–3 on the 0–4 scale defined in `docs/CAPABILITY_MATURITY.md`. Because the overall maturity is the minimum across all dimensions (CAPABILITY_MATURITY.md §1), the platform is experimental across the board, regardless of individual dimensions that have reached Level 3.
+**Current overall status (v0.14.x):** The platform is **experimental**. All five capability dimensions sit at Level 2–3 on the 0–4 scale defined in [`docs/GUIDE.md`](docs/GUIDE.md) §9. Because the overall maturity is the minimum across all dimensions (GUIDE.md §9), the platform is experimental across the board, regardless of individual dimensions that have reached Level 3.
 
 | Capability dimension | Current level | Tier |
 |---|---|---|
@@ -21,7 +21,7 @@ Janus CryptoBOM features are governed by a four-tier product maturity system. **
 | Migration Safety | 3 | Experimental |
 | LLM Trustworthiness | 3 (or Level 4 if LLM disabled) | Experimental / N/A |
 
-Definitions and advancement criteria for each dimension are in `docs/CAPABILITY_MATURITY.md`.
+Definitions and advancement criteria for each dimension are in [`docs/GUIDE.md`](docs/GUIDE.md) §9.
 
 ## Supported Versions
 
@@ -75,7 +75,7 @@ Controlled by `JANUS_LLM_CAPABILITY_MODE` (server-side). Default: `disabled`.
 | `analysis_only` | LLM provides advisory annotations on findings; no patch proposals | Experimental |
 | `suggest_remediation` | LLM may propose config patch content | Experimental |
 
-All LLM modes at or above `analysis_only` require `JANUS_LLM_BASE_URL` to be set to an `https://` endpoint. The LLM subsystem enforces the eight architectural invariants defined in `docs/LLM_CAPABILITY_CONTRACT.md`; in particular, LLM output cannot directly modify database state or authorize migration commands.
+All LLM modes at or above `analysis_only` require `JANUS_LLM_BASE_URL` to be set to an `https://` endpoint. The LLM subsystem enforces the eight architectural invariants defined in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §8; in particular, LLM output cannot directly modify database state or authorize migration commands.
 
 LLM capability modes are versioned alongside the platform. Changes to LLM prompt schemas or the structured-output contract follow the same deprecation policy as other interfaces.
 
