@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Activity, Terminal, Settings, Play, CheckCircle, RefreshCw, X, Sliders, Server, Cpu, HardDrive, Shield } from "lucide-react";
 import { Asset } from "../hooks/useApi";
+import { errorMessage } from "../apiError";
 import { FocusTrap } from "../a11y/FocusTrap";
 import { AgentFleetInventory } from "./AgentFleetInventory";
 
@@ -175,6 +176,7 @@ export function FleetManagement({
           cpu_usage: a.cpu_usage || (isLive ? 0.4 : 0.0),
           mem_usage: a.mem_usage || (isLive ? 18.2 : 0.0),
           total_files_scanned: a.total_files_scanned || 0,
+          files_skipped: a.files_skipped || 0,
         };
       });
     });
@@ -217,18 +219,21 @@ export function FleetManagement({
     }, 4000);
   };
 
-  const handleForceScan = (assetId: string) => {
+  // UX-001: send any scan-control verb to an agent (scan-now/pause/resume/cancel).
+  const sendScanControl = (assetId: string, command: string, label: string) => {
     const asset = assets.find(a => a.host_uuid === assetId);
     if (!asset) return;
     fetch(`/api/agents/${assetId}/commands`, {
       method: "POST",
       headers: getAuthHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ command: "scan-now" })
+      body: JSON.stringify({ command })
     }).then(async response => {
-      if (!response.ok) throw new Error(await response.text());
-      showToast(`Scan command queued for ${asset.hostname}; progress will update after agent acknowledgement.`);
-    }).catch(error => showToast(`Failed to queue scan: ${error.message}`));
+      if (!response.ok) throw new Error(await errorMessage(response));
+      showToast(`${label} queued for ${asset.hostname}; takes effect within one heartbeat.`);
+    }).catch(error => showToast(`Failed to queue ${label.toLowerCase()}: ${error.message}`));
   };
+
+  const handleForceScan = (assetId: string) => sendScanControl(assetId, "scan-now", "Scan");
 
   const handleViewLogs = (asset: Asset) => {
     setSelectedAsset(asset);
@@ -504,6 +509,11 @@ export function FleetManagement({
                             {!isOffline && !isScanning && asset.total_files_scanned > 0 && (
                               <div className="text-[10px] text-[#697469] dark:text-[#8fa991]">
                                 Cataloged: {asset.total_files_scanned} files
+                                {(asset.files_skipped ?? 0) > 0 && (
+                                  <span title="Files skipped because their content was unchanged since the last scan (OPS-007 incremental scan)">
+                                    {" "}· {asset.files_skipped} unchanged skipped
+                                  </span>
+                                )}
                               </div>
                             )}
                           </div>
@@ -533,6 +543,34 @@ export function FleetManagement({
                               <Play size={12} aria-hidden="true" />
                               Scan
                             </button>
+                            {/* UX-001 scan control: act within one agent heartbeat. */}
+                            <button
+                              onClick={() => sendScanControl(asset.host_uuid, "scan-pause", "Pause")}
+                              disabled={isOffline}
+                              className="inline-flex items-center gap-1 rounded border border-[#dfe5dc] bg-white text-[#4d594f] hover:bg-[#edf1ea] px-2 py-1 text-xs disabled:opacity-30 transition font-medium dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]"
+                              type="button"
+                              aria-label={`Pause scan on ${asset.hostname}`}
+                            >
+                              Pause
+                            </button>
+                            <button
+                              onClick={() => sendScanControl(asset.host_uuid, "scan-resume", "Resume")}
+                              disabled={isOffline}
+                              className="inline-flex items-center gap-1 rounded border border-[#dfe5dc] bg-white text-[#4d594f] hover:bg-[#edf1ea] px-2 py-1 text-xs disabled:opacity-30 transition font-medium dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]"
+                              type="button"
+                              aria-label={`Resume scan on ${asset.hostname}`}
+                            >
+                              Resume
+                            </button>
+                            <button
+                              onClick={() => sendScanControl(asset.host_uuid, "scan-cancel", "Cancel")}
+                              disabled={isOffline}
+                              className="inline-flex items-center gap-1 rounded border border-[#efb7a5] bg-white text-[#8b2d16] hover:bg-[#fff4ee] px-2 py-1 text-xs disabled:opacity-30 transition font-medium dark:border-[#f87171] dark:bg-[#1a2620] dark:text-[#f87171] dark:hover:bg-[#2d1518]"
+                              type="button"
+                              aria-label={`Cancel scan on ${asset.hostname}`}
+                            >
+                              Cancel
+                            </button>
                             <button
                               id={`view-logs-${asset.host_uuid}`}
                               onClick={() => handleViewLogs(asset)}
@@ -556,6 +594,23 @@ export function FleetManagement({
 
         {/* Global Settings Configuration Column */}
         <div className="space-y-6">
+          {/* OPS-006: tell operators where to scrape Prometheus metrics. */}
+          <section className="rounded-md border border-[#dfe5dc] bg-white p-4 text-xs dark:border-[#2a3a30] dark:bg-[#1a2620]">
+            <h2 className="text-base font-semibold mb-2 flex items-center gap-2 dark:text-[#e8ede9]">
+              <Activity size={18} aria-hidden="true" />
+              Monitoring
+            </h2>
+            <p className="text-[#697469] leading-relaxed dark:text-[#8fa991]">
+              The controller exports Prometheus metrics at{" "}
+              <code className="rounded bg-[#edf1ea] px-1 dark:bg-[#22302a]">/metrics</code>{" "}
+              (no auth) — HTTP request rate &amp; latency, findings by severity/status,
+              connected agents, webhook outcomes, and DB-pool utilization. Point your
+              Prometheus/Grafana stack at it, or set{" "}
+              <code className="rounded bg-[#edf1ea] px-1 dark:bg-[#22302a]">JANUS_METRICS_ADDR</code>{" "}
+              to expose it on a dedicated port.
+            </p>
+          </section>
+
           <section className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
             <h2 className="text-base font-semibold mb-4 flex items-center gap-2 dark:text-[#e8ede9]">
               <Settings size={18} aria-hidden="true" />
