@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { authChangedEvent, clearSession } from "../auth";
 import { requiredApiVersion } from "../version";
+import { errorMessage } from "../apiError";
 import { useWebSocket } from "./useWebSocket";
 
 export type Overview = {
@@ -28,6 +29,7 @@ export type Asset = {
   mem_usage: number;
   status: string;
   total_files_scanned: number;
+  files_skipped?: number;
   agent_version: string;
   observed_ip: string;
   dns_name: string;
@@ -302,7 +304,7 @@ export function useApi(enabled = true) {
       })
     });
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw new Error(await errorMessage(response));
     }
     const body = await response.json();
     load();
@@ -316,7 +318,7 @@ export function useApi(enabled = true) {
       body: JSON.stringify({ version })
     });
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw new Error(await errorMessage(response));
     }
     const body = await response.json();
     setActivePolicy(body.active);
@@ -368,7 +370,7 @@ export function useApi(enabled = true) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ status, updated_by: localStorage.getItem("janus_user") || "admin" })
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await errorMessage(res));
     return await res.json();
   };
 
