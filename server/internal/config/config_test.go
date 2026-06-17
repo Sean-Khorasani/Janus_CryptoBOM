@@ -44,3 +44,30 @@ func TestGRPCMaxRecvBytesIsBoundedAndConfigurable(t *testing.T) {
 		t.Fatalf("GRPCMaxRecvBytes = %d", cfg.GRPCMaxRecvBytes)
 	}
 }
+
+// OPS-002: the global API rate limit defaults sensibly, honors an explicit value, and
+// treats negatives as "disabled" (0).
+func TestAPIRateLimitConfig(t *testing.T) {
+	t.Setenv("JANUS_COMMAND_SIGNING_KEY", "environment-command-signing-key")
+	t.Setenv("JANUS_COMMAND_SIGNING_KEY_FILE", "")
+
+	t.Setenv("JANUS_API_RATE_LIMIT_PER_MIN", "")
+	if got := FromEnv().APIRateLimitPerMin; got != DefaultAPIRateLimitPerMin {
+		t.Fatalf("default APIRateLimitPerMin = %d, want %d", got, DefaultAPIRateLimitPerMin)
+	}
+
+	t.Setenv("JANUS_API_RATE_LIMIT_PER_MIN", "120")
+	if got := FromEnv().APIRateLimitPerMin; got != 120 {
+		t.Fatalf("explicit APIRateLimitPerMin = %d, want 120", got)
+	}
+
+	t.Setenv("JANUS_API_RATE_LIMIT_PER_MIN", "0")
+	if got := FromEnv().APIRateLimitPerMin; got != 0 {
+		t.Fatalf("disabled APIRateLimitPerMin = %d, want 0", got)
+	}
+
+	t.Setenv("JANUS_API_RATE_LIMIT_PER_MIN", "-5")
+	if got := FromEnv().APIRateLimitPerMin; got != 0 {
+		t.Fatalf("negative APIRateLimitPerMin = %d, want clamped to 0", got)
+	}
+}
