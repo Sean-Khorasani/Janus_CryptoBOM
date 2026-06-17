@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"github.com/janus-cbom/janus/server/internal/config"
 	"github.com/janus-cbom/janus/server/internal/hsm"
 	"github.com/janus-cbom/janus/server/internal/llm"
+	"github.com/janus-cbom/janus/server/internal/metrics"
 	"github.com/janus-cbom/janus/server/internal/orchestrator"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/sandbox"
@@ -33,6 +37,15 @@ type API struct {
 	hsmClient  hsm.HSM
 	cfg        config.Config
 	llmSvc     *llm.Service // set lazily in llmService()
+	jwtSecret  []byte
+	creds      []config.Credential
+	revoked    *revocationCache // session invalidation on password change (AUTH-002)
+	wsTickets  *wsTicketStore   // short-lived single-use tickets for /api/ws (SEC: keeps the session JWT out of URLs)
+	// shutdownCtx is cancelled when draining begins so detached background work
+	// (e.g. LLM batch jobs) stops promptly on SIGTERM instead of running on an
+	// uncancellable context.Background() (OPS-001 / REM-2).
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 	// draining is set during graceful shutdown (OPS-001): the health endpoint
 	// then reports "draining" and new non-health requests receive 503 so load
 	// balancers stop routing traffic while in-flight requests finish.
@@ -44,6 +57,9 @@ type API struct {
 // receive 503 Service Unavailable.
 func (a *API) BeginDraining() {
 	a.draining.Store(true)
+	if a.shutdownCancel != nil {
+		a.shutdownCancel()
+	}
 }
 
 // New builds the HTTP API handler and returns it alongside the *API so the
@@ -57,14 +73,29 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 		simulator:  sandbox.NewSimulator(store, orch, engine),
 		confidence: policy.NewConfidenceAnalyzer(store),
 		cfg:        cfg,
+		jwtSecret:  jwtSecret,
+		creds:      cfg.Credentials,
+		revoked:    newRevocationCache(),
+		wsTickets:  newWSTicketStore(),
+	}
+	api.shutdownCtx, api.shutdownCancel = context.WithCancel(context.Background())
+	// Seed the session-revocation cache from persisted password changes so a restart
+	// still rejects tokens minted before the last change (AUTH-002). Best-effort.
+	if seed, err := store.ListCredentialOverrides(context.Background()); err == nil {
+		api.revoked.seedFromTimes(seed)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", api.health)
-	mux.HandleFunc("/api/auth/login", LoginHandler(jwtSecret, cfg.DisableAuth, cfg.Credentials))
+	// Throttle the credential endpoints per client IP to blunt brute force (HTTP-01).
+	mux.Handle("/api/auth/login", RateLimit(authRateLimitPerMinute, LoginHandler(jwtSecret, cfg.DisableAuth, cfg.Credentials, store)))
+	// Authenticated user changes their own password (AUTH-002).
+	mux.Handle("/api/auth/change-password", RateLimit(authRateLimitPerMinute, http.HandlerFunc(api.changePassword)))
 	mux.HandleFunc("/api/overview", api.overview)
 	mux.HandleFunc("/api/assets", api.assets)
 	mux.HandleFunc("/api/components", api.components)
 	mux.HandleFunc("/api/findings", api.findings)
+	// Exact path wins over the /api/findings/ subtree below (UX-002 bulk status update).
+	mux.Handle("/api/findings/bulk-update", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.bulkUpdateFindings)))
 	mux.HandleFunc("/api/findings/", api.findingsDispatch) // PUT /api/findings/{id}/status | GET /api/findings/{id}/timeline
 	mux.HandleFunc("/api/hosts/", api.hostFindings)        // GET /api/hosts/{uuid}/findings
 	mux.HandleFunc("/api/migrations", api.migrations)
@@ -84,6 +115,10 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/policies", api.policies)
 	mux.HandleFunc("/api/policies/active", api.activePolicy)
 	mux.HandleFunc("/api/policies/create", api.createPolicy)
+	// UX-006 policy update/delete/export/import. Exact paths above win over this
+	// subtree; DELETE additionally requires admin (checked in the handler).
+	mux.Handle("/api/policies/import", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.importPolicy)))
+	mux.Handle("/api/policies/", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.policyByVersion)))
 	// Versioned compliance control pack (WP-017)
 	mux.HandleFunc("/api/policy/rules", api.complianceRules)
 	mux.HandleFunc("/api/policy/rules/", api.complianceRuleByID)
@@ -92,6 +127,8 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/fleet/profiles", api.fleetProfiles)
 	mux.HandleFunc("/api/fleet/profiles/mapping", api.fleetProfileMapping)
 	mux.HandleFunc("/api/audit-logs", api.auditLogs)
+	// Tamper-evident audit-log verification is admin-only (FEAT-AUDIT-TAMPER).
+	mux.Handle("/api/audit-logs/verify", RequireRole([]string{"admin"})(http.HandlerFunc(api.auditVerify)))
 	mux.HandleFunc("/api/agent/diagnostics", api.agentDiagnostics)
 	mux.HandleFunc("/api/webhooks", api.webhooks)
 	mux.HandleFunc("/api/retention", api.retention)
@@ -106,8 +143,13 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	mux.HandleFunc("/api/llm/jobs", api.llmJobs)
 	mux.HandleFunc("/api/llm/jobs/", api.llmJobs)
 	mux.HandleFunc("/api/llm/verdicts/", api.llmVerdict)
+	mux.HandleFunc("/api/llm/suggestions/", api.llmSuggestion) // remediation suggestions (LLM-011/013)
 	mux.HandleFunc("/api/llm/provenance/", api.llmProvenance)
 	mux.HandleFunc("/api/llm/status", api.llmStatus)
+	mux.HandleFunc("/api/llm/usage", api.llmUsage) // token/cost/latency rollup (LLM-023)
+	// Autonomous remediation (LLM-017): wire the governor (env-configured, OFF by default)
+	// + the command enqueuer onto the LLM service. No-op unless JANUS_LLM_AUTOREMEDIATE_ENABLED.
+	api.llmService().EnableAutonomousRemediation(llm.LoadGovernorFromEnv(), api.autoApplyRemediation)
 	// Crypto-agility scorecard (AGILE-01/WP-023)
 	mux.HandleFunc("/api/agility/scorecard", api.agilityScorecard)
 	// Agility dry-run exercise (WP-023)
@@ -117,7 +159,16 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	// Migration wave planning (WAVE-01/WP-022)
 	mux.Handle("/api/waves", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.wavePlans)))
 	mux.Handle("/api/waves/", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.wavePlanByID)))
-	mux.HandleFunc("/api/ws", api.wsHub.ServeWS)
+	// Compliance exception workflow (WP-017) — operator/admin only.
+	mux.Handle("/api/compliance/exceptions", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.complianceExceptions)))
+	mux.Handle("/api/compliance/exceptions/", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.complianceExceptionByID)))
+	// Tenant administration (WP-020) — admin only.
+	mux.Handle("/api/tenants", RequireRole([]string{"admin"})(http.HandlerFunc(api.tenants)))
+	// /api/ws is authorized by a short-lived single-use ticket (issued below),
+	// not the session JWT in the URL (SEC). serveWS validates ?ticket= then
+	// hands off to the hub. The ticket endpoint is JWT-authed via the header.
+	mux.HandleFunc("/api/ws/ticket", api.wsTicketIssue)
+	mux.HandleFunc("/api/ws", api.serveWS)
 	mux.HandleFunc("/api/report/compliance", api.complianceReport)
 	mux.HandleFunc("/api/lab/simulate", api.pqcLabSimulate)
 	mux.HandleFunc("/api/sla/metrics", api.slaMetrics)
@@ -131,12 +182,31 @@ func New(store store.Store, orch *orchestrator.Orchestrator, engine *policy.Engi
 	// them to operator/admin like other state-changing endpoints (AUTH-004). They
 	// previously had no role guard, so any authenticated user (incl. viewer) could
 	// drive the HSM.
+	mux.Handle("/api/hsm/keys", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.hsmListKeys)))
+	mux.Handle("/api/hsm/keys/generate", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.hsmGenerateKey)))
 	mux.Handle("/api/hsm/sign", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.hsmSign)))
 	mux.Handle("/api/hsm/verify", RequireRole([]string{"operator", "admin"})(http.HandlerFunc(api.hsmVerify)))
 	mux.HandleFunc("/metrics", api.metrics)
 
-	authWrapper := AuthMiddleware(jwtSecret, disableAuth)
-	return cors(drainGuard(api, authWrapper(mux))), api
+	// JWTs verified with jwtSecret; agent tokens with the command-signing key (AUTH-03),
+	// or per-agent HMAC keys when AgentAuthMode=per-agent (WP-029 P1).
+	var agentVerify func(*http.Request) bool
+	if cfg.AgentAuthMode == "per-agent" {
+		agentVerify = api.verifyAgentRequest
+	}
+	authWrapper := AuthMiddleware(jwtSecret, cfg.CommandSigningKey, disableAuth, api.revoked.before, agentVerify)
+	// inner is the application stack; the auth-credential endpoints keep their own stricter
+	// 20/min limiter (wired on the mux above).
+	var inner http.Handler = drainGuard(api, authWrapper(bodyLimit(mux)))
+	// Global per-IP rate limit across the whole REST API (OPS-002). Generous default so
+	// dashboard polling / WS-fallback is unaffected; JANUS_API_RATE_LIMIT_PER_MIN=0 disables.
+	if cfg.APIRateLimitPerMin > 0 {
+		inner = RateLimit(cfg.APIRateLimitPerMin, inner)
+	}
+	// correlationMiddleware is outermost so every layer (logger, handlers, writeError)
+	// shares one request ID (OPS-004). The limiter sits inside the logger so 429s are still
+	// logged with a correlation ID.
+	return correlationMiddleware(requestLogger(cors(cfg.CORSOrigin, inner))), api
 }
 
 // drainGuard rejects new requests with 503 while the server is draining during
@@ -194,7 +264,7 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
-	out, err := a.store.Overview(r.Context())
+	out, err := a.store.Overview(r.Context(), TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -203,7 +273,13 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) assets(w http.ResponseWriter, r *http.Request) {
-	out, err := a.store.Assets(r.Context())
+	// Row-level tenant scoping (WP-020): a login only sees assets in its own tenant.
+	// The default tenant (and auth-disabled dev mode) sees all pre-tenancy data.
+	params := store.FleetQueryParams{
+		QueryParams: store.QueryParams{Limit: 5000, Sort: "last_seen", Order: "desc"},
+		TenantID:    TenantFromContext(r.Context()),
+	}
+	out, _, err := a.store.AssetsPaginated(r.Context(), params)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -212,57 +288,55 @@ func (a *API) assets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) components(w http.ResponseWriter, r *http.Request) {
-	// Support pagination, search, and filtering like findings endpoint
-	if r.URL.Query().Has("limit") || r.URL.Query().Has("offset") || r.URL.Query().Has("search") {
-		params := store.QueryParams{
-			Limit:  intParam(r, "limit", 100),
-			Offset: intParam(r, "offset", 0),
-			Sort:   r.URL.Query().Get("sort"),
-			Order:  r.URL.Query().Get("order"),
-			Search: r.URL.Query().Get("search"),
-		}
-		comps, total, err := a.store.ComponentsPaginated(r.Context(), params)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
-		writeJSON(w, http.StatusOK, comps)
-		return
+	// Always tenant-scoped (WP-020): components are read through ComponentsPaginated so the
+	// caller's tenant filter applies on both the paginated and default paths.
+	paginated := r.URL.Query().Has("limit") || r.URL.Query().Has("offset") || r.URL.Query().Has("search")
+	params := store.QueryParams{
+		Limit:    intParam(r, "limit", 100),
+		Offset:   intParam(r, "offset", 0),
+		Sort:     r.URL.Query().Get("sort"),
+		Order:    r.URL.Query().Get("order"),
+		Search:   r.URL.Query().Get("search"),
+		TenantID: TenantFromContext(r.Context()),
 	}
-	out, err := a.store.Components(r.Context(), 500)
+	if !paginated {
+		params.Limit = 500
+	}
+	comps, total, err := a.store.ComponentsPaginated(r.Context(), params)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	if paginated {
+		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
+	}
+	writeJSON(w, http.StatusOK, comps)
 }
 
 func (a *API) findings(w http.ResponseWriter, r *http.Request) {
-	// Support ?limit=N&offset=M&sort=severity&order=desc&search=keyword
-	if r.URL.Query().Has("limit") || r.URL.Query().Has("offset") || r.URL.Query().Has("search") {
-		params := store.QueryParams{
-			Limit:  intParam(r, "limit", 50),
-			Offset: intParam(r, "offset", 0),
-			Sort:   r.URL.Query().Get("sort"),
-			Order:  r.URL.Query().Get("order"),
-			Search: r.URL.Query().Get("search"),
-		}
-		findings, total, err := a.store.FindingsPaginated(r.Context(), params)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
-		writeJSON(w, http.StatusOK, findings)
-		return
+	// Always tenant-scoped (WP-020): findings are read through FindingsPaginated so the
+	// caller's tenant filter applies on both the paginated and default paths.
+	paginated := r.URL.Query().Has("limit") || r.URL.Query().Has("offset") || r.URL.Query().Has("search")
+	params := store.QueryParams{
+		Limit:    intParam(r, "limit", 50),
+		Offset:   intParam(r, "offset", 0),
+		Sort:     r.URL.Query().Get("sort"),
+		Order:    r.URL.Query().Get("order"),
+		Search:   r.URL.Query().Get("search"),
+		TenantID: TenantFromContext(r.Context()),
 	}
-	out, err := a.store.Findings(r.Context(), 200)
+	if !paginated {
+		params.Limit = 200
+	}
+	findings, total, err := a.store.FindingsPaginated(r.Context(), params)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	if paginated {
+		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
+	}
+	writeJSON(w, http.StatusOK, findings)
 }
 
 func (a *API) findingStatus(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +363,7 @@ func (a *API) findingStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	a.wsHub.Broadcast("finding_status", map[string]string{
+	a.wsHub.BroadcastTenant(TenantFromContext(r.Context()), "finding_status", map[string]string{
 		"finding_id": findingID,
 		"status":     body.Status,
 		"updated_by": body.UpdatedBy,
@@ -298,7 +372,7 @@ func (a *API) findingStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) migrations(w http.ResponseWriter, r *http.Request) {
-	out, err := a.store.Migrations(r.Context())
+	out, err := a.store.Migrations(r.Context(), TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -307,27 +381,27 @@ func (a *API) migrations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) reportHTML(w http.ResponseWriter, r *http.Request) {
-	overview, err := a.store.Overview(r.Context())
+	overview, err := a.store.Overview(r.Context(), TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	assets, err := a.store.Assets(r.Context())
+	assets, err := a.store.Assets(r.Context(), TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	findings, err := a.store.Findings(r.Context(), 500)
+	findings, err := a.store.Findings(r.Context(), 500, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	components, err := a.store.Components(r.Context(), 500)
+	components, err := a.store.Components(r.Context(), 500, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	migrations, err := a.store.Migrations(r.Context())
+	migrations, err := a.store.Migrations(r.Context(), TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -450,6 +524,14 @@ func (a *API) enqueueMigration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// Tenant isolation (WP-020): an operator may only enqueue migrations against hosts in
+	// its own tenant. An unknown host falls through (the config-hash lookup 404s naturally).
+	if tenant := TenantFromContext(r.Context()); tenant != "" {
+		if owner, terr := a.store.AssetTenant(r.Context(), req.HostUUID); terr == nil && owner != "" && owner != tenant {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+			return
+		}
+	}
 	hash, err := a.store.GetLatestConfigHash(r.Context(), req.HostUUID, req.ConfigPath)
 	if err != nil {
 		writeError(w, err)
@@ -473,7 +555,7 @@ func (a *API) enqueueMigration(w http.ResponseWriter, r *http.Request) {
 		Details:  fmt.Sprintf("Service: %s, Profile: %s, Config: %s, DryRun: %t, CommandId: %s", req.TargetService, req.MigrationProfile, req.ConfigPath, req.DryRun, cmd.CommandId),
 	})
 
-	a.wsHub.Broadcast("migration_enqueued", map[string]string{
+	a.wsHub.BroadcastTenant(TenantFromContext(r.Context()), "migration_enqueued", map[string]string{
 		"command_id":        cmd.CommandId,
 		"host_uuid":         cmd.HostUuid,
 		"target_service":    cmd.TargetService,
@@ -488,8 +570,94 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeError returns a generic 500 to the caller and logs the real error
+// server-side (HTTP-03). Internal errors — SQL text, pgx errors, file paths, config
+// values — must never reach an API client; operators get the detail in the logs.
 func writeError(w http.ResponseWriter, err error) {
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	cid := w.Header().Get(CorrelationHeader)
+	slog.Error("internal API error", "error", err, "correlation_id", cid)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{
+		"error":          "internal server error",
+		"correlation_id": cid,
+	})
+}
+
+// HTTP request hardening (HTTP-01).
+const (
+	// maxRequestBodyBytes caps JSON request bodies. Bulk telemetry arrives over gRPC
+	// (JANUS_GRPC_MAX_RECV_BYTES), so HTTP bodies are small control-plane payloads.
+	maxRequestBodyBytes = 8 << 20 // 8 MiB
+	// authRateLimitPerMinute throttles credential endpoints per client IP.
+	authRateLimitPerMinute = 20
+	// maskedSecret replaces a stored secret in GET responses so its presence is visible
+	// without leaking the value (CRED-02). Echoed back on POST → keep the stored value.
+	maskedSecret = "***configured***"
+)
+
+// bodyLimit caps request body size to bound memory on the HTTP control plane
+// (HTTP-01). /api/ws is exempt — it is a GET upgrade that hijacks the connection.
+func bodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.URL.Path != "/api/ws" {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// statusRecorder captures the response status (and preserves Flush for streaming
+// endpoints) so requestLogger can record it.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// requestLogger emits one structured log line per HTTP request (method, path,
+// status, duration). It is the outermost layer so it observes the final status.
+// /api/ws is bypassed (it hijacks the connection and is long-lived); health/metrics
+// probes log at debug to avoid drowning the signal.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/ws" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		// Record request count + latency for /metrics (OPS-006). Path is normalized
+		// to a route template to bound label cardinality.
+		metrics.ObserveHTTP(r.Method, normalizePath(r.URL.Path), rec.status, time.Since(start).Seconds())
+
+		level := slog.LevelInfo
+		switch {
+		case rec.status >= 500:
+			level = slog.LevelError
+		case rec.status >= 400:
+			level = slog.LevelWarn
+		case r.URL.Path == "/api/health" || r.URL.Path == "/metrics":
+			level = slog.LevelDebug
+		}
+		slog.LogAttrs(r.Context(), level, "http request",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rec.status),
+			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			slog.String("correlation_id", correlationID(r.Context())),
+		)
+	})
 }
 
 func intParam(r *http.Request, key string, def int) int {
@@ -604,7 +772,8 @@ func (a *API) exportCycloneDX(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	components, err := a.store.Components(r.Context(), 2000)
+	// Tenant-scoped (WP-020): the CBOM export must not leak another tenant's crypto inventory.
+	components, err := a.store.Components(r.Context(), 2000, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -658,7 +827,7 @@ func (a *API) exportCycloneDX(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) exportCSV(w http.ResponseWriter, r *http.Request) {
-	findings, err := a.store.Findings(r.Context(), 5000)
+	findings, err := a.store.Findings(r.Context(), 5000, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -723,7 +892,7 @@ func (a *API) exportSARIF(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	findings, err := a.store.Findings(r.Context(), 5000)
+	findings, err := a.store.Findings(r.Context(), 5000, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -740,7 +909,7 @@ func (a *API) exportSARIF(w http.ResponseWriter, r *http.Request) {
 	for ruleID := range ruleSet {
 		sarifRules = append(sarifRules, map[string]any{
 			"id":      ruleID,
-			"helpUri": "https://github.com/janus-cbom/janus/blob/main/docs/AGILITY_SCORECARD.md",
+			"helpUri": "https://github.com/janus-cbom/janus/blob/main/docs/GUIDE.md",
 		})
 	}
 
@@ -827,6 +996,9 @@ func (a *API) activePolicy(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireWriteRole(w, r) {
+		return
+	}
 	var req struct {
 		Version string `json:"version"`
 	}
@@ -844,18 +1016,39 @@ func (a *API) activePolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "active": a.engine.ProfileVersion()})
 }
 
-func cors(next http.Handler) http.Handler {
+// cors echoes Access-Control-Allow-Origin only for an explicit allowlist: the
+// configured dashboard origin(s) (JANUS_CORS_ORIGIN, comma-separated) plus the
+// standard localhost dev origins. It never reflects an arbitrary Origin header
+// back — a wildcard/reflected ACAO lets any site script the API (SEC). For a
+// disallowed or absent Origin it falls back to the first configured origin so
+// the header is deterministic. Credentials are not enabled (auth is via bearer
+// token, not cookies), so this is defense-in-depth rather than the sole gate.
+func cors(allowedOrigins string, next http.Handler) http.Handler {
+	// Always-trusted local dev origins, preserved so a shared dev checkout keeps
+	// working regardless of JANUS_CORS_ORIGIN.
+	allowed := map[string]bool{
+		"http://localhost:5173": true,
+		"http://127.0.0.1:5173": true,
+		"http://localhost:8080": true,
+	}
+	defaultOrigin := "http://localhost:5173"
+	for i, o := range strings.Split(allowedOrigins, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			allowed[o] = true
+			if i == 0 {
+				defaultOrigin = o
+			}
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		// During development with auth disabled, allow all origins; otherwise restrict
-		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" || origin == "http://localhost:8080" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-		} else if origin != "" {
-			// For production, set CORS_ORIGIN via config; here we allow localhost variants
+		if origin != "" && allowed[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+			w.Header().Set("Access-Control-Allow-Origin", defaultOrigin)
 		}
+		// Responses vary by request Origin, so caches must key on it.
+		w.Header().Add("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Headers", "content-type, authorization")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 		if r.Method == http.MethodOptions {
@@ -866,38 +1059,104 @@ func cors(next http.Handler) http.Handler {
 	})
 }
 
+// gauge writes one unlabeled gauge series in Prometheus text format.
+func gauge(w io.Writer, name, help string, val int64) {
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n\n", name, help, name, name, val)
+}
+
+// normalizePath collapses dynamic path segments to route templates so the
+// per-path metric label set stays bounded (OPS-006).
+func normalizePath(p string) string {
+	for _, prefix := range []string{
+		"/api/findings/", "/api/hosts/", "/api/agents/", "/api/reports/",
+		"/api/llm/jobs/", "/api/llm/verdicts/", "/api/llm/suggestions/", "/api/llm/provenance/", "/api/llm/batches/",
+		"/api/waves/", "/api/policy/rules/", "/api/fleet/profiles/", "/api/compliance/exceptions/",
+	} {
+		if strings.HasPrefix(p, prefix) && len(p) > len(prefix) {
+			return prefix + "*"
+		}
+	}
+	return p
+}
+
 func (a *API) metrics(w http.ResponseWriter, r *http.Request) {
-	overview, err := a.store.Overview(r.Context())
+	// /metrics bypasses JWT auth (scrapers use static config), so when a metrics
+	// token is configured we enforce it here with a constant-time compare (SEC).
+	if a.cfg.MetricsToken != "" {
+		presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(a.cfg.MetricsToken)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+	overview, err := a.store.Overview(r.Context(), TenantFromContext(r.Context()))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintf(w, "# HELP janus_assets_total Total tracked assets\n")
-	fmt.Fprintf(w, "# TYPE janus_assets_total gauge\n")
-	fmt.Fprintf(w, "janus_assets_total %d\n\n", overview.Assets)
 
-	fmt.Fprintf(w, "# HELP janus_components_total Total cataloged CBOM components\n")
-	fmt.Fprintf(w, "# TYPE janus_components_total gauge\n")
-	fmt.Fprintf(w, "janus_components_total %d\n\n", overview.Components)
+	gauge(w, "janus_assets_total", "Total tracked assets", overview.Assets)
+	gauge(w, "janus_components_total", "Total cataloged CBOM components", overview.Components)
+	gauge(w, "janus_critical_findings_total", "Total critical severity findings", overview.CriticalFindings)
+	gauge(w, "janus_high_findings_total", "Total high severity findings", overview.HighFindings)
+	gauge(w, "janus_open_migrations_total", "Total pending or active migrations", overview.OpenMigrations)
 
-	fmt.Fprintf(w, "# HELP janus_findings_total Total detected cryptographic findings\n")
-	fmt.Fprintf(w, "# TYPE janus_findings_total gauge\n")
-	fmt.Fprintf(w, "janus_findings_total %d\n\n", overview.Findings)
+	connected := overview.Assets - overview.StalledAgents
+	if connected < 0 {
+		connected = 0
+	}
+	gauge(w, "janus_agents_connected", "Agents seen within the stall window", connected)
 
-	fmt.Fprintf(w, "# HELP janus_critical_findings_total Total critical severity findings\n")
-	fmt.Fprintf(w, "# TYPE janus_critical_findings_total gauge\n")
-	fmt.Fprintf(w, "janus_critical_findings_total %d\n\n", overview.CriticalFindings)
+	// Labeled findings inventory (OPS-006). Replaces the old unlabeled
+	// janus_findings_total; the sum across labels equals the previous value.
+	if counts, err := a.store.FindingSeverityStatusCounts(r.Context()); err == nil {
+		fmt.Fprint(w, "# HELP janus_findings_total Findings by severity and status.\n# TYPE janus_findings_total gauge\n")
+		for _, c := range counts {
+			fmt.Fprintf(w, "janus_findings_total{severity=\"%d\",status=\"%s\"} %d\n", c.Severity, c.Status, c.Count)
+		}
+		fmt.Fprint(w, "\n")
+	}
 
-	fmt.Fprintf(w, "# HELP janus_high_findings_total Total high severity findings\n")
-	fmt.Fprintf(w, "# TYPE janus_high_findings_total gauge\n")
-	fmt.Fprintf(w, "janus_high_findings_total %d\n\n", overview.HighFindings)
+	// DB connection-pool utilization (OPS-006).
+	st := a.store.PoolStat()
+	fmt.Fprint(w, "# HELP janus_db_pool_connections DB connection pool by state.\n# TYPE janus_db_pool_connections gauge\n")
+	fmt.Fprintf(w, "janus_db_pool_connections{state=\"acquired\"} %d\n", st.Acquired)
+	fmt.Fprintf(w, "janus_db_pool_connections{state=\"idle\"} %d\n", st.Idle)
+	fmt.Fprintf(w, "janus_db_pool_connections{state=\"total\"} %d\n", st.Total)
+	fmt.Fprintf(w, "janus_db_pool_connections{state=\"max\"} %d\n\n", st.Max)
 
-	fmt.Fprintf(w, "# HELP janus_open_migrations_total Total pending or active migrations\n")
-	fmt.Fprintf(w, "# TYPE janus_open_migrations_total gauge\n")
-	fmt.Fprintf(w, "janus_open_migrations_total %d\n\n", overview.OpenMigrations)
+	// LLM usage by model (FEAT-METRICS / LLM-023): calls, tokens, and average latency
+	// give operators Prometheus visibility into LLM spend without scraping the API.
+	// Cost is derivable as tokens × your provider's $/1k rate.
+	if usage, err := a.store.GetLLMUsage(r.Context()); err == nil && usage != nil {
+		fmt.Fprint(w, "# HELP janus_llm_calls_total LLM analysis calls by model.\n# TYPE janus_llm_calls_total counter\n")
+		for _, m := range usage.ByModel {
+			fmt.Fprintf(w, "janus_llm_calls_total{model=\"%s\"} %d\n", m.Model, m.Calls)
+		}
+		fmt.Fprint(w, "\n# HELP janus_llm_tokens_total LLM tokens by model and direction.\n# TYPE janus_llm_tokens_total counter\n")
+		for _, m := range usage.ByModel {
+			fmt.Fprintf(w, "janus_llm_tokens_total{model=\"%s\",direction=\"input\"} %d\n", m.Model, m.TokensIn)
+			fmt.Fprintf(w, "janus_llm_tokens_total{model=\"%s\",direction=\"output\"} %d\n", m.Model, m.TokensOut)
+		}
+		fmt.Fprint(w, "\n# HELP janus_llm_avg_latency_ms Average LLM call latency by model.\n# TYPE janus_llm_avg_latency_ms gauge\n")
+		for _, m := range usage.ByModel {
+			fmt.Fprintf(w, "janus_llm_avg_latency_ms{model=\"%s\"} %d\n", m.Model, m.AvgLatencyMS)
+		}
+		fmt.Fprint(w, "\n# HELP janus_llm_jobs_total LLM analysis jobs by status.\n# TYPE janus_llm_jobs_total gauge\n")
+		for status, count := range usage.JobsByStatus {
+			fmt.Fprintf(w, "janus_llm_jobs_total{status=\"%s\"} %d\n", status, count)
+		}
+		fmt.Fprint(w, "\n")
+	}
+
+	// In-process request/webhook counters + latency histogram (OPS-006).
+	metrics.WriteProcessMetrics(w)
 }
+
+// MetricsHandler exposes the Prometheus endpoint so main can also serve it on a
+// dedicated listener (JANUS_METRICS_ADDR, OPS-006).
+func (a *API) MetricsHandler() http.Handler { return http.HandlerFunc(a.metrics) }
 
 func (a *API) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -934,14 +1193,29 @@ func (a *API) fleetConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		// Never return the stored LLM API key in cleartext (CRED-02) — expose only that
+		// one is set. (This column is legacy; live calls use the env config, see LLM-021.)
+		if fc != nil && fc.LLMApiKey != "" {
+			fc.LLMApiKey = maskedSecret
+		}
 		writeJSON(w, http.StatusOK, fc)
 		return
 	}
 	if r.Method == http.MethodPost {
+		if !requireWriteRole(w, r) {
+			return
+		}
 		var fc store.FleetConfig
 		if err := json.NewDecoder(r.Body).Decode(&fc); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
+		}
+		// If the client round-tripped the masked placeholder, keep the existing key
+		// rather than overwriting it with the mask (CRED-02).
+		if fc.LLMApiKey == maskedSecret {
+			if existing, err := a.store.GetFleetConfig(r.Context()); err == nil {
+				fc.LLMApiKey = existing.LLMApiKey
+			}
 		}
 		if err := a.store.UpdateFleetConfig(r.Context(), &fc); err != nil {
 			writeError(w, err)
@@ -974,6 +1248,21 @@ func (a *API) auditLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, logs)
+}
+
+// auditVerify (GET /api/audit-logs/verify, admin) re-walks the audit-log hash chain
+// and reports whether it is intact — surfacing any tampering (FEAT-AUDIT-TAMPER).
+func (a *API) auditVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	res, err := a.store.VerifyAuditChain(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (a *API) agentDiagnostics(w http.ResponseWriter, r *http.Request) {
@@ -1028,6 +1317,9 @@ func sanitizePolicyFilename(version string) string {
 func (a *API) createPolicy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireWriteRole(w, r) {
 		return
 	}
 	var req struct {
@@ -1109,6 +1401,9 @@ func (a *API) webhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
+		if !requireWriteRole(w, r) {
+			return
+		}
 		var wh store.Webhook
 		if err := json.NewDecoder(r.Body).Decode(&wh); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -1116,6 +1411,11 @@ func (a *API) webhooks(w http.ResponseWriter, r *http.Request) {
 		}
 		if wh.URL == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		// Reject SSRF-prone destinations before persisting (HTTP-02).
+		if err := validateWebhookURL(wh.URL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		wh.Active = true
@@ -1138,6 +1438,9 @@ func (a *API) webhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		if !requireWriteRole(w, r) {
+			return
+		}
 		webhookID := r.URL.Query().Get("id")
 		if webhookID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id parameter required"})
@@ -1175,6 +1478,9 @@ func (a *API) retention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
+		if !requireWriteRole(w, r) {
+			return
+		}
 		var req struct {
 			RetentionDays int  `json:"retention_days"`
 			AutoPurge     bool `json:"auto_purge"`
@@ -1225,7 +1531,7 @@ func (a *API) exportSIEM(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	findings, err := a.store.Findings(r.Context(), 1000)
+	findings, err := a.store.Findings(r.Context(), 1000, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1304,11 +1610,14 @@ func (a *API) llmTestConnection(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type testResult struct {
-		OK               bool   `json:"ok"`
-		BaseURL          string `json:"base_url,omitempty"`
-		ModelAnalysis    string `json:"model_analysis,omitempty"`
-		ModelRemediation string `json:"model_remediation,omitempty"`
-		Error            string `json:"error,omitempty"`
+		OK                        bool   `json:"ok"`
+		BaseURL                   string `json:"base_url,omitempty"`
+		ModelAnalysis             string `json:"model_analysis,omitempty"`
+		ModelRemediation          string `json:"model_remediation,omitempty"`
+		ModelAnalysisAvailable    *bool  `json:"model_analysis_available,omitempty"`
+		ModelRemediationAvailable *bool  `json:"model_remediation_available,omitempty"`
+		Warning                   string `json:"warning,omitempty"`
+		Error                     string `json:"error,omitempty"`
 	}
 
 	if a.cfg.LLM.APIKey() == "" {
@@ -1332,12 +1641,40 @@ func (a *API) llmTestConnection(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		writeJSON(w, http.StatusOK, testResult{
+		res := testResult{
 			OK:               true,
 			BaseURL:          a.cfg.LLM.BaseURL,
 			ModelAnalysis:    a.cfg.LLM.ModelAnalysis,
 			ModelRemediation: a.cfg.LLM.ModelRemediation,
-		})
+		}
+		// Model-compatibility check (LLM-004): confirm the configured models exist in
+		// the provider's catalog. Advisory only — some OpenAI-compatible gateways omit
+		// /models entries, so a miss is a warning, not a failure.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		var catalog struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &catalog); err == nil && len(catalog.Data) > 0 {
+			have := make(map[string]bool, len(catalog.Data))
+			for _, m := range catalog.Data {
+				have[m.ID] = true
+			}
+			aOK, rOK := have[a.cfg.LLM.ModelAnalysis], have[a.cfg.LLM.ModelRemediation]
+			res.ModelAnalysisAvailable, res.ModelRemediationAvailable = &aOK, &rOK
+			var missing []string
+			if !aOK {
+				missing = append(missing, "analysis model "+a.cfg.LLM.ModelAnalysis)
+			}
+			if !rOK && a.cfg.LLM.ModelRemediation != "" {
+				missing = append(missing, "remediation model "+a.cfg.LLM.ModelRemediation)
+			}
+			if len(missing) > 0 {
+				res.Warning = "provider catalog does not list: " + strings.Join(missing, ", ")
+			}
+		}
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
 
@@ -1355,14 +1692,27 @@ func (a *API) fleetProfiles(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		// Do not leak stored LLM keys (CRED-02) — show presence only.
+		for i := range list {
+			if list[i].LLMApiKey != "" {
+				list[i].LLMApiKey = maskedSecret
+			}
+		}
 		writeJSON(w, http.StatusOK, list)
 		return
 	}
 	if r.Method == http.MethodPost {
+		if !requireWriteRole(w, r) {
+			return
+		}
 		var cp store.ConfigProfile
 		if err := json.NewDecoder(r.Body).Decode(&cp); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
+		}
+		// Never persist the masked placeholder as a real key (CRED-02).
+		if cp.LLMApiKey == maskedSecret {
+			cp.LLMApiKey = ""
 		}
 		if cp.Name == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "profile name is required"})
@@ -1376,6 +1726,9 @@ func (a *API) fleetProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		if !requireWriteRole(w, r) {
+			return
+		}
 		profileID := r.URL.Query().Get("id")
 		if profileID == "" {
 			profileID = r.URL.Query().Get("profile_id")
@@ -1405,6 +1758,9 @@ func (a *API) fleetProfileMapping(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
+		if !requireWriteRole(w, r) {
+			return
+		}
 		var body struct {
 			HostUUID  string `json:"host_uuid"`
 			ProfileID string `json:"profile_id"`
@@ -1473,7 +1829,7 @@ func (a *API) confidenceReport(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	findings, err := a.store.Findings(r.Context(), 5000)
+	findings, err := a.store.Findings(r.Context(), 5000, TenantFromContext(r.Context()))
 	if err != nil {
 		writeError(w, err)
 		return
