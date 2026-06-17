@@ -30,10 +30,13 @@ type handlerMockStore struct {
 	pingErr     error
 }
 
-func (m *handlerMockStore) Findings(_ context.Context, _ int) ([]store.Finding, error) {
+func (m *handlerMockStore) Findings(_ context.Context, _ int, _ string) ([]store.Finding, error) {
 	return m.findings, nil
 }
-func (m *handlerMockStore) Components(_ context.Context, _ int) ([]store.Component, error) {
+func (m *handlerMockStore) AssetTenant(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+func (m *handlerMockStore) Components(_ context.Context, _ int, _ string) ([]store.Component, error) {
 	return m.components, nil
 }
 func (m *handlerMockStore) ListLifecycleEvents(_ context.Context, findingID string) ([]store.FindingLifecycleEvent, error) {
@@ -57,6 +60,31 @@ func (m *handlerMockStore) Ping(_ context.Context) error {
 func (m *handlerMockStore) InsertAuditLog(_ context.Context, _ *store.AuditLog) error {
 	return nil
 }
+func (m *handlerMockStore) VerifyAuditChain(_ context.Context) (*store.AuditChainResult, error) {
+	return &store.AuditChainResult{Valid: true}, nil
+}
+func (m *handlerMockStore) GetAgentCredential(_ context.Context, _ string) (*store.AgentCredential, error) {
+	return nil, nil
+}
+func (m *handlerMockStore) UpsertAgentCredential(_ context.Context, _ *store.AgentCredential) error {
+	return nil
+}
+func (m *handlerMockStore) SetAgentCredentialStatus(_ context.Context, _, _, _ string) error {
+	return nil
+}
+func (m *handlerMockStore) ListAgentCredentials(_ context.Context) ([]store.AgentCredential, error) {
+	return nil, nil
+}
+func (m *handlerMockStore) TouchAgentCredential(_ context.Context, _ string) error { return nil }
+func (m *handlerMockStore) CreateComplianceException(_ context.Context, _ *store.ComplianceException) error {
+	return nil
+}
+func (m *handlerMockStore) ListComplianceExceptions(_ context.Context) ([]store.ComplianceException, error) {
+	return nil, nil
+}
+func (m *handlerMockStore) RevokeComplianceException(_ context.Context, _ string) error { return nil }
+func (m *handlerMockStore) CreateTenant(_ context.Context, _ *store.Tenant) error       { return nil }
+func (m *handlerMockStore) ListTenants(_ context.Context) ([]store.Tenant, error)       { return nil, nil }
 
 func newTestAPI(mock *handlerMockStore) *API {
 	return &API{store: mock}
