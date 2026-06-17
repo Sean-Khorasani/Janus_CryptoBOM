@@ -9,7 +9,7 @@ import "strings"
 // windows-schannel-policy) and the post-quantum algorithms it can negotiate at
 // a given minimum toolchain version. This is curated reference data, not a live
 // probe — the harness uses it to classify per-adapter readiness deterministically
-// and offline. Sources: docs/ALGORITHM_COMPATIBILITY.md and the agent adapter set.
+// and offline. Sources: docs/ARCHITECTURE.md §7 (algorithm matrix) and the agent adapter set.
 //
 // Knowledge horizon: 2025-08. Values reflect mainline OpenSSL 3.5 (native
 // ML-KEM hybrid groups), OpenSSH 9.9 (mlkem768x25519), and Windows SChannel as
