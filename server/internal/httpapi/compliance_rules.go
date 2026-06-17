@@ -24,13 +24,23 @@ import (
 )
 
 // complianceRules handles GET /api/policy/rules.
-// Returns the full built-in control pack as JSON.
+// Returns the full built-in control pack as JSON, with a tamper-evident `attestation`
+// (HMAC over the canonical pack under the command-signing key) so consumers can verify the
+// pack was not altered in transit (WP-017). The pack fields are promoted to the top level,
+// so existing consumers that decode the body as a ControlPack are unaffected.
 func (a *API) complianceRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, policy.BuiltinControlPack())
+	pack := policy.BuiltinControlPack()
+	writeJSON(w, http.StatusOK, struct {
+		policy.ControlPack
+		Attestation string `json:"attestation"`
+	}{
+		ControlPack: pack,
+		Attestation: pack.Attestation(a.cfg.CommandSigningKey),
+	})
 }
 
 // complianceRuleByID handles GET /api/policy/rules/{id}.
