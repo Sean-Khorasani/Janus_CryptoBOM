@@ -284,14 +284,30 @@ fn strip_comments_and_strings(text: &str, ext: &str) -> String {
 /// calls to `/api/llm/proxy` were removed from this path — they made every crypto
 /// match a synchronous LLM round-trip during the scan, which was both wrong
 /// (agent-initiated) and pathologically slow.
-pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
+pub fn scan(
+    cfg: &AgentConfig,
+    _use_llm: bool,
+    db: Option<&crate::storage::OfflineStore>,
+    force_full: bool,
+) -> Result<ScanResult> {
     let patterns = patterns()?;
     let mut out = ScanResult::default();
+
+    // OPS-007 incremental scan: track every walked source path (for scan_state
+    // pruning of deleted files) and precompute the cache-age window.
+    let mut current_paths: Vec<String> = Vec::new();
+    let max_cache_age_secs = (cfg.max_cache_age_hours as i64).saturating_mul(3600);
 
     // Candidate patches are collected and written once next to the report —
     // a passive scan must never write into the scanned tree.
     let mut pending_patches: Vec<String> = Vec::new();
-    for root in &cfg.scan_roots {
+    // UX-001 scan-target: if a one-shot root override is pending, scan just that
+    // path this run; otherwise use the configured roots.
+    let scan_roots: Vec<String> = match super::status::take_scan_root_override() {
+        Some(path) => vec![path],
+        None => cfg.scan_roots.clone(),
+    };
+    for root in &scan_roots {
         for entry in WalkDir::new(root)
             .into_iter()
             .filter_entry(|e| include_entry(e.path(), cfg))
@@ -301,6 +317,11 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
                 Err(_) => continue,
             };
             super::status::update_progress("Static Source Analysis", entry.path());
+            // UX-001: cooperative pause/cancel. Blocks while paused; on cancel we
+            // stop walking and return what we have so far (partial results upload).
+            if super::status::scan_checkpoint() {
+                break;
+            }
             // Admit source files by extension, plus extensionless structured
             // config files (e.g. sshd_config) that the structural parser handles (WP-014).
             if !entry.file_type().is_file()
@@ -320,6 +341,23 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            // OPS-007: skip unchanged + cache-fresh files; otherwise record the hash
+            // and proceed. The scan_state upsert is committed here (before parsing) so
+            // it happens exactly once regardless of which analysis branch runs below.
+            // Findings for skipped files are retained server-side (telemetry ingest never
+            // resolves findings absent from a payload), so coverage stays complete.
+            let scan_path = entry.path().display().to_string();
+            let scan_hash = sha256_hex(&raw);
+            current_paths.push(scan_path.clone());
+            if let Some(store) = db {
+                if !force_full
+                    && store.unchanged_and_fresh(&scan_path, &scan_hash, max_cache_age_secs)
+                {
+                    out.skipped += 1;
+                    continue;
+                }
+                let _ = store.upsert_scan_state(&scan_path, &scan_hash);
+            }
             let text = String::from_utf8_lossy(&raw);
             let ext = entry
                 .path()
@@ -587,6 +625,11 @@ pub fn scan(cfg: &AgentConfig, _use_llm: bool) -> Result<ScanResult> {
             report_dir.join("remediation.patch"),
             pending_patches.join("\n"),
         );
+    }
+    // OPS-007: drop scan_state entries for files that no longer exist. We walk every
+    // file each scan (skipping only the parse), so current_paths is the complete set.
+    if let Some(store) = db {
+        let _ = store.purge_stale_scan_state(&current_paths);
     }
     Ok(out)
 }
@@ -1323,7 +1366,7 @@ mod detection_corpus {
             report_path: dir.join("report.html").display().to_string(),
             ..AgentConfig::default()
         };
-        let result = scan(&cfg, false).unwrap();
+        let result = scan(&cfg, false, None, true).unwrap();
 
         let flagged: Vec<String> = result
             .components
@@ -1527,7 +1570,7 @@ mod detection_benchmark {
             report_path: dir.join("report.html").display().to_string(),
             ..AgentConfig::default()
         };
-        let result = scan(&cfg, false).unwrap();
+        let result = scan(&cfg, false, None, true).unwrap();
 
         // A file is "flagged" if it carries a quantum-vulnerable, non-test
         // finding at usable confidence.
