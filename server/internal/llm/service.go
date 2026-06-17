@@ -34,10 +34,13 @@ const (
 
 // Service implements the LLM analysis pipeline with authority-inversion architecture.
 type Service struct {
-	store  store.Store
-	cfg    config.Config
-	mode   CapabilityMode
-	client *http.Client
+	store    store.Store
+	cfg      config.Config
+	mode     CapabilityMode
+	client   *http.Client
+	limiter  *rateLimiter         // shared request budget (LLM-002/004); nil-safe
+	governor *RemediationGovernor // autonomous remediation policy (LLM-017); nil = off
+	enqueuer RemediationEnqueuer  // injected command enqueuer (set by httpapi); nil = off
 }
 
 // NewService creates a new LLM service. If cfg.LLM.BaseURL is empty, mode is forced to disabled.
@@ -54,10 +57,11 @@ func NewService(s store.Store, cfg config.Config) *Service {
 		timeout = 30 * time.Second
 	}
 	return &Service{
-		store:  s,
-		cfg:    cfg,
-		mode:   mode,
-		client: &http.Client{Timeout: timeout},
+		store:   s,
+		cfg:     cfg,
+		mode:    mode,
+		client:  &http.Client{Timeout: timeout},
+		limiter: newRateLimiter(cfg.LLM.MaxRequestsPerMinute, time.Minute),
 	}
 }
 
@@ -180,6 +184,11 @@ func (s *Service) AnalyzeFinding(ctx context.Context, jobID string, evidenceJSON
 // callLLMForVerdict makes the actual LLM API call and parses the structured response.
 // Returns the parsed verdict and provenance record. Does not persist anything.
 func (s *Service) callLLMForVerdict(ctx context.Context, job *store.LLMAnalysisJob, evidenceJSON []byte, promptName string) (*store.LLMVerdict, *store.LLMProvenance, error) {
+	// Cost/abuse guard: enforce the per-minute request budget before any provider call.
+	if !s.limiter.allow() {
+		return nil, nil, fmt.Errorf("LLM request budget exceeded: %d requests/minute (JANUS_LLM_MAX_REQUESTS_PER_MINUTE)", s.cfg.LLM.MaxRequestsPerMinute)
+	}
+
 	systemPrompt := buildSystemPrompt()
 	userContent := buildUserPrompt(evidenceJSON)
 
@@ -190,7 +199,7 @@ func (s *Service) callLLMForVerdict(ctx context.Context, job *store.LLMAnalysisJ
 			{"role": "user", "content": userContent},
 		},
 		"temperature": 0.0,
-		"max_tokens":  800,
+		"max_tokens":  maxTokens(s.cfg.LLM.MaxTokensPerRequest),
 	})
 	if err != nil {
 		return nil, nil, err
