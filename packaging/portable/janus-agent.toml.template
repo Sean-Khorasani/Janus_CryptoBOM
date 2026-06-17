@@ -1,0 +1,29 @@
+# Janus Agent configuration — rendered from janus.env by run.sh on first run.
+# Placeholders ${...} are filled from janus.env. After the first run this file
+# exists and is the source of truth; edit it directly (delete it to re-render).
+controller_endpoint = "${JANUS_CONTROLLER_ENDPOINT}"
+http_controller_endpoint = "${JANUS_HTTP_CONTROLLER_ENDPOINT}"
+execution_mode = "passive"
+cache_path = "${JANUS_STATE_DIR}/agent.db"
+host_uuid_path = "${JANUS_STATE_DIR}/host-id"
+report_path = "${JANUS_STATE_DIR}/report.html"
+sarif_path = "${JANUS_STATE_DIR}/report.sarif"
+scan_interval_seconds = 900
+max_file_bytes = 2097152
+max_binary_bytes = 16777216
+command_signing_key = "${JANUS_COMMAND_SIGNING_KEY}"
+
+scan_roots = ${JANUS_SCAN_ROOTS}
+exclude_dirs = [".git", "target", "node_modules", "dist", ".venv", "__pycache__"]
+network_targets = []
+enable_runtime_discovery = false
+enable_process_memory_scraping = false
+enable_plugin_discovery = false
+enable_active_tls_probing = false
+plugin_dirs = []
+intercept_mode = "disabled"
+
+[active]
+allowed_services = []
+allowed_config_roots = []
+backup_dir = "${JANUS_STATE_DIR}/backups"
