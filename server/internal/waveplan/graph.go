@@ -202,7 +202,7 @@ func ComputeBudget(plans []store.WavePlan) BudgetSummary {
 
 // Graph loads all plans and returns the dependency graph (WP-022).
 func (p *Planner) Graph(ctx context.Context) (DependencyGraph, error) {
-	plans, err := p.store.GetWavePlans(ctx)
+	plans, err := p.store.GetWavePlans(ctx, p.tenant)
 	if err != nil {
 		return DependencyGraph{}, err
 	}
@@ -211,7 +211,7 @@ func (p *Planner) Graph(ctx context.Context) (DependencyGraph, error) {
 
 // Budget loads all plans and returns the budget summary (WP-022).
 func (p *Planner) Budget(ctx context.Context) (BudgetSummary, error) {
-	plans, err := p.store.GetWavePlans(ctx)
+	plans, err := p.store.GetWavePlans(ctx, p.tenant)
 	if err != nil {
 		return BudgetSummary{}, err
 	}
