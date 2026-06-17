@@ -29,6 +29,14 @@ func (a *API) hostFindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tenant isolation (WP-020): only expose findings for hosts in the caller's tenant.
+	if tenant := TenantFromContext(r.Context()); tenant != "" {
+		if owner, err := a.store.AssetTenant(r.Context(), hostUUID); err == nil && owner != "" && owner != tenant {
+			http.NotFound(w, r)
+			return
+		}
+	}
+
 	findings, err := a.store.FindingsByHost(r.Context(), hostUUID)
 	if err != nil {
 		writeError(w, err)
