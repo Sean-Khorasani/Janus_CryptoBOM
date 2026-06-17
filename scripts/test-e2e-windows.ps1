@@ -11,7 +11,7 @@ $AgentExe = Join-Path $Bin "janus-agent.exe"
 $ReportOut = Join-Path $Root "janus-controller-report.html"
 
 if (!$SkipBuild) {
-  & (Join-Path $Root "build-windows.ps1")
+  & (Join-Path $Root "win-build.ps1")
 }
 
 if (!(Test-Path $ServerExe)) { throw "Server executable not found: $ServerExe" }
