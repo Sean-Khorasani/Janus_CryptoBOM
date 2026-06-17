@@ -3,6 +3,9 @@ package grpcserver
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,12 +15,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/janus-cbom/janus/server/internal/metrics"
+	"github.com/janus-cbom/janus/server/internal/notify"
 	"github.com/janus-cbom/janus/server/internal/orchestrator"
 	"github.com/janus-cbom/janus/server/internal/pb"
 	"github.com/janus-cbom/janus/server/internal/policy"
 	"github.com/janus-cbom/janus/server/internal/store"
 	"github.com/janus-cbom/janus/server/internal/version"
 	"github.com/janus-cbom/janus/server/internal/ws"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 )
 
@@ -60,11 +66,18 @@ type Server struct {
 	orch    *orchestrator.Orchestrator
 	circuit *webhookCircuit
 	wsHub   *ws.Hub
+	// notifier delivers human-facing critical-finding alerts to operator channels
+	// (Slack/email/PagerDuty, OPS-003). Nil/disabled when no channel is configured.
+	notifier *notify.Dispatcher
 	// webhookWg tracks in-flight fire-and-forget webhook dispatches so a
 	// graceful shutdown can wait for them to finish instead of dropping
 	// critical-finding notifications mid-flight (OPS-001).
 	webhookWg sync.WaitGroup
 }
+
+// SetNotifier wires the operator notification dispatcher (OPS-003). Optional; when unset or
+// disabled, critical-finding alerting is a no-op (SIEM webhooks still fire independently).
+func (s *Server) SetNotifier(n *notify.Dispatcher) { s.notifier = n }
 
 func New(store store.Store, policy *policy.Engine, orch *orchestrator.Orchestrator, wsHub *ws.Hub) *Server {
 	return &Server{
@@ -111,10 +124,11 @@ func (s *Server) RegisterAgent(ctx context.Context, reg *pb.AgentRegistration) (
 			observedIP = host
 		}
 	}
-	if err := s.store.UpsertAgent(ctx, reg, observedIP); err != nil {
+	tenant := s.resolveAgentTenant(ctx)
+	if err := s.store.UpsertAgent(ctx, reg, observedIP, tenant); err != nil {
 		return nil, err
 	}
-	s.wsHub.Broadcast("agent_registered", map[string]any{"host_uuid": reg.HostUuid, "hostname": reg.Hostname, "observed_ip": observedIP, "agent_version": reg.AgentVersion})
+	s.wsHub.BroadcastTenant(tenant, "agent_registered", map[string]any{"host_uuid": reg.HostUuid, "hostname": reg.Hostname, "observed_ip": observedIP, "agent_version": reg.AgentVersion})
 	return &pb.AgentRegistrationAck{
 		HostUuid:      reg.HostUuid,
 		Accepted:      true,
@@ -127,6 +141,38 @@ func (s *Server) RegisterAgent(ctx context.Context, reg *pb.AgentRegistration) (
 		},
 		Message: "registered",
 	}, nil
+}
+
+// resolveAgentTenant maps an incoming registration to its tenant. When the agent
+// presents a janus-agent-id (per-agent auth, WP-029 P1) we read the tenant that was
+// assigned at enrollment (`agent enroll --tenant`); otherwise the asset lands in the
+// "default" tenant. The asset's tenant is then set once on first registration.
+func (s *Server) resolveAgentTenant(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "default"
+	}
+	ids := md.Get("janus-agent-id")
+	if len(ids) == 0 || ids[0] == "" {
+		return "default"
+	}
+	cred, err := s.store.GetAgentCredential(ctx, ids[0])
+	if err != nil || cred == nil || cred.TenantID == "" {
+		return "default"
+	}
+	return cred.TenantID
+}
+
+// hostTenant resolves the tenant that owns a host so real-time events only reach that
+// tenant's WebSocket clients (WP-020). On any error it returns "" — BroadcastTenant then
+// falls back to a fleet-wide send, matching the pre-tenant behavior rather than dropping
+// the event.
+func (s *Server) hostTenant(ctx context.Context, hostUUID string) string {
+	t, err := s.store.AssetTenant(ctx, hostUUID)
+	if err != nil {
+		return ""
+	}
+	return t
 }
 
 func (s *Server) StreamTelemetry(stream pb.JanusTelemetry_StreamTelemetryServer) error {
@@ -167,16 +213,24 @@ func (s *Server) StreamTelemetry(stream pb.JanusTelemetry_StreamTelemetryServer)
 				defer s.webhookWg.Done()
 				s.dispatchWebhooks(payload)
 			}()
+			if s.notifier.Enabled() {
+				s.webhookWg.Add(1)
+				go func() {
+					defer s.webhookWg.Done()
+					s.dispatchNotifications(payload)
+				}()
+			}
 		}
 
 		slog.Info("telemetry received",
 			"host_uuid", payload.HostUuid,
+			"telemetry_id", payload.TelemetryId,
 			"components", len(payload.Components),
 			"findings", len(payload.Findings),
 			"network_obs", len(payload.NetworkObservations),
 		)
-		// Broadcast telemetry update to WebSocket clients
-		s.wsHub.Broadcast("telemetry_update", map[string]interface{}{
+		// Broadcast telemetry update to WebSocket clients in the host's tenant (WP-020).
+		s.wsHub.BroadcastTenant(s.hostTenant(stream.Context(), payload.HostUuid), "telemetry_update", map[string]interface{}{
 			"host_uuid":   payload.HostUuid,
 			"components":  len(payload.Components),
 			"findings":    len(payload.Findings),
@@ -231,7 +285,7 @@ func (s *Server) ReportMigrationStatus(stream pb.JanusTelemetry_ReportMigrationS
 			"state", report.State,
 			"success", report.Success,
 		)
-		s.wsHub.Broadcast("migration_status", map[string]interface{}{
+		s.wsHub.BroadcastTenant(s.hostTenant(stream.Context(), report.HostUuid), "migration_status", map[string]interface{}{
 			"command_id": report.CommandId,
 			"host_uuid":  report.HostUuid,
 			"state":      report.State,
@@ -298,6 +352,18 @@ func buildSIEMEvent(payload *pb.CbomTelemetryPayload, f *pb.CryptoFinding, prof 
 	}
 }
 
+// signWebhookBody returns the GitHub-style HMAC-SHA256 signature of a webhook body
+// keyed by the per-webhook secret, so receivers can verify authenticity and integrity
+// (HTTP-02). Empty secret yields an empty signature (no header is sent).
+func signWebhookBody(secret string, body []byte) string {
+	if secret == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
 func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 	webhooks, err := s.store.GetWebhooks(context.Background())
 	if err != nil {
@@ -335,13 +401,15 @@ func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 		}
 		// Circuit breaker check
 		if s.circuit.isOpen(wh.URL) {
-			slog.Warn("webhook circuit open, skipping dispatch", "url", wh.URL)
+			slog.Warn("webhook circuit open, skipping dispatch", "url", wh.URL, "host_uuid", payload.HostUuid, "telemetry_id", payload.TelemetryId)
+			metrics.ObserveWebhook("skipped")
 			continue
 		}
 
 		// Dispatch one request per critical finding event.
 		for _, body := range events {
 			// Retry up to 3 times with exponential backoff
+			start := time.Now()
 			var lastErr error
 			success := false
 			for attempt := 0; attempt < 3; attempt++ {
@@ -358,6 +426,9 @@ func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 				req.Header.Set("Content-Type", "application/json")
 				if wh.SecretToken != "" {
 					req.Header.Set("X-Janus-Token", wh.SecretToken)
+					// Sign the body so receivers can verify it wasn't forged/altered
+					// (HTTP-02). Static token kept for backward compatibility.
+					req.Header.Set("X-Janus-Signature", signWebhookBody(wh.SecretToken, body))
 				}
 
 				resp, respErr := client.Do(req)
@@ -378,11 +449,33 @@ func (s *Server) dispatchWebhooks(payload *pb.CbomTelemetryPayload) {
 
 			if success {
 				s.circuit.recordSuccess(wh.URL)
+				metrics.ObserveWebhook("success")
 			} else {
-				slog.Error("failed to send webhook after 3 attempts", "url", wh.URL, "error", lastErr)
+				slog.Error("failed to send webhook after 3 attempts", "url", wh.URL, "error", lastErr, "host_uuid", payload.HostUuid, "telemetry_id", payload.TelemetryId)
 				s.circuit.recordFailure(wh.URL)
+				metrics.ObserveWebhook("failed")
 			}
+			metrics.ObserveWebhookLatency(time.Since(start).Seconds())
 		}
+	}
+}
+
+// dispatchNotifications sends a human-facing alert per critical finding to the configured
+// operator channels (Slack/email/PagerDuty, OPS-003). Independent of the SIEM webhook path.
+func (s *Server) dispatchNotifications(payload *pb.CbomTelemetryPayload) {
+	for _, f := range payload.Findings {
+		if f.Severity < 5 {
+			continue
+		}
+		s.notifier.Notify(context.Background(), notify.Alert{
+			Title:       f.Title,
+			Severity:    int(f.Severity),
+			HostUUID:    payload.HostUuid,
+			Algorithm:   f.Algorithm,
+			FindingID:   f.FindingId,
+			Description: f.Description,
+			PolicyRule:  f.PolicyRuleId,
+		})
 	}
 }
 
