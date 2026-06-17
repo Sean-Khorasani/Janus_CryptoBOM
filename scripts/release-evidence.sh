@@ -65,7 +65,7 @@ run_gate() { # description, command...
     echo "- **Generated:** $STAMP"
     echo
     echo "This bundle records the gate outcomes backing the documented capabilities."
-    echo "See \`docs/CAPABILITY_MATURITY.md\` for the maturity self-assessment and"
+    echo "See \`docs/GUIDE.md\` §9 (Capability maturity) for the maturity self-assessment and"
     echo "\`docs/analysis/DETECTION-BENCHMARK.md\` for detection precision/recall."
     echo
     echo "## Gate results"
@@ -123,10 +123,10 @@ fi
     echo
     echo "## Capability maturity snapshot"
     echo
-    echo "Current self-assessed levels (from docs/CAPABILITY_MATURITY.md):"
+    echo "Current self-assessed levels (from docs/GUIDE.md §9):"
     echo
-    grep -nE 'Current Janus status' docs/CAPABILITY_MATURITY.md 2>/dev/null \
-        | sed -E 's/^[0-9]+:/- /; s/\*\*//g' | cut -c1-200 || echo "- (maturity doc not found)"
+    awk -F'|' '/\*\*Level/ && /^\| [0-9] /{gsub(/\*\*/,"",$5); gsub(/^ +| +$/,"",$3); gsub(/^ +/,"",$5); print "- "$3" — "$5}' docs/GUIDE.md 2>/dev/null \
+        | cut -c1-200 || echo "- (maturity doc not found)"
 } >> "$MANIFEST"
 
 echo
