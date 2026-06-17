@@ -199,6 +199,10 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
   const [timelineFindingId, setTimelineFindingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  // UX-003: SLA-breach filter — finding_ids past their due date and not closed,
+  // sourced from /api/sla/metrics.
+  const [slaOnly, setSlaOnly] = useState(false);
+  const [slaBreachIds, setSlaBreachIds] = useState<Set<string>>(new Set());
   const [sortCol, setSortCol] = useState<"severity" | "algorithm" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc" | null>(null);
 
@@ -206,14 +210,29 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
   const [aiEnabled, setAiEnabled] = useState(false);
   const role = (typeof localStorage !== "undefined" && localStorage.getItem("janus_role")) || "";
   const canAnalyze = aiEnabled && (role === "admin" || role === "operator");
+  // Operators/admins may select rows for bulk triage even when AI is disabled (UX-002).
+  const canManage = role === "admin" || role === "operator";
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [verdicts, setVerdicts] = useState<Record<string, FindingVerdict>>({});
   const [analyzeMsg, setAnalyzeMsg] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
+  const [bulkMsg, setBulkMsg] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   useEffect(() => {
     setPage(1);
-  }, [search]);
+  }, [search, slaOnly]);
+
+  // Load SLA-breached finding ids for the breach filter (UX-003).
+  useEffect(() => {
+    fetch("/api/sla/metrics", { headers: llmHeaders() })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((d: { sla_assignments?: { breach_finding_ids?: string[] } } | null) => {
+        const ids = d?.sla_assignments?.breach_finding_ids ?? [];
+        setSlaBreachIds(new Set(ids));
+      })
+      .catch(() => { /* non-fatal */ });
+  }, []);
 
   // Detect whether the server has LLM enabled; the controls are hidden otherwise.
   useEffect(() => {
@@ -282,6 +301,7 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
 
   const filteredFindings = useMemo(() => {
     return sortedFindings.filter((f) => {
+      if (slaOnly && !slaBreachIds.has(f.finding_id)) return false;
       if (!search) return true;
       const s = search.toLowerCase();
       return (
@@ -292,7 +312,7 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
         (f.policy_rule_id && f.policy_rule_id.toLowerCase().includes(s))
       );
     });
-  }, [sortedFindings, search]);
+  }, [sortedFindings, search, slaOnly, slaBreachIds]);
 
   const itemsPerPage = 25;
   const totalPages = Math.max(1, Math.ceil(filteredFindings.length / itemsPerPage));
@@ -325,6 +345,35 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
   });
   const selectAllCritical = () => setSelectedIds(new Set(filteredFindings.filter(f => f.severity >= 5).map(f => f.finding_id)));
   const selectAllVisible = () => setSelectedIds(new Set(paginatedFindings.map(f => f.finding_id)));
+
+  // Bulk triage (UX-002): one POST /api/findings/bulk-update for all selected
+  // findings, then reflect each locally via the shared updateStatus prop so the
+  // app-level optimistic state + persistence stay in sync. Uses the same status
+  // strings as the single-row controls.
+  const bulkSetStatus = async (status: string) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkMsg(`Applying “${status.replace("-", " ")}” to ${ids.length} finding${ids.length === 1 ? "" : "s"}…`);
+    try {
+      const res = await fetch("/api/findings/bulk-update", {
+        method: "POST",
+        headers: llmHeaders(),
+        body: JSON.stringify(ids.map(finding_id => ({ finding_id, status }))),
+      });
+      if (res.status === 403) throw new Error("requires operator or admin role");
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      const out = await res.json() as { updated: number; failed: number };
+      // The endpoint persists + broadcasts a finding_status WS event per item;
+      // the dashboard reconciles from that / the next poll (no double write here).
+      setBulkMsg(`Updated ${out.updated} finding${out.updated === 1 ? "" : "s"}${out.failed ? `, ${out.failed} failed` : ""}.`);
+      setSelectedIds(new Set());
+    } catch (e) {
+      setBulkMsg(`Bulk update failed: ${e instanceof Error ? e.message : "request failed"}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   const analyzeSelected = async () => {
     const ids = Array.from(selectedIds);
@@ -414,6 +463,21 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
         </div>
 
         <div className="flex items-center gap-2">
+          {/* UX-003 SLA-breach filter */}
+          <button
+            type="button"
+            onClick={() => setSlaOnly((v) => !v)}
+            disabled={!slaOnly && slaBreachIds.size === 0}
+            aria-pressed={slaOnly}
+            title={slaBreachIds.size === 0 ? "No SLA-breached findings" : "Show only findings past their remediation due date"}
+            className={`h-9 px-3 rounded border text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
+              slaOnly
+                ? "border-[#efb7a5] bg-[#fff4ee] text-[#8b2d16] dark:border-[#f87171] dark:bg-[#2d1518] dark:text-[#f87171]"
+                : "border-[#dfe5dc] bg-white text-[#4d594f] hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]"
+            }`}
+          >
+            SLA breached{slaBreachIds.size > 0 ? ` (${slaBreachIds.size})` : ""}
+          </button>
           <button
             onClick={downloadCSV}
             data-action="download-csv"
@@ -445,23 +509,36 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
         </div>
       </div>
 
-      {/* Admin-initiated AI analysis toolbar (LLM-022). Hidden unless the server
-          has LLM enabled and the user is operator/admin. */}
-      {canAnalyze && (
-        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-[#dfe5dc] bg-[#f7f8f5] px-3 py-2 text-xs dark:border-[#2a3a30] dark:bg-[#0d1210]" role="region" aria-label="AI analysis of findings">
+      {/* Bulk triage toolbar. Selection + status actions are available to
+          operator/admin (UX-002); the AI button additionally requires LLM enabled (LLM-022). */}
+      {canManage && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-[#dfe5dc] bg-[#f7f8f5] px-3 py-2 text-xs dark:border-[#2a3a30] dark:bg-[#0d1210]" role="region" aria-label="Bulk actions on findings">
           <span className="font-semibold">{selectedIds.size} selected</span>
           <button type="button" onClick={selectAllCritical} className="rounded border border-[#dfe5dc] bg-white px-2 py-1 font-medium hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:hover:bg-[#22302a]">Select all critical</button>
           <button type="button" onClick={selectAllVisible} className="rounded border border-[#dfe5dc] bg-white px-2 py-1 font-medium hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:hover:bg-[#22302a]">Select page</button>
           <button type="button" onClick={() => setSelectedIds(new Set())} disabled={selectedIds.size === 0} className="rounded px-2 py-1 font-medium text-[#697469] hover:underline disabled:opacity-40 dark:text-[#8fa991]">Clear</button>
-          <button
-            type="button"
-            onClick={analyzeSelected}
-            disabled={selectedIds.size === 0 || analyzing}
-            className="rounded bg-[#2f6fed] px-3 py-1 font-semibold text-white hover:bg-[#2560d0] disabled:opacity-50"
-          >
-            {analyzing ? "Analyzing…" : `Analyze selected with AI${selectedIds.size ? ` (${selectedIds.size})` : ""}`}
-          </button>
-          {analyzeMsg && <span className="text-[#4d594f] dark:text-[#8fa991]" role="status">{analyzeMsg}</span>}
+
+          <span className="mx-1 h-4 w-px bg-[#dfe5dc] dark:bg-[#2a3a30]" aria-hidden="true" />
+          <span className="text-[#697469] dark:text-[#8fa991]">Apply to selected:</span>
+          <button type="button" onClick={() => void bulkSetStatus("accepted")} disabled={selectedIds.size === 0 || bulkBusy} className="rounded border border-[#dfe5dc] bg-white px-2 py-1 font-medium hover:bg-[#edf1ea] disabled:opacity-40 dark:border-[#2a3a30] dark:bg-[#1a2620] dark:hover:bg-[#22302a]">Accept risk</button>
+          <button type="button" onClick={() => void bulkSetStatus("remediated")} disabled={selectedIds.size === 0 || bulkBusy} className="rounded border border-[#dfe5dc] bg-white px-2 py-1 font-medium hover:bg-[#edf1ea] disabled:opacity-40 dark:border-[#2a3a30] dark:bg-[#1a2620] dark:hover:bg-[#22302a]">Mark remediated</button>
+          <button type="button" onClick={() => void bulkSetStatus("false-positive")} disabled={selectedIds.size === 0 || bulkBusy} className="rounded border border-[#dfe5dc] bg-white px-2 py-1 font-medium hover:bg-[#edf1ea] disabled:opacity-40 dark:border-[#2a3a30] dark:bg-[#1a2620] dark:hover:bg-[#22302a]">False positive</button>
+          {bulkMsg && <span className="text-[#4d594f] dark:text-[#8fa991]" role="status">{bulkMsg}</span>}
+
+          {canAnalyze && (
+            <>
+              <span className="mx-1 h-4 w-px bg-[#dfe5dc] dark:bg-[#2a3a30]" aria-hidden="true" />
+              <button
+                type="button"
+                onClick={analyzeSelected}
+                disabled={selectedIds.size === 0 || analyzing}
+                className="rounded bg-[#2f6fed] px-3 py-1 font-semibold text-white hover:bg-[#2560d0] disabled:opacity-50"
+              >
+                {analyzing ? "Analyzing…" : `Analyze selected with AI${selectedIds.size ? ` (${selectedIds.size})` : ""}`}
+              </button>
+              {analyzeMsg && <span className="text-[#4d594f] dark:text-[#8fa991]" role="status">{analyzeMsg}</span>}
+            </>
+          )}
         </div>
       )}
 
@@ -469,11 +546,11 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
         <table className="w-full min-w-[820px] text-left text-sm" role="table">
           <thead className="sticky top-0 z-10 border-b border-[#dfe5dc] bg-white text-xs uppercase text-[#697469] dark:border-[#2a3a30] dark:bg-[#1a2620] dark:text-[#8fa991]">
             <tr>
-              {canAnalyze && (
+              {canManage && (
                 <th className="py-2 pr-2" scope="col">
                   <input
                     type="checkbox"
-                    aria-label="Select all visible findings for AI analysis"
+                    aria-label="Select all visible findings"
                     checked={paginatedFindings.length > 0 && paginatedFindings.every(f => selectedIds.has(f.finding_id))}
                     onChange={e => e.target.checked ? selectAllVisible() : setSelectedIds(new Set())}
                   />
@@ -536,11 +613,11 @@ export function FindingTable({ findings, components, assets = [], statuses, upda
                   role="button"
                   aria-label={`Finding: ${finding.title}, severity: ${finding.severity}`}
                 >
-                  {canAnalyze && (
+                  {canManage && (
                     <td className="py-2 pr-2" onClick={e => e.stopPropagation()}>
                       <input
                         type="checkbox"
-                        aria-label={`Select ${finding.title} for AI analysis`}
+                        aria-label={`Select ${finding.title}`}
                         checked={selectedIds.has(finding.finding_id)}
                         onChange={() => toggleSelect(finding.finding_id)}
                       />
