@@ -4,7 +4,7 @@ include VERSION.env
 FULL_VERSION := $(JANUS_VERSION)+$(JANUS_BUILD_DATE).$(JANUS_BUILD_SEQUENCE)
 GO_VERSION_LDFLAGS := -X github.com/janus-cbom/janus/server/internal/version.Version=$(JANUS_VERSION) -X github.com/janus-cbom/janus/server/internal/version.BuildDate=$(JANUS_BUILD_DATE) -X github.com/janus-cbom/janus/server/internal/version.BuildSequence=$(JANUS_BUILD_SEQUENCE) -X github.com/janus-cbom/janus/server/internal/version.APIVersion=$(JANUS_API_VERSION) -X github.com/janus-cbom/janus/server/internal/version.AgentProtocolVersion=$(JANUS_AGENT_PROTOCOL_VERSION)
 
-.PHONY: ui server agent test race bootstrap-check fmt-check lint proto-check build release-linux compose-check linux-gate vuln verify-claims release-evidence interop-lab
+.PHONY: ui server agent test race bootstrap-check fmt-check lint proto-check build release-linux compose-check linux-gate vuln verify-claims release-evidence interop-lab portable portable-agent portable-server
 
 ui:
 	cd ui && npm ci && VITE_JANUS_VERSION=$(FULL_VERSION) VITE_JANUS_REQUIRED_API_VERSION=$(JANUS_UI_REQUIRED_API_VERSION) npm run build
@@ -18,6 +18,19 @@ agent:
 release-linux: build
 	packaging/linux/build-release.sh
 	packaging/linux/build-packages.sh --release $(JANUS_BUILD_DATE).$(JANUS_BUILD_SEQUENCE)
+
+# Portable "copy and run" bundles (.tar.gz + .zip) with a run.sh launcher and a
+# janus.env — no dpkg/rpmbuild required. Additive to release-linux.
+# Set JANUS_PORTABLE_ARCHES="x86_64 aarch64" to also cross-build (best effort).
+# portable-agent needs only the Rust toolchain (no UI/npm); portable-server
+# builds the UI + Go server.
+portable-agent: agent
+	bash packaging/portable/build-portable.sh agent
+
+portable-server: ui server
+	bash packaging/portable/build-portable.sh server
+
+portable: portable-agent portable-server
 
 test: ui server agent
 
