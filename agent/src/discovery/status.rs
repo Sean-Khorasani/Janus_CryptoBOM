@@ -1,13 +1,69 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub static PREVIOUS_TOTAL_FILES: AtomicUsize = AtomicUsize::new(100);
 pub static GLOBAL_EXCLUSIONS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
+// UX-001 scan control: cooperative cancel/pause flags checked by the scan loop.
+static SCAN_CANCEL: AtomicBool = AtomicBool::new(false);
+static SCAN_PAUSE: AtomicBool = AtomicBool::new(false);
+
+/// Request the in-progress scan to stop early (it uploads partial results).
+pub fn request_cancel() {
+    SCAN_CANCEL.store(true, Ordering::SeqCst);
+}
+/// Clear the cancel flag — call at the start of each new scan.
+pub fn clear_cancel() {
+    SCAN_CANCEL.store(false, Ordering::SeqCst);
+    SCAN_PAUSE.store(false, Ordering::SeqCst);
+}
+pub fn is_cancelled() -> bool {
+    SCAN_CANCEL.load(Ordering::SeqCst)
+}
+pub fn set_paused(paused: bool) {
+    SCAN_PAUSE.store(paused, Ordering::SeqCst);
+}
+pub fn is_paused() -> bool {
+    SCAN_PAUSE.load(Ordering::SeqCst)
+}
+
+/// Cooperative checkpoint for the scan loop: blocks while paused, and returns
+/// true if the scan should abort (cancel requested). Call once per file.
+pub fn scan_checkpoint() -> bool {
+    while is_paused() && !is_cancelled() {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    is_cancelled()
+}
+
+// UX-001 scan-target: a one-shot scan-root override set by a scan-target command
+// and consumed by the next scan (then cleared), so the scan targets just that path.
+static SCAN_ROOT_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn scan_root_override_cell() -> &'static Mutex<Option<String>> {
+    SCAN_ROOT_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// Set the path the next scan should target (scan-target command).
+pub fn set_scan_root_override(path: String) {
+    if let Ok(mut g) = scan_root_override_cell().lock() {
+        *g = Some(path);
+    }
+}
+
+/// Take (and clear) the pending scan-root override, if any.
+pub fn take_scan_root_override() -> Option<String> {
+    scan_root_override_cell()
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+}
+
 pub struct SharedScanState {
     pub current_phase: Mutex<String>,
     pub current_path: Mutex<String>,
     pub total_files_scanned: AtomicUsize,
+    pub files_skipped: AtomicUsize, // OPS-007: unchanged files skipped this scan
     pub scan_progress: AtomicUsize, // 0 to 100
     pub logs_buffer: Mutex<Vec<String>>,
 }
@@ -19,6 +75,7 @@ impl SharedScanState {
             current_phase: Mutex::new("Idle".to_string()),
             current_path: Mutex::new("".to_string()),
             total_files_scanned: AtomicUsize::new(0),
+            files_skipped: AtomicUsize::new(0),
             scan_progress: AtomicUsize::new(0),
             logs_buffer: Mutex::new(Vec::new()),
         })
@@ -58,6 +115,14 @@ pub fn set_phase(phase: &str) {
         }
     }
     log_event(&format!("Transition to scan phase: {}", phase));
+}
+
+/// OPS-007: record how many files were skipped (content unchanged) this scan, for the
+/// heartbeat so the dashboard can show scanned-vs-skipped.
+pub fn set_files_skipped(n: usize) {
+    SharedScanState::global()
+        .files_skipped
+        .store(n, std::sync::atomic::Ordering::SeqCst);
 }
 
 pub fn set_scan_complete(total_files: usize) {
