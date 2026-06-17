@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { PolicyProfile } from "../hooks/useApi";
+import { errorMessage } from "../apiError";
 import { Shield, CheckCircle, AlertCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { SeverityBadge, Empty } from "./FindingsGrid";
 
@@ -213,6 +214,8 @@ interface PolicyStudioProps {
 export function PolicyStudio({ activePolicy, policies, switchPolicy }: PolicyStudioProps) {
   const [switching, setSwitching] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const role = (typeof localStorage !== "undefined" && localStorage.getItem("janus_role")) || "";
+  const canManage = role === "admin" || role === "operator";
 
   // Custom policy profile creation states
   const [newVersion, setNewVersion] = useState("");
@@ -247,7 +250,7 @@ export function PolicyStudio({ activePolicy, policies, switchPolicy }: PolicyStu
         })
       });
       if (!res.ok) {
-        throw new Error(await res.text());
+        throw new Error(await errorMessage(res));
       }
       setSuccess(`Custom policy profile '${newVersion}' created successfully!`);
       setNewVersion("");
@@ -271,6 +274,58 @@ export function PolicyStudio({ activePolicy, policies, switchPolicy }: PolicyStu
     }
   };
 
+  // UX-006: export a profile as downloadable YAML.
+  const handleExport = async (version: string) => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/policies/${encodeURIComponent(version)}/export`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(await errorMessage(res));
+      const yaml = await res.text();
+      const url = URL.createObjectURL(new Blob([yaml], { type: "application/x-yaml" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${version}.yaml`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to export policy");
+    }
+  };
+
+  // UX-006: delete a profile (admin; server refuses the active one).
+  const handleDelete = async (version: string) => {
+    if (!window.confirm(`Delete policy profile "${version}"? This cannot be undone.`)) return;
+    setError(null);
+    try {
+      const res = await fetch(`/api/policies/${encodeURIComponent(version)}`, { method: "DELETE", headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(await errorMessage(res));
+      setSuccess(`Policy "${version}" deleted.`);
+      setTimeout(() => window.location.reload(), 1200);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete policy");
+    }
+  };
+
+  // UX-006: import a profile from an uploaded YAML file.
+  const handleImport = async (file: File) => {
+    setError(null);
+    setSuccess(null);
+    try {
+      const yaml = await file.text();
+      const res = await fetch("/api/policies/import", {
+        method: "POST",
+        headers: { ...getAuthHeaders(), "content-type": "application/x-yaml" },
+        body: yaml,
+      });
+      if (!res.ok) throw new Error(await errorMessage(res));
+      const data = await res.json() as { profile?: { version?: string } };
+      setSuccess(`Imported policy "${data.profile?.version ?? "profile"}".`);
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to import policy");
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="rounded-md border border-[#dfe5dc] bg-white p-4 dark:border-[#2a3a30] dark:bg-[#1a2620]">
@@ -284,6 +339,17 @@ export function PolicyStudio({ activePolicy, policies, switchPolicy }: PolicyStu
               Manage and select active PQC compliance standards. Telemetry rules are evaluated in real-time.
             </p>
           </div>
+          {canManage && (
+            <label className="ml-auto cursor-pointer rounded border border-[#dfe5dc] bg-[#f7f8f5] px-3 py-1.5 text-xs font-medium text-[#4d594f] hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:bg-[#0d1210] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]">
+              Import YAML…
+              <input
+                type="file"
+                accept=".yaml,.yml,application/x-yaml,text/yaml"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleImport(f); e.target.value = ""; }}
+              />
+            </label>
+          )}
         </div>
       </div>
 
@@ -350,17 +416,39 @@ export function PolicyStudio({ activePolicy, policies, switchPolicy }: PolicyStu
                 </ul>
               </div>
 
-              {!isActive && (
-                <button
-                  type="button"
-                  onClick={() => handleSwitch(p.version)}
-                  disabled={switching !== null}
-                  className="w-full h-9 rounded bg-[#17211c] text-white text-xs font-semibold hover:bg-[#25322b] transition-colors disabled:opacity-50 dark:bg-[#2a3a32] dark:hover:bg-[#3a4a42]"
-                  aria-label={`Activate profile ${p.version}`}
-                >
-                  {switching === p.version ? "Activating..." : "Activate Profile"}
-                </button>
-              )}
+              <div className="space-y-2">
+                {!isActive && (
+                  <button
+                    type="button"
+                    onClick={() => handleSwitch(p.version)}
+                    disabled={switching !== null}
+                    className="w-full h-9 rounded bg-[#17211c] text-white text-xs font-semibold hover:bg-[#25322b] transition-colors disabled:opacity-50 dark:bg-[#2a3a32] dark:hover:bg-[#3a4a42]"
+                    aria-label={`Activate profile ${p.version}`}
+                  >
+                    {switching === p.version ? "Activating..." : "Activate Profile"}
+                  </button>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleExport(p.version)}
+                    className="flex-1 h-8 rounded border border-[#dfe5dc] text-xs font-medium text-[#4d594f] hover:bg-[#edf1ea] dark:border-[#2a3a30] dark:text-[#6b7e6f] dark:hover:bg-[#22302a]"
+                    aria-label={`Export profile ${p.version} as YAML`}
+                  >
+                    Export YAML
+                  </button>
+                  {!isActive && role === "admin" && (
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(p.version)}
+                      className="flex-1 h-8 rounded border border-[#efb7a5] text-xs font-medium text-[#8b2d16] hover:bg-[#fff4ee] dark:border-[#f87171] dark:text-[#f87171] dark:hover:bg-[#2d1518]"
+                      aria-label={`Delete profile ${p.version}`}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           );
         })}
