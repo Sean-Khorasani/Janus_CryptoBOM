@@ -15,6 +15,14 @@ func (a *API) findingsDispatch(w http.ResponseWriter, r *http.Request) {
 		a.findingTimeline(w, r)
 		return
 	}
+	if strings.HasSuffix(r.URL.Path, "/comments") {
+		a.findingComments(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/assign") {
+		a.findingAssign(w, r)
+		return
+	}
 	a.findingStatus(w, r)
 }
 
