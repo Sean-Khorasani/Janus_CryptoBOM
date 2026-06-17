@@ -25,9 +25,10 @@ func (a *API) reportFindings(w http.ResponseWriter, r *http.Request) {
 	}
 	scanID := parts[0]
 	params := store.QueryParams{
-		Limit:  intParam(r, "limit", 200),
-		Offset: intParam(r, "offset", 0),
-		Search: r.URL.Query().Get("search"),
+		Limit:    intParam(r, "limit", 200),
+		Offset:   intParam(r, "offset", 0),
+		Search:   r.URL.Query().Get("search"),
+		TenantID: TenantFromContext(r.Context()),
 	}
 	findings, total, err := a.store.ReportFindings(r.Context(), scanID, params)
 	if err != nil {
